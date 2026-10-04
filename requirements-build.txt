@@ -1,0 +1,7 @@
+# Only needed to build the shipped application; not needed to fly.
+#
+#   .venv\Scripts\python -m pip install -r requirements-build.txt
+#   .\build.ps1
+
+pyinstaller>=6.11
+pillow>=10.0        # scripts/make_icons.py, which writes the window icon

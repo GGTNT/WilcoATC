@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <meta charset="utf-8" />
+
+    <!--
+        The simulator's own stylesheets and scripts. They are not decoration:
+        <ingame-ui> is an element these templates define, and without
+        ToolBarPanels.js the panel appears but can no longer be closed, moved
+        or resized.
+    -->
+    <link rel="stylesheet" href="/SCSS/common.css" />
+    <link rel="stylesheet" href="WilcoATC.css" />
+
+    <script type="text/javascript" src="/JS/coherent.js"></script>
+    <script type="text/javascript" src="/JS/common.js"></script>
+    <script type="text/javascript" src="/JS/dataStorage.js"></script>
+    <script type="text/javascript" src="/JS/buttons.js"></script>
+    <script type="text/javascript" src="/JS/Services/ToolBarPanels.js"></script>
+    <script type="text/javascript" src="/Pages/VCockpit/Instruments/Shared/BaseInstrument.js"></script>
+
+    <link rel="import" href="/templates/ingameUi/ingameUi.html" />
+    <link rel="import" href="/templates/ingameUiHeader/ingameUiHeader.html" />
+
+    <script type="text/javascript" src="WilcoATC.js"></script>
+</head>
+
+<body class="border-box">
+    <ingamepanel-custom>
+        <!--
+            panel-id MUST match the id in InGamePanels/wilcoatc.xml, or the
+            toolbar button opens nothing.
+
+            The ingameUiFrame class is the simulator's own: it provides the
+            frame, the title bar and the drag handles. It is kept, so the
+            panel moves, docks and closes like every other one in the toolbar.
+        -->
+        <ingame-ui id="WilcoATC" panel-id="PANEL_WILCOATC" title="WILCO ATC"
+                   content-fit="true" class="ingameUiFrame panelInvisible"
+                   min-width="340" min-height="600">
+
+            <div class="wa" id="wa">
+
+                <!-- ============================================ THE RADIO
+                     What you have dialled and who answers on it, which is
+                     what a pilot opens the panel to read. The active
+                     frequency is the largest thing here; standby sits beside
+                     it with the swap between them, the way the radio stack
+                     lays them out. -->
+                <div class="wa-radio">
+                    <div class="wa-active">
+                        <div class="wa-label">
+                            <span class="wa-dot" id="wa-dot"></span>COM1
+                        </div>
+                        <div class="wa-freq" id="wa-freq">---.---</div>
+                        <div class="wa-station" id="wa-station">No station</div>
+                    </div>
+                    <div class="wa-standby-block">
+                        <div class="wa-swap" id="wa-swap" title="Swap active and standby">
+                            <svg viewBox="0 0 24 24"><path d="M7 4 3 8l4 4V9h10V7H7V4zm10 16 4-4-4-4v3H7v2h10v3z"/></svg>
+                        </div>
+                        <div class="wa-label wa-label-right">STBY</div>
+                        <div class="wa-standby" id="wa-standby">---.---</div>
+                    </div>
+                </div>
+
+                <!-- ============================================ THE FIELD
+                     The four numbers asked for on every frequency change.
+                     ATIS is a key: tapping it plays the broadcast. -->
+                <div class="wa-chips">
+                    <div class="wa-chip wa-chip-key" id="wa-atis" title="Play the ATIS">
+                        <div class="wa-chip-label">ATIS</div>
+                        <div class="wa-chip-value" id="wa-atis-letter">–</div>
+                    </div>
+                    <div class="wa-chip">
+                        <div class="wa-chip-label">QNH</div>
+                        <div class="wa-chip-value" id="wa-qnh">–</div>
+                    </div>
+                    <div class="wa-chip wa-chip-wide">
+                        <div class="wa-chip-label">WIND</div>
+                        <div class="wa-chip-value" id="wa-wind">–</div>
+                    </div>
+                    <div class="wa-chip">
+                        <div class="wa-chip-label">SQWK</div>
+                        <div class="wa-chip-value" id="wa-squawk">–</div>
+                    </div>
+                </div>
+
+                <!-- ============================================ THE CLEARANCE
+                     Where the flight has got to, and the last thing it was
+                     cleared to do. Amber when the controller is waiting on
+                     you, which is the only time this line needs looking at. -->
+                <div class="wa-clear" id="wa-clear">
+                    <div class="wa-phase" id="wa-phase">Preflight</div>
+                    <div class="wa-cleared" id="wa-cleared"></div>
+                    <div class="wa-assigned" id="wa-assigned"></div>
+                </div>
+
+                <!-- ============================================ WHAT WAS SAID
+                     The last few transmissions, newest at the bottom, as a
+                     conversation: the controller on the left, you on the
+                     right, everybody else small and grey between. The whole
+                     transcript is the application's window. -->
+                <div class="wa-feed" id="wa-feed">
+                    <div class="wa-empty">Nothing heard yet</div>
+                </div>
+
+                <!-- ============================================ WHAT TO SAY
+                     The phrases a pilot needs next, from the phase of flight.
+                     Tapping one transmits it as though it had been spoken. -->
+                <div class="wa-replies" id="wa-replies"></div>
+
+                <!-- ============================================ SAYING IT
+                     Two ways to transmit, side by side, the way a chat is:
+                     type it and send it, or hold the microphone and say it.
+                     What is typed goes through the same parser as what is
+                     spoken, so the two are interchangeable mid-exchange.
+
+                     The microphone is held, not toggled: the key on the yoke
+                     works that way, so the finger expects it. -->
+                <div class="wa-status" id="wa-status"></div>
+                <div class="wa-compose" id="wa-compose">
+                    <input class="wa-input" id="wa-input" type="text"
+                           placeholder="Type to ATC…" autocomplete="off"
+                           spellcheck="false" maxlength="200" />
+                    <div class="wa-send" id="wa-send" title="Send">
+                        <svg viewBox="0 0 24 24"><path d="M3.4 20.4 21 12 3.4 3.6 3.4 10l12.6 2-12.6 2z"/></svg>
+                    </div>
+                    <div class="wa-mic" id="wa-mic" title="Hold to talk">
+                        <svg viewBox="0 0 24 24"><path d="M12 14a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v5a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.9V21h2v-3.1A7 7 0 0 0 19 11h-2z"/></svg>
+                    </div>
+                </div>
+
+                <!--
+                    The landing, a few seconds after the wheels touch. Over
+                    everything rather than instead of it, and gone with a tap
+                    or on its own after a minute: the pilot is on the rollout
+                    and about to be told to leave the runway.
+                -->
+                <div class="wa-landing" id="wa-landing">
+                    <div class="wa-landing-card">
+                        <div class="wa-landing-head">LANDING<span id="wa-landing-where"></span></div>
+                        <div class="wa-landing-rate" id="wa-landing-rate">0<small>fpm</small></div>
+                        <div class="wa-landing-grade" id="wa-landing-grade"></div>
+                        <div class="wa-landing-rows" id="wa-landing-rows"></div>
+                        <div class="wa-landing-foot">Tap to close</div>
+                    </div>
+                </div>
+
+                <!--
+                    The veil. It REPLACES the panel rather than being added to
+                    it: showing stale numbers next to an error message invites
+                    the reader to believe the numbers.
+                -->
+                <div class="wa-veil" id="wa-veil">
+                    <div class="wa-veil-mark">
+                        <svg viewBox="0 0 24 24"><path d="M12 2 1 21h22L12 2zm1 14h-2v2h2v-2zm0-7h-2v5h2V9z"/></svg>
+                    </div>
+                    <div class="wa-veil-title">WilcoATC is not running</div>
+                    <div class="wa-veil-text">
+                        Start it on this PC.<br />This panel reconnects on its own.
+                    </div>
+                    <div class="wa-veil-detail" id="wa-veil-detail"></div>
+                </div>
+
+            </div>
+        </ingame-ui>
+    </ingamepanel-custom>
+</body>
+
+</html>

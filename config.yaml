@@ -1,0 +1,179 @@
+audio:
+  input_device: null
+  output_device: null
+  volume: 1.0
+  capture_rate: 16000
+  max_transmission_s: 30.0
+  radio_effects: true
+  sidetone: false
+ptt:
+  mode: keyboard
+  key: $
+  joystick_index: 0
+  joystick_button: 16
+speech:
+  model: small.en
+  device: cpu
+  compute_type: int8
+  beam_size: 5
+  language: en
+  languages: []
+  detection_threshold: 0.85
+  min_confidence: 0.35
+voice:
+  voice_dir: data/voices
+  seed: wilcoatc
+  cache_size: 512
+  preload: false
+  engine: auto
+  gpu: false
+  hq_model: standard
+  hq_takes: 2
+delivery:
+  prosody:
+    enabled: true
+    address: true
+    closing: true
+    min_clauses: 2
+    min_body_clauses: 2
+    min_closing_words: 2
+    pace: true
+    short_words: 7
+    long_words: 28
+    quick: 0.94
+    measured: 1.07
+    jitter: 0.025
+  imperfections:
+    enabled: true
+    lead_in_ms: 60.0
+    lead_in_jitter_ms: 55.0
+    clip_chance: 0.18
+    clip_ms: 45.0
+    hesitation_chance: 0.05
+    mid_hesitation_chance: 0.06
+    breath_chance: 0.5
+    breath_db: -26.0
+    breath_max: 2
+    breath_pause_ms: 170.0
+    wind_db: -46.0
+    wind_gust: 0.6
+    wander_pitch: 1.5
+    wander_level_db: 1.2
+    wander_hz: 0.7
+    level: 1.0
+    carrier: 0.25
+  tone:
+    enabled: true
+    tilt_db: -6.0
+    presence_db: 0.0
+    speaker_db: 4.0
+    speaker_hz: 900.0
+    band_low: 330.0
+    band_high: 2700.0
+    noise_db: -8.0
+    room_db: -10.0
+atc:
+  dialect: auto
+  strict_icao_digits: true
+  spoken_numerals: true
+  proactive_handoff: true
+  handoff_grace_s: 25.0
+  abbreviate_callsigns: true
+  answer_unpublished: true
+  unpublished_radius_nm: 6.0
+  ground_control: false
+ai:
+  provider: none
+  model: ''
+  host: http://127.0.0.1:11434
+  api_key: ''
+  timeout_s: 12.0
+  min_confidence: 0.55
+ui:
+  language: en
+  numerals: true
+  landing_report: true
+toolbar:
+  enabled: true
+  port: 8787
+simbrief:
+  username: ''
+  load_on_start: false
+gsx:
+  enabled: true
+  bridge: auto
+  lvar_file: ''
+  control: true
+  voice: true
+  client: WilcoATC
+traffic:
+  enabled: true
+  from_simulator: true
+  in_simulator: true
+  in_simulator_limit: 12
+  parked: 12
+  fsltl_rules: ''
+  density: 1.0
+  seed: 0
+  callsigns: auto
+weather:
+  online: true
+  prefer_sim: true
+  refresh_s: 600.0
+  station_override: ''
+sim:
+  enabled: true
+  poll_interval_s: 0.25
+  reconnect_interval_s: 10.0
+  frequencies_from_sim: true
+  simconnect_dll: ''
+immersion:
+  enabled: true
+  copilot: true
+  copilot_voice: kokoro-gb_m_ovett
+  copilot_gender: auto
+  callouts: true
+  confirmations: false
+  checklists: true
+  radio_readbacks: true
+  cabin: true
+  cabin_voice: supertonic-es-F5
+  cabin_gender: auto
+  briefings: true
+  announcements: true
+  service: true
+  chimes: true
+  boarding_music: true
+  applause: true
+  realism: true
+  bilingual: true
+  recordings: false
+  recordings_dir: BEL
+  volume: 1.0
+  language: auto
+  airline: Eurowings
+  captain_name: Theo
+  interphone: true
+  verbosity: normal
+flight:
+  callsign: EWG87HX
+  aircraft_type: A320
+  departure: LEPA
+  destination: LOWI
+  cruise_altitude_ft: 30000
+  ifr: true
+network:
+  provider: none
+  refresh_s: 120.0
+  use_online_atis: true
+logging:
+  level: INFO
+  console_level: WARNING
+  directory: ''
+  max_bytes: 4000000
+  backups: 5
+  structured: true
+  radio: true
+  crew: true
+  keep_days: 14
+log_level: INFO

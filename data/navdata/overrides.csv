@@ -1,0 +1,20 @@
+# Local frequency corrections, applied on top of the OurAirports data.
+#
+# The source data is very good for tower, ground, clearance and approach, but
+# it has two known gaps:
+#   * some airports list only the VOR-collocated ATIS (below 118 MHz), which a
+#     pilot cannot tune in COM1, so no VHF ATIS survives the airband filter;
+#   * a handful of fields have a position missing entirely.
+#
+# Add a row here to fill a gap or correct a frequency. Rows are applied after
+# the CSV import, so an entry with the same ident+position+frequency replaces
+# the imported one. Delete a frequency by giving an empty mhz.
+#
+# action:  add     -- insert this station (or replace one on the same frequency)
+#          replace -- remove every existing station for ident+position, then add
+#          delete  -- remove every existing station for ident+position
+#
+# Verify anything you add against a current chart or the AIP for that country.
+# Frequencies change, and a confidently wrong frequency is worse than a gap.
+#
+ident,position,mhz,facility,description,action

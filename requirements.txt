@@ -1,0 +1,42 @@
+# --- core ---
+numpy>=1.26,<3
+scipy>=1.11
+PyYAML>=6.0
+requests>=2.31
+rich>=13.7
+
+# --- audio i/o ---
+sounddevice>=0.4.6
+soundfile>=0.12.1
+
+# --- speech to text (CPU, CTranslate2) ---
+faster-whisper>=1.0.3
+
+# --- text to speech ---
+# Kokoro-82M is what nearly every controller is cast from: one model, every
+# voice, and it is the reason they stopped sounding synthetic.
+kokoro-onnx>=0.4
+# Supertonic 3 covers the languages Kokoro has no speaker for -- German,
+# Dutch, and the French male -- in a voice that sounds like a person on the
+# same CPU. Ten speakers, thirty-one languages, one 400 MB model, downloaded
+# on request rather than as part of the first run.
+supertonic>=1.3
+# Piper is kept behind both. It is the fastest of the three, and it is the
+# only one the accent layer can reach, because it is the only one that takes
+# raw phonemes -- which is what a German controller's English is made of.
+# onnxruntime comes with all three.
+piper-tts>=1.7
+
+# --- push to talk ---
+pynput>=1.7.6
+
+# --- MSFS bridge (Windows only) ---
+SimConnect>=0.4.26 ; sys_platform == "win32"
+
+# --- the interface ---
+# The window is a native one drawn by pywebview, over Edge WebView2 on Windows.
+# fastapi carries the engine's state to it over loopback, and serves the same
+# panel to a browser or a tablet when you ask for that with `wilcoatc gui`.
+fastapi>=0.110
+uvicorn[standard]>=0.27
+pywebview>=5.1

@@ -1,0 +1,1004 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0e0e10">
+<title>WilcoATC</title>
+<link rel="icon" href="/logo.png">
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+
+<!-- The only decoration on the page. Everything else is information. -->
+<div class="ground-art" aria-hidden="true">
+  <svg width="520" height="170" viewBox="0 0 520 170" fill="none">
+    <path d="M20 150 C 150 60, 330 40, 500 24" stroke="#fff" stroke-opacity="0.22"
+          stroke-width="3" stroke-dasharray="2 11" stroke-linecap="round"></path>
+  </svg>
+</div>
+
+<div class="app">
+
+  <!-- ------------------------------------------------------- sidebar -- -->
+  <nav class="sidebar" aria-label="Sections">
+    <div class="brand">
+      <img class="mark" src="/logo.png" alt="" width="38" height="38">
+      <div class="name">WilcoATC</div>
+    </div>
+
+    <button class="nav-item" data-screen="comms" aria-current="page">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0"/><path d="M12 18v3"/></svg>
+      <span data-i18n="nav.comms">Comms</span>
+    </button>
+    <button class="nav-item" data-screen="airspace">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 4 3 6v14l6-2 6 2 6-2V4l-6 2-6-2z"/><path d="M9 4v14"/><path d="M15 6v14"/></svg>
+      <span data-i18n="nav.airspace">Airspace</span>
+    </button>
+    <button class="nav-item" data-screen="frequencies">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="9" width="18" height="11" rx="2"/><path d="M7 9 17 4"/><circle cx="8.5" cy="14.5" r="2.5"/><path d="M14 13h4"/><path d="M14 16.5h4"/></svg>
+      <span data-i18n="nav.frequencies">Frequencies</span>
+    </button>
+    <button class="nav-item" data-screen="settings">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1 1.55V21a2 2 0 1 1-4 0v-.09a1.7 1.7 0 0 0-1-1.55 1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.55-1H3a2 2 0 1 1 0-4h.09a1.7 1.7 0 0 0 1.55-1 1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.87.34H9a1.7 1.7 0 0 0 1-1.55V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1 1.55 1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.87V9a1.7 1.7 0 0 0 1.55 1H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.55 1z"/></svg>
+      <span data-i18n="nav.settings">Settings</span>
+    </button>
+
+    <div class="spacer"></div>
+
+    <div class="link-state is-down" id="link-state">
+      <div class="dot"></div>
+      <span id="link-text" data-i18n="link.connecting">connecting…</span>
+    </div>
+
+    <button class="whoami" id="edit-flight" data-i18n-title="flight.edit_title" title="Set callsign, aircraft and route">
+      <div class="initials" id="initials">—</div>
+      <div style="min-width:0">
+        <div class="written" id="callsign">—</div>
+        <div class="spoken" id="callsign-spoken"></div>
+      </div>
+    </button>
+  </nav>
+
+  <!-- ---------------------------------------------------------- main -- -->
+  <div class="main">
+
+    <header class="page-head">
+      <div class="titles">
+        <h1 id="page-title" data-i18n="comms.title">Communications</h1>
+        <p class="sub" id="page-sub" data-i18n="head.waiting">waiting for the simulator</p>
+      </div>
+      <div class="pill solid" id="mic-pill"><div class="dot"></div><span id="mic-text" data-i18n="mic.ready">Mic ready</span></div>
+      <div class="pill outline" id="tuned-pill">—</div>
+    </header>
+
+    <!-- The one thing that stops the radio working and that the pilot can
+         fix from here. It sits above every screen, on purpose: a component
+         that never downloaded used to announce itself only as a red line in
+         the transcript, once per transmission, in the middle of a flight. -->
+    <div class="alert" id="components-alert" hidden>
+      <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 8v5"/><path d="M12 16.5v.5"/><circle cx="12" cy="12" r="9"/></svg>
+      <div class="alert-body">
+        <b id="components-alert-title" data-i18n="alert.missing_title">Something has not downloaded</b>
+        <span id="components-alert-text"></span>
+      </div>
+      <button class="phrase primary" id="components-alert-fix" data-i18n="alert.download">Download</button>
+    </div>
+
+    <!-- ============================================== comms ========== -->
+    <section class="screen" id="screen-comms">
+
+      <div class="card col-main">
+        <div class="card-head">
+          <h2 data-i18n="comms.live">Live frequency</h2>
+          <div class="note" id="transcript-note" data-i18n="comms.transcript">transcript</div>
+        </div>
+
+        <div class="banner" id="banner" hidden>
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M14.5 2.5 21.5 9.5 16 11.7 12.6 18.5 9.2 15.1 4 20.3 2.6 18.9 7.8 13.7 4.4 10.3 11.2 6.9z"/></svg>
+          <div id="banner-text"></div>
+        </div>
+
+        <ol class="transcript" id="transcript"></ol>
+
+        <div class="bay" id="traffic-bay">
+          <div class="bay-head">
+            <div class="label" data-i18n="comms.traffic">Other traffic</div>
+            <div class="note" id="traffic-count"></div>
+            <button class="bay-action" id="spawn-runway"
+                    data-i18n-title="comms.spawn_runway_why"
+                    title="Put an AI departure on the runway in use, lined up and waiting for takeoff">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M21 15.5v-1.4L14 10V5.4a2 2 0 0 0-4 0V10l-7 4.1v1.4l7-2v4.2l-2 1.5V21l4-1.2L16 21v-1.8l-2-1.5v-4.2l7 2z"/></svg>
+              <span data-i18n="comms.spawn_runway">Aircraft on the runway</span>
+            </button>
+          </div>
+          <div class="bay-strips" id="traffic-rows"></div>
+        </div>
+
+        <div class="phrases" id="phrases"></div>
+
+        <div class="compose">
+          <input id="say" type="text" autocomplete="off" spellcheck="false"
+                 data-i18n-placeholder="comms.say_placeholder"
+                 placeholder="type what you would say and press enter">
+          <button class="icon-button" id="send" data-i18n-title="comms.transmit" title="Transmit">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 3 10 14"/><path d="M21 3l-7 18-4-7-7-4z"/></svg>
+          </button>
+          <button class="ptt" id="ptt" data-i18n-title="comms.ptt" title="Push to talk">
+            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0"/><path d="M12 18v3"/></svg>
+          </button>
+        </div>
+        <div class="hint"><span data-i18n="comms.hold">Hold</span> <kbd id="ptt-key">`</kbd> <span data-i18n="comms.release">to transmit &middot; release to send</span></div>
+      </div>
+
+      <div class="col-side">
+        <div class="tiles">
+          <div class="tile dark">
+            <div class="value" id="tile-stations">—</div>
+            <div class="caption" data-i18n="comms.stations_in_range">Stations in range</div>
+          </div>
+          <div class="tile light">
+            <div class="value" id="tile-heard">—</div>
+            <div class="caption" data-i18n="comms.heard">Transmissions heard</div>
+          </div>
+        </div>
+
+        <div class="card tight">
+          <div class="card-head">
+            <div class="label" data-i18n="comms.active_station">Active station</div>
+            <div class="bars" id="signal" style="margin-left:auto"><i></i><i></i><i></i><i></i></div>
+          </div>
+          <div class="freq-big">
+            <div class="mhz" id="active-mhz">---.---</div>
+            <div class="pos" id="active-pos"></div>
+          </div>
+          <div class="with-dot is-off" id="active-who"><div class="dot"></div><div data-i18n="comms.nobody_here">nobody on this frequency</div></div>
+          <div class="rule"></div>
+          <div style="display:flex;align-items:center;gap:10px">
+            <div style="flex:1 1 auto;font-size:12.5px;color:var(--ink-3)" id="standby"><span data-i18n="comms.standby">Standby</span> &middot; <b style="color:var(--ink);font-variant-numeric:tabular-nums" id="standby-mhz">---.---</b></div>
+            <button class="icon-button small" id="swap" data-i18n-title="comms.swap" title="Tune the standby frequency">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8h13l-3-3"/><path d="M20 16H7l3 3"/></svg>
+            </button>
+          </div>
+        </div>
+
+        <div class="card tight">
+          <div class="card-head">
+            <div class="label" data-i18n="strip.title">Flight strip</div>
+            <div class="badge" id="phase-badge" style="margin-left:auto">—</div>
+          </div>
+          <div class="strip">
+            <div class="field"><div class="k" data-i18n="strip.callsign">Callsign</div><div class="v" id="strip-callsign">—</div></div>
+            <div class="field"><div class="k" data-i18n="strip.aircraft">Aircraft</div><div class="v" id="strip-type">—</div></div>
+            <div class="field"><div class="k" data-i18n="strip.squawk">Squawk</div><div class="v" id="strip-squawk">—</div></div>
+            <div class="field"><div class="k" data-i18n="strip.runway">Runway</div><div class="v" id="strip-runway">—</div></div>
+            <div class="field"><div class="k" data-i18n="strip.altitude">Altitude</div><div class="v" id="strip-altitude">—</div></div>
+            <div class="field"><div class="k" data-i18n="strip.assigned">Assigned</div><div class="v" id="strip-assigned">—</div></div>
+            <div class="field wide"><div class="k" data-i18n="strip.route">Route</div><div class="v" id="strip-route">—</div></div>
+          </div>
+        </div>
+
+        <div class="art" aria-hidden="true">
+          <svg viewBox="0 0 280 150" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="238" cy="36" r="18" stroke-dasharray="4 8"/>
+            <path d="M30 34c-6 0-10-4-10-9s5-9 11-8c2-7 13-7 15 0 6-1 11 3 11 8s-4 9-10 9z"/>
+            <path d="M196 126c-5 0-8-3-8-7s4-8 9-7c2-6 11-6 13 0 5-1 9 3 9 7s-3 7-8 7z"/>
+            <path d="M58 72 46 40c-2-5 4-9 8-5l28 26"/>
+            <path d="M46 85c0-10 22-17 56-17h110c24 0 42 8 46 17-4 9-22 16-46 16H102c-34 0-56-6-56-16z"/>
+            <path d="M240 74c8 3 15 8 18 11"/>
+            <circle cx="104" cy="82" r="4"/><circle cx="124" cy="82" r="4"/>
+            <circle cx="144" cy="82" r="4"/><circle cx="164" cy="82" r="4"/>
+            <circle cx="184" cy="82" r="4"/>
+            <path d="M136 100 100 132c-4.5 4.5 0 12 6.5 9.5L172 118"/>
+            <path d="M14 80h18M8 92h24"/>
+          </svg>
+        </div>
+      </div>
+    </section>
+
+    <!-- =========================================== airspace ========== -->
+    <section class="screen" id="screen-airspace" hidden>
+
+      <div class="card map-card">
+        <div class="map-surface">
+          <svg id="map" preserveAspectRatio="none" role="application" tabindex="0"
+               data-i18n-aria="map.aria"
+               aria-label="A map of the airspace. Drag to pan, scroll or use the arrow keys and plus and minus to move and zoom."></svg>
+          <!-- Close in, the airport in three dimensions, over the chart and
+               driven by it. The chart underneath still takes the pointer. -->
+          <canvas id="map3d" class="map3d" hidden></canvas>
+          <div id="map3d-labels" class="map3d-labels" hidden></div>
+          <aside class="craft-card" id="craft-card" hidden></aside>
+
+          <div class="map-overlay top-left">
+            <button class="map-chip" data-layer="stations" aria-pressed="true" data-i18n="map.stations">Stations</button>
+            <button class="map-chip" data-layer="rings" aria-pressed="true" data-i18n="map.coverage">Coverage</button>
+            <button class="map-chip" data-layer="airports" aria-pressed="true" data-i18n="map.airports">Airports</button>
+            <button class="map-chip" data-layer="traffic" aria-pressed="true" data-i18n="map.traffic">Traffic</button>
+            <button class="map-chip" id="map-3d" aria-pressed="true"
+                    data-i18n="map.view3d" data-i18n-title="map.view3d_title"
+                    title="The airport in 3D when you zoom in. Drag with the right button, or with Shift, to turn and tilt it.">3D</button>
+          </div>
+
+          <div class="map-overlay bottom-left">
+            <div class="map-scale" id="map-scale">—</div>
+            <div class="map-scale soft" id="map-where"></div>
+          </div>
+
+          <div class="map-overlay bottom-right">
+            <button class="map-key" id="map-follow" aria-pressed="true"
+                    data-i18n-title="map.follow_title" title="Keep the map on the aircraft">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v3"/><path d="M12 19v3"/><path d="M2 12h3"/><path d="M19 12h3"/><circle cx="12" cy="12" r="8"/></svg>
+              <span class="only-read" data-i18n="map.follow">Follow the aircraft</span>
+            </button>
+            <button class="map-key" id="zoom-in" data-i18n-title="map.closer" title="Closer">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
+              <span class="only-read" data-i18n="map.zoom_in">Zoom in</span>
+            </button>
+            <button class="map-key" id="zoom-out" data-i18n-title="map.wider" title="Wider">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M5 12h14"/></svg>
+              <span class="only-read" data-i18n="map.zoom_out">Zoom out</span>
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div class="col-side">
+        <div class="card tight">
+          <div class="card-head">
+            <div class="label" id="metar-label" data-i18n="wx.title">Weather</div>
+            <div class="note" id="metar-time"></div>
+          </div>
+          <div class="metar">
+            <div class="cell"><div class="k" data-i18n="wx.wind">Wind</div><div class="v" id="wx-wind">—</div></div>
+            <div class="cell"><div class="k" data-i18n="wx.qnh">QNH</div><div class="v" id="wx-qnh">—</div></div>
+            <div class="cell"><div class="k" data-i18n="wx.visibility">Visibility</div><div class="v" id="wx-vis">—</div></div>
+            <div class="cell"><div class="k" data-i18n="wx.temperature">Temperature</div><div class="v" id="wx-temp">—</div></div>
+          </div>
+        </div>
+
+        <div class="card tight grow split">
+          <div class="card-head">
+            <h2 data-i18n="map.traffic">Traffic</h2>
+            <div class="note" id="airspace-traffic-count">—</div>
+          </div>
+          <div class="rows scroll" id="airspace-traffic"></div>
+        </div>
+
+        <div class="card tight grow split">
+          <div class="card-head">
+            <h2 data-i18n="comms.stations_in_range">Stations in range</h2>
+            <div class="note" id="airspace-count">—</div>
+          </div>
+          <div class="rows scroll" id="airspace-rows"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ======================================== frequencies ========== -->
+    <section class="screen" id="screen-frequencies" hidden>
+
+      <div style="flex:1.6 1 0;min-width:0;display:flex;flex-direction:column;gap:14px">
+        <div class="search">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--muted)" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+          <input id="freq-search" type="text" autocomplete="off" spellcheck="false"
+                 data-i18n-placeholder="freq.search"
+                 placeholder="an airport code, a frequency, or a position">
+        </div>
+        <div class="tabs" role="tablist">
+          <button class="tab" role="tab" data-scope="near" aria-selected="true" data-i18n="freq.near">Near you</button>
+          <button class="tab" role="tab" data-scope="search" aria-selected="false" data-i18n="freq.searched">Searched airport</button>
+        </div>
+        <div class="card" style="flex:1 1 auto;min-height:0;padding:14px 16px">
+          <div class="rows scroll" id="freq-rows"><div class="empty" data-i18n="freq.no_position">no position yet</div></div>
+        </div>
+      </div>
+
+      <div class="col-side">
+        <div class="card tight">
+          <div class="label" data-i18n="freq.active">Active</div>
+          <div class="freq-big">
+            <div class="mhz" id="fq-active-mhz">---.---</div>
+            <div class="pos" id="fq-active-pos"></div>
+          </div>
+          <div class="with-dot is-off" id="fq-active-who"><div class="dot"></div><div data-i18n="freq.nobody">nobody listening</div></div>
+          <div class="rule"></div>
+          <div class="label" data-i18n="comms.standby">Standby</div>
+          <div class="freq-big">
+            <div class="mhz" style="font-size:22px" id="fq-standby-mhz">---.---</div>
+          </div>
+        </div>
+
+        <div class="card tight grow">
+          <div class="card-head" style="align-items:flex-start">
+            <div class="atis-letter" id="atis-letter">—</div>
+            <div style="min-width:0">
+              <div style="font-size:14px;font-weight:800" id="atis-title">ATIS</div>
+              <div class="note" style="margin:0" id="atis-sub" data-i18n="atis.nothing">nothing broadcast here</div>
+            </div>
+            <button class="tune" id="play-atis" style="margin-left:auto" data-i18n="atis.play">Play</button>
+          </div>
+          <div class="atis-text" id="atis-text" data-i18n="atis.hint">Tune a field with an ATIS and its wording appears here.</div>
+          <div class="chips" id="atis-chips"></div>
+        </div>
+
+        <div class="art dark" aria-hidden="true">
+          <svg viewBox="0 0 230 235" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M139 46c9-9 9-23 0-32"/>
+            <path d="M153 56c15-15 15-37 0-52" opacity="0.5"/>
+            <path d="M91 46c-9-9-9-23 0-32"/>
+            <path d="M77 56c-15-15-15-37 0-52" opacity="0.5"/>
+            <circle cx="115" cy="30" r="8"/>
+            <path d="M115 38v19"/>
+            <path d="M70 78h90l-11-21H81z"/>
+            <path d="M63 110h104l-9-32H72z"/>
+            <path d="M94 80l-7 28M136 80l7 28" opacity="0.5"/>
+            <path d="M91 123h48l9 90H82z"/>
+            <rect x="108" y="168" width="14" height="45" rx="7"/>
+            <path d="M14 226h202" stroke-dasharray="1 10" stroke-width="4"/>
+          </svg>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============================================ settings ========== -->
+    <section class="screen" id="screen-settings" hidden>
+      <div class="settings-grid">
+        <!-- The three cards that hold one control each. Banded together and
+             given a row of their own: a row is as tall as the tallest card in
+             it and every other card in it is stretched to match, which is what
+             makes this screen read as bands rather than as a ragged pile, and
+             which turned these three into mostly-empty white boxes when the
+             audio card was beside them. Same tracks and the same gap as the
+             grid outside, so the columns of the two line up. -->
+        <div class="band">
+          <div class="card">
+            <div class="card-head"><h2 data-i18n="set.interface">Interface</h2></div>
+            <div class="field-block">
+              <div class="label" data-i18n="set.ui_language">Interface language</div>
+              <select id="set-ui-language"></select>
+              <div class="why" data-i18n="set.ui_language_why">
+                What this window is written in. It does not change what is spoken
+                on the radio, which follows the aeroplane.
+              </div>
+            </div>
+            <div class="setting">
+              <div class="text">
+                <div class="name" data-i18n="set.landing_report">Landing report</div>
+                <div class="why" data-i18n="set.landing_report_why">A few seconds after touchdown: the landing rate, how smooth it was, and the flight against its SimBrief schedule</div>
+              </div>
+              <button class="switch" id="set-landing-report" role="switch" aria-pressed="true"></button>
+            </div>
+            <div class="saved" id="saved-interface"></div>
+          </div>
+
+          <div class="card">
+            <div class="card-head"><h2 data-i18n="set.simbrief">SimBrief</h2></div>
+            <div class="field-block">
+              <div class="label" data-i18n="set.simbrief_user">Username or pilot ID</div>
+              <input id="set-simbrief" type="text" placeholder="yourname">
+              <div class="why" data-i18n="set.simbrief_why">
+                Fill the flight in from your latest plan instead of typing it twice.
+              </div>
+            </div>
+            <button class="phrase" id="simbrief-load" style="align-self:flex-start"
+                    data-i18n="set.simbrief_load">Load latest flight</button>
+            <div class="saved" id="saved-simbrief"></div>
+          </div>
+
+          <div class="card">
+            <div class="card-head"><h2 data-i18n="wx.title">Weather</h2></div>
+            <div class="setting">
+              <div class="text">
+                <div class="name" data-i18n="set.real_obs">Real observations</div>
+                <div class="why" data-i18n="set.real_obs_why">METARs from the NOAA Aviation Weather Center</div>
+              </div>
+              <button class="switch" id="set-wx-online" role="switch" aria-pressed="true"></button>
+            </div>
+            <div class="setting">
+              <div class="text">
+                <div class="name" data-i18n="set.sim_wins">Simulator wins</div>
+                <div class="why" data-i18n="set.sim_wins_why">Custom weather in the sim has to match the ATIS</div>
+              </div>
+              <button class="switch" id="set-wx-sim" role="switch" aria-pressed="true"></button>
+            </div>
+            <div class="saved" id="saved-weather"></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><h2 data-i18n="set.audio">Audio</h2></div>
+          <div class="field-block">
+            <div class="label" data-i18n="set.microphone">Microphone</div>
+            <select id="set-input"></select>
+          </div>
+          <div class="field-block">
+            <div class="label" data-i18n="set.output">Output</div>
+            <select id="set-output"></select>
+          </div>
+          <div class="setting">
+            <div class="text">
+              <div class="name" data-i18n="set.radio_effects">Radio effects</div>
+              <div class="why" data-i18n="set.radio_effects_why">The band-limited AM channel, not the raw voice</div>
+            </div>
+            <button class="switch" id="set-radio-effects" aria-pressed="true" role="switch"></button>
+          </div>
+          <div class="setting">
+            <div class="text">
+              <div class="name" data-i18n="set.volume">Volume</div>
+              <div class="why" id="volume-value">100%</div>
+            </div>
+            <input id="set-volume" type="range" min="0" max="150" step="5" style="width:130px">
+          </div>
+          <button class="phrase" id="sound-test" style="align-self:flex-start" data-i18n="set.sound_test">Test the audio path</button>
+          <div class="saved" id="saved-audio"></div>
+        </div>
+
+        <!-- The operator rather than the equipment. The radio itself is
+             measured and is not adjustable from a web page; what is offered
+             here is how much of the person holding the transmit bar comes
+             with it. -->
+        <div class="card operator">
+          <div class="card-head">
+            <h2 data-i18n="set.operator">The person on the radio</h2>
+            <button class="switch" id="set-operator" role="switch" aria-pressed="true"></button>
+          </div>
+          <div class="why" data-i18n="set.operator_why">
+            A controller is somebody in a room, not a file being played. They
+            take a moment after keying up, they are never quite the same
+            loudness twice, and once in a while they say "uh".
+          </div>
+          <div class="setting">
+            <div class="text">
+              <div class="name" data-i18n="set.breathing">Breathing</div>
+              <div class="why" data-i18n="set.breathing_why">An audible breath in the gaps of a long clearance</div>
+            </div>
+            <button class="switch" id="set-breathing" role="switch" aria-pressed="true"></button>
+          </div>
+          <div class="setting">
+            <div class="text">
+              <div class="name" data-i18n="set.wind">Weather behind them</div>
+              <div class="why" data-i18n="set.wind_why">Wind gusting under the voice, the way an open tower cab sounds</div>
+            </div>
+            <button class="switch" id="set-wind" role="switch" aria-pressed="true"></button>
+          </div>
+          <div class="setting">
+            <div class="text">
+              <div class="name" data-i18n="set.hesitation">Hesitation</div>
+              <div class="why" data-i18n="set.hesitation_why">The occasional "uh" before the callsign. Rare on purpose.</div>
+            </div>
+            <button class="switch" id="set-hesitation" role="switch" aria-pressed="true"></button>
+          </div>
+          <div class="saved" id="saved-operator"></div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><h2 data-i18n="set.ptt">Push to talk</h2></div>
+          <div class="chips" id="ptt-modes">
+            <button class="chip" data-mode="keyboard" data-i18n="set.keyboard">Keyboard</button>
+            <button class="chip" data-mode="joystick" data-i18n="set.joystick">Joystick</button>
+            <button class="chip" data-mode="none" data-i18n="set.off">Off</button>
+          </div>
+          <div class="field-block" id="ptt-key-block">
+            <div class="label" data-i18n="set.key">Key</div>
+            <div style="display:flex;gap:8px;align-items:center">
+              <input id="set-ptt-key" type="text" style="flex:1 1 auto" placeholder="grave">
+              <button class="tune" id="rebind" data-i18n="set.press_a_key">Press a key…</button>
+            </div>
+            <div class="why" data-i18n="set.ptt_why">
+              Use one the simulator does not need. The panel's own button works either way.
+            </div>
+          </div>
+          <div class="field-block" id="ptt-stick-block" hidden>
+            <div class="label" data-i18n="set.controller">Controller</div>
+            <select id="set-joystick"></select>
+            <div class="label" data-i18n="set.button">Button</div>
+            <div style="display:flex;gap:8px;align-items:center">
+              <input id="set-joystick-button" type="number" min="0" step="1"
+                     style="flex:1 1 auto">
+              <button class="tune" id="rebind-button"
+                      data-i18n="set.press_a_button">Press a button…</button>
+            </div>
+            <div class="why" data-i18n="set.button_why">
+              Press the one you want to talk on. Nobody publishes which number
+              a yoke calls its buttons.
+            </div>
+            <div class="why" id="joystick-known" hidden></div>
+          </div>
+          <div class="saved" id="saved-ptt"></div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><h2 data-i18n="set.on_frequency">On frequency</h2></div>
+          <div class="field-block">
+            <div class="label" data-i18n="set.spoken_language">Language</div>
+            <div class="readout" id="language-readout">English</div>
+            <div class="why" data-i18n="set.spoken_language_why">
+              Follows the aeroplane. English everywhere, plus the local language
+              over a state that works one. Speak either; the controller answers
+              in the one you used.
+            </div>
+          </div>
+          <div class="field-block">
+            <div class="label" data-i18n="set.phraseology">Phraseology</div>
+            <div class="chips" id="dialect-chips">
+              <button class="chip" data-dialect="auto" data-i18n="set.follow_region">Follow the region</button>
+              <button class="chip" data-dialect="faa">FAA</button>
+              <button class="chip" data-dialect="icao">ICAO</button>
+            </div>
+          </div>
+          <div class="setting">
+            <div class="text">
+              <div class="name" data-i18n="set.strict_digits">By-the-book digits</div>
+              <div class="why" data-i18n="set.strict_digits_why">"tree", "fower", "fife" as ICAO Annex 10 prescribes</div>
+            </div>
+            <button class="switch" id="set-strict-digits" role="switch" aria-pressed="false"></button>
+          </div>
+          <div class="setting">
+            <div class="text">
+              <div class="name" data-i18n="set.handoffs">Volunteer handoffs</div>
+              <div class="why" data-i18n="set.handoffs_why">Name the next frequency when you outfly this one</div>
+            </div>
+            <button class="switch" id="set-handoff" role="switch" aria-pressed="true"></button>
+          </div>
+          <div class="saved" id="saved-atc"></div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><h2 data-i18n="set.ground">Ground handling</h2></div>
+          <div class="setting">
+            <div class="text">
+              <div class="name" data-i18n="set.ground_watch">Watch the ramp</div>
+              <div class="why" data-i18n="set.ground_why">No taxi clearance while the tug or the jetway is still attached</div>
+            </div>
+            <button class="switch" id="set-gsx" role="switch" aria-pressed="true"></button>
+          </div>
+          <div class="setting">
+            <div class="text">
+              <div class="name" data-i18n="set.ground_call">Call the tug for you</div>
+              <div class="why" data-i18n="set.ground_call_why">An approved pushback calls one, through GSX's own menu</div>
+            </div>
+            <button class="switch" id="set-gsx-control" role="switch" aria-pressed="true"></button>
+          </div>
+          <div class="setting">
+            <div class="text">
+              <div class="name" data-i18n="set.ground_voice">Ask for services out loud</div>
+              <div class="why" data-i18n="set.ground_voice_why">"Ground crew, request pushback" — and boarding, fuel, catering or de-icing</div>
+            </div>
+            <button class="switch" id="set-gsx-voice" role="switch" aria-pressed="true"></button>
+          </div>
+          <div class="readout" id="ground-readout" data-i18n="set.ground_none">nothing connected</div>
+          <div class="saved" id="saved-gsx"></div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><h2 data-i18n="set.traffic">Other traffic</h2></div>
+          <div class="setting">
+            <div class="text">
+              <div class="name" data-i18n="set.traffic_on">Aircraft on frequency</div>
+              <div class="why" data-i18n="set.traffic_why">Airlines that belong at this field, each crew in its own language</div>
+            </div>
+            <button class="switch" id="set-traffic" role="switch" aria-pressed="true"></button>
+          </div>
+          <div class="field-block">
+            <div class="label" data-i18n="set.how_busy">How busy</div>
+            <div class="chips" id="density-chips">
+              <button class="chip" data-density="0.5" data-i18n="set.quiet">Quiet</button>
+              <button class="chip" data-density="1" data-i18n="set.normal">Normal</button>
+              <button class="chip" data-density="2" data-i18n="set.busy">Busy</button>
+            </div>
+          </div>
+          <div class="field-block">
+            <div class="label" data-i18n="set.traffic_callsigns">What they call themselves</div>
+            <div class="chips" id="callsign-chips">
+              <button class="chip" data-callsigns="auto" data-i18n="set.callsigns_auto">Airlines</button>
+              <button class="chip" data-callsigns="registration" data-i18n="set.callsigns_reg">Registrations</button>
+            </div>
+            <div class="why" data-i18n="set.traffic_callsigns_why">Airline callsigns are what a large field really carries; registrations are easier to follow, because you hear the letters rather than a name you have to know.</div>
+          </div>
+          <div class="saved" id="saved-traffic"></div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><h2 data-i18n="set.simulator">Simulator</h2></div>
+          <div class="setting">
+            <div class="text">
+              <div class="name" data-i18n="set.use_sim">Take the aircraft from the simulator</div>
+              <div class="why" data-i18n="set.use_sim_why">Off, the aeroplane sits where you put it and nothing moves</div>
+            </div>
+            <button class="switch" id="set-sim" role="switch" aria-pressed="true"></button>
+          </div>
+          <div class="with-dot is-off" id="sim-line"><div class="dot"></div><div data-i18n="set.not_connected">not connected</div></div>
+          <div class="metar" style="margin-top:4px">
+            <div class="cell"><div class="k" data-i18n="set.session">Session</div><div class="v" id="sim-session">00:00:00</div></div>
+            <div class="cell"><div class="k" data-i18n="set.source">Source</div><div class="v" id="sim-source" style="font-size:13px">—</div></div>
+          </div>
+          <div class="rule"></div>
+          <div class="label" data-i18n="set.understanding">Understanding</div>
+          <div style="font-size:12.5px;color:var(--ink-3)" id="understanding">—</div>
+          <div style="font-size:12.5px;color:var(--muted)" id="stats"></div>
+        </div>
+
+        <!-- What had to be downloaded, and whether it all works. Both of
+             these existed only as terminal commands, which is no use to a
+             pilot who installed this by double-clicking it. -->
+        <div class="card">
+          <div class="card-head"><h2 data-i18n="set.components">Components</h2></div>
+          <div class="why" data-i18n="set.components_why">
+            The voices, the nav database and the speech recogniser are too big
+            to ship with the program, so they are downloaded once. About
+            1.5 GB in total.
+          </div>
+          <!-- The sector data is CC BY-NC-SA and has to say whose it is
+               wherever it is used. -->
+          <div class="why" data-i18n="set.data_credits">Enroute sectors: VatGlasses contributors, CC BY-NC-SA 4.0.</div>
+          <div class="parts" id="parts"></div>
+          <div class="chips">
+            <button class="phrase primary" id="setup-open" data-i18n="set.get_components">Download what is missing</button>
+            <button class="phrase" id="doctor-open" data-i18n="set.diagnostics">Diagnostics</button>
+          </div>
+          <div class="saved" id="saved-components"></div>
+        </div>
+
+        <!-- The rest of the aeroplane. One switch decides whether any of it
+             happens; under it, four groups rather than one long list. Last
+             on the screen and the full width of the grid, so the four sit
+             side by side. As a single column this card was several screens
+             tall, which meant the cards beside it were a handful of settings
+             at the top of a column of white, and meant nobody scrolled far
+             enough to find the captain's name. -->
+        <div class="card immersion">
+          <div class="card-head">
+            <h2 data-i18n="set.immersion">Immersion</h2>
+            <button class="switch" id="set-immersion" role="switch" aria-pressed="false"></button>
+          </div>
+          <div class="why" data-i18n="set.immersion_why">
+            The rest of the aeroplane. A first officer in the other seat and a
+            cabin crew behind you, following the flight the same way the
+            controller does. None of it goes out on the radio, and none of it
+            changes what ATC says.
+          </div>
+
+          <div class="crew-groups">
+
+            <div class="crew-group">
+              <div class="label" data-i18n="set.first_officer">First officer</div>
+              <div class="setting">
+                <div class="text">
+                  <div class="name" data-i18n="set.copilot">Somebody in the other seat</div>
+                  <div class="why" data-i18n="set.copilot_why">Callouts, checklists and the numbers read back to you</div>
+                </div>
+                <button class="switch" id="set-copilot" role="switch" aria-pressed="true"></button>
+              </div>
+              <div class="field-block">
+                <div class="label" data-i18n="set.copilot_voice">Their voice</div>
+                <select id="set-copilot-voice"></select>
+              </div>
+              <div class="setting">
+                <div class="text">
+                  <div class="name" data-i18n="set.callouts">Standard callouts</div>
+                  <div class="why" data-i18n="set.callouts_why">Eighty knots, V one, rotate, positive rate, and the calls on the way down</div>
+                </div>
+                <button class="switch" id="set-callouts" role="switch" aria-pressed="true"></button>
+              </div>
+              <div class="setting">
+                <div class="text">
+                  <div class="name" data-i18n="set.confirmations">Confirms clearances</div>
+                  <div class="why" data-i18n="set.confirmations_why">Says the numbers back to you on the interphone, so two of you heard them</div>
+                </div>
+                <button class="switch" id="set-confirmations" role="switch" aria-pressed="true"></button>
+              </div>
+              <div class="setting">
+                <div class="text">
+                  <div class="name" data-i18n="set.checklists">Checklists</div>
+                  <div class="why" data-i18n="set.checklists_why">Called and answered at the points a flight actually runs them</div>
+                </div>
+                <button class="switch" id="set-checklists" role="switch" aria-pressed="true"></button>
+              </div>
+              <div class="setting">
+                <div class="text">
+                  <div class="name" data-i18n="set.readbacks">Works the radio for you</div>
+                  <div class="why" data-i18n="set.readbacks_why">Reads a clearance back if you have not, after a few seconds. Off unless you want it: the point of the radio is usually to work it yourself.</div>
+                </div>
+                <button class="switch" id="set-readbacks" role="switch" aria-pressed="false"></button>
+              </div>
+            </div>
+
+            <div class="crew-group">
+              <div class="label" data-i18n="set.cabin">Cabin</div>
+              <div class="setting">
+                <div class="text">
+                  <div class="name" data-i18n="set.cabin_crew">Cabin crew</div>
+                  <div class="why" data-i18n="set.cabin_crew_why">A purser and a cabin, on the address system</div>
+                </div>
+                <button class="switch" id="set-cabin" role="switch" aria-pressed="true"></button>
+              </div>
+              <div class="field-block">
+                <div class="label" data-i18n="set.cabin_voice">Their voice</div>
+                <select id="set-cabin-voice"></select>
+              </div>
+              <div class="setting">
+                <div class="text">
+                  <div class="name" data-i18n="set.briefings">Safety briefing</div>
+                  <div class="why" data-i18n="set.briefings_why">The demonstration during the taxi out, and the crew calls around it</div>
+                </div>
+                <button class="switch" id="set-briefings" role="switch" aria-pressed="true"></button>
+              </div>
+              <div class="setting">
+                <div class="text">
+                  <div class="name" data-i18n="set.announcements">Announcements</div>
+                  <div class="why" data-i18n="set.announcements_why">Welcome aboard, the cruise, the descent, and where you have arrived</div>
+                </div>
+                <button class="switch" id="set-announcements" role="switch" aria-pressed="true"></button>
+              </div>
+              <div class="setting">
+                <div class="text">
+                  <div class="name" data-i18n="set.service">Food and drink service</div>
+                  <div class="why" data-i18n="set.service_why">The trolley after the climb, and a call to the flight deck before it</div>
+                </div>
+                <button class="switch" id="set-service" role="switch" aria-pressed="true"></button>
+              </div>
+              <div class="setting">
+                <div class="text">
+                  <div class="name" data-i18n="set.chimes">Cabin chime</div>
+                  <div class="why" data-i18n="set.chimes_why">The two notes before an announcement, and the seatbelt sign</div>
+                </div>
+                <button class="switch" id="set-chimes" role="switch" aria-pressed="true"></button>
+              </div>
+              <div class="setting">
+                <div class="text">
+                  <div class="name" data-i18n="set.boarding_music">Boarding music</div>
+                  <div class="why" data-i18n="set.boarding_music_why">Plays quietly in the cabin while people get on, and stops at pushback</div>
+                </div>
+                <button class="switch" id="set-boarding-music" role="switch" aria-pressed="true"></button>
+              </div>
+              <div class="setting">
+                <div class="text">
+                  <div class="name" data-i18n="set.applause">Applause on a soft landing</div>
+                  <div class="why" data-i18n="set.applause_why">The cabin claps when you touch down gentler than 200 feet per minute</div>
+                </div>
+                <button class="switch" id="set-applause" role="switch" aria-pressed="true"></button>
+              </div>
+              <div class="setting">
+                <div class="text">
+                  <div class="name" data-i18n="set.crew_realism">Real crew voices</div>
+                  <div class="why" data-i18n="set.crew_realism_why">A little interphone and cabin speaker on their voices, and the odd um and er</div>
+                </div>
+                <button class="switch" id="set-crew-realism" role="switch" aria-pressed="true"></button>
+              </div>
+              <div class="setting">
+                <div class="text">
+                  <div class="name" data-i18n="set.bilingual">Announcements in English too</div>
+                  <div class="why" data-i18n="set.bilingual_why">A crew whose language is not English repeat each cabin announcement in English</div>
+                </div>
+                <button class="switch" id="set-bilingual" role="switch" aria-pressed="true"></button>
+              </div>
+            </div>
+
+            <div class="crew-group">
+              <div class="label" data-i18n="set.crew_manner">Who they are, and how much</div>
+              <div class="setting">
+                <div class="text">
+                  <div class="name" data-i18n="set.crew_volume">Cabin volume</div>
+                  <div class="why" id="crew-volume-value">80%</div>
+                </div>
+                <input id="set-crew-volume" type="range" min="0" max="120" step="5" style="width:130px">
+              </div>
+              <div class="field-block">
+                <div class="label" data-i18n="set.how_much">How much they talk</div>
+                <div class="chips" id="verbosity-chips">
+                  <button class="chip" data-verbosity="quiet" data-i18n="set.quiet">Quiet</button>
+                  <button class="chip" data-verbosity="normal" data-i18n="set.normal">Normal</button>
+                  <button class="chip" data-verbosity="chatty" data-i18n="set.chatty">Chatty</button>
+                </div>
+              </div>
+              <div class="field-block">
+                <div class="label" data-i18n="set.airline_name">What the crew call the airline</div>
+                <input id="set-airline" type="text" placeholder="Delta">
+                <div class="why" data-i18n="set.airline_why">Left empty, they take it from your callsign, and say "this flight" for a private registration.</div>
+              </div>
+              <div class="field-block">
+                <div class="label" data-i18n="set.captain_name">Your captain's name</div>
+                <input id="set-captain-name" type="text" placeholder="Whitfield">
+                <div class="why" data-i18n="set.captain_name_why">Left empty, one is cast from the registration, and the same aeroplane keeps the same captain.</div>
+              </div>
+              <div class="setting">
+                <div class="text">
+                  <div class="name" data-i18n="set.talk_to_crew">Talk to the crew</div>
+                  <div class="why" data-i18n="set.talk_to_crew_why">Say "cabin crew" or "ground crew" first, and they answer instead of the controller</div>
+                </div>
+                <button class="switch" id="set-interphone" role="switch" aria-pressed="true"></button>
+              </div>
+            </div>
+
+            <div class="crew-group">
+              <div class="label" data-i18n="set.recorded">Recorded announcements</div>
+              <div class="setting">
+                <div class="text">
+                  <div class="name" data-i18n="set.use_recordings">Use your own recordings</div>
+                  <div class="why" data-i18n="set.use_recordings_why">A real announcement beats a synthesised one. Where a recording exists for a moment, it is played instead.</div>
+                </div>
+                <button class="switch" id="set-recordings" role="switch" aria-pressed="true"></button>
+              </div>
+              <div class="field-block">
+                <div class="label" data-i18n="set.announcements_dir">Where they are</div>
+                <input id="set-recordings-dir" type="text" placeholder="Announcements">
+                <div class="why" data-i18n="set.announcements_dir_why">
+                  Leave it empty to use the folder beside WilcoATC, or point it at
+                  a pack you already have. The layout is the one the Fenix A320
+                  uses, so a pack made for that aeroplane works in any of them.
+                </div>
+              </div>
+              <div class="readout" id="announcements-readout" data-i18n="set.no_recordings">nothing in the folder yet</div>
+              <div class="chips">
+                <button class="phrase" id="announcements-rescan" data-i18n="set.look_again">Look again</button>
+              </div>
+            </div>
+
+          </div>
+
+          <div class="chips">
+            <button class="phrase" id="crew-test" data-i18n="set.crew_test">Hear the crew</button>
+          </div>
+          <div class="saved" id="saved-immersion"></div>
+        </div>
+      </div>
+    </section>
+
+  </div>
+</div>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+<!-- ------------------------------------------------------ landing report -->
+<!--
+  Not a dialog. It comes up while the aeroplane is still rolling out, and a
+  modal that took the page away from somebody reaching for the frequency list
+  would be the report getting in the way of the flight it is reporting on.
+  Filled in by paintLanding() in app.js.
+-->
+<aside class="landing-card" id="landing-card" role="status" aria-live="polite" hidden></aside>
+
+<!-- ------------------------------------------------------ startup notice -->
+<dialog id="notice">
+  <form method="dialog" class="notice">
+    <div style="display:flex;align-items:center;gap:14px">
+      <div class="mark" aria-hidden="true">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg>
+      </div>
+      <h2 data-i18n="notice.title">This is alpha software</h2>
+    </div>
+
+    <p data-i18n="notice.body">
+      WilcoATC is in alpha. You will run into bugs, and you will run into a
+      lot of them.
+    </p>
+
+    <div class="points">
+      <div data-i18n="notice.point1">The controller can say the wrong thing, or something that makes no sense at all.</div>
+      <div data-i18n="notice.point2">It can fail to understand you, or hear something you never said.</div>
+      <div data-i18n="notice.point3">Anything here can change or stop working from one version to the next.</div>
+    </div>
+
+    <label class="agree" for="notice-agree">
+      <input type="checkbox" id="notice-agree">
+      <span data-i18n="notice.agree">I know what I am getting into, and I am using this at my own risk.</span>
+    </label>
+
+    <menu style="display:flex;justify-content:flex-end;margin:0;padding:0">
+      <button value="continue" class="phrase primary" id="notice-continue" disabled data-i18n="notice.continue">
+        Continue
+      </button>
+    </menu>
+  </form>
+</dialog>
+
+<!-- ------------------------------------------------------ flight editor -->
+<dialog id="flight-dialog">
+  <form method="dialog" id="flight-form" style="display:flex;flex-direction:column;gap:12px;min-width:280px">
+    <!-- The import sits in the heading rather than at the foot with Save,
+         because it is not a way of confirming the form: it is a way of
+         filling it in, and it belongs where the eye lands before the first
+         field rather than after the last. -->
+    <div style="display:flex;align-items:center;gap:12px">
+      <h2 style="margin:0;font-size:18px;font-weight:800;flex:1 1 auto" data-i18n="flight.title">Flight</h2>
+      <button type="button" class="phrase" id="flight-simbrief" data-i18n="flight.simbrief">Import from SimBrief</button>
+    </div>
+    <p style="margin:0;font-size:12.5px;color:var(--muted)" data-i18n="flight.why">
+      The simulator supplies your position and radios. These are the details it
+      cannot tell us.
+    </p>
+    <div class="saved" id="saved-flight-simbrief"></div>
+    <label class="field-block"><span class="label" data-i18n="strip.callsign">Callsign</span>
+      <input name="callsign" type="text" placeholder="DAL1234 or N172SP"></label>
+    <label class="field-block"><span class="label" data-i18n="set.aircraft_type">Aircraft type</span>
+      <input name="aircraft_type" type="text" placeholder="B738"></label>
+    <label class="field-block"><span class="label" data-i18n="set.departure">Departure</span>
+      <input name="departure" type="text" placeholder="KJFK"></label>
+    <label class="field-block"><span class="label" data-i18n="set.destination">Destination</span>
+      <input name="destination" type="text" placeholder="KBOS"></label>
+    <label class="field-block"><span class="label" data-i18n="set.cruise">Cruise altitude</span>
+      <input name="cruise_altitude_ft" type="number" step="1000" placeholder="35000"></label>
+    <menu style="display:flex;gap:8px;justify-content:flex-end;margin:4px 0 0;padding:0">
+      <button value="cancel" class="phrase" data-i18n="flight.cancel">Cancel</button>
+      <button value="save" class="phrase primary" data-i18n="flight.save">Save</button>
+    </menu>
+  </form>
+</dialog>
+
+<!-- ------------------------------------------------------ first run / setup -->
+<!--
+  Shown by itself the first time the program is started with pieces missing,
+  and from the Components card at any time. It is not a form: there is one
+  decision on it, and the rest is watching three bars.
+-->
+<dialog id="setup-dialog">
+  <div class="setup">
+    <div style="display:flex;align-items:center;gap:14px">
+      <div class="mark" aria-hidden="true">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg>
+      </div>
+      <h2 id="setup-title" data-i18n="setup.title">Getting the pieces</h2>
+    </div>
+
+    <p id="setup-why" data-i18n="setup.why">
+      Three things are too big to ship inside the program and are downloaded
+      once: the voices your controllers speak with, the database of every
+      airport and frequency, and the model that hears you. About 1.5 GB, and
+      you only do this once.
+    </p>
+
+    <div class="steps" id="setup-steps"></div>
+
+    <div class="setup-note" id="setup-note" hidden></div>
+
+    <!--
+      The one option on the screen. Supertonic is 400 MB on top of the core
+      download and it replaces voices that already work, so it is asked for
+      rather than assumed -- but it has to be askable *here*, because the
+      pilot who installed this by double-clicking it has no command line to
+      pass a flag on.
+    -->
+    <label class="setup-extra">
+      <input type="checkbox" id="setup-all-voices">
+      <span data-i18n="setup.extra_voices">Add the extra controller voices</span>
+      <small data-i18n="setup.extra_voices_why">400 MB more. Gives the German, Dutch and French positions a real voice instead of the older synthesiser.</small>
+    </label>
+
+    <menu class="setup-actions">
+      <button class="phrase" id="setup-later" data-i18n="setup.later">Not now</button>
+      <button class="phrase" id="setup-cancel" hidden data-i18n="setup.cancel">Stop</button>
+      <button class="phrase primary" id="setup-start" data-i18n="setup.start">Download</button>
+      <button class="phrase primary" id="setup-done" hidden data-i18n="setup.done">Done</button>
+    </menu>
+  </div>
+</dialog>
+
+<!-- ------------------------------------------------------ diagnostics -->
+<dialog id="doctor-dialog">
+  <div class="setup">
+    <div style="display:flex;align-items:center;gap:14px">
+      <div class="mark" aria-hidden="true">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+      </div>
+      <h2 data-i18n="doctor.title">Diagnostics</h2>
+    </div>
+    <p data-i18n="doctor.why">
+      The same check <code>wilcoatc doctor</code> runs in a terminal: every
+      part of the program, whether it is there, and what it found.
+    </p>
+    <div class="checks" id="doctor-checks"></div>
+    <menu class="setup-actions">
+      <button class="phrase" id="doctor-copy" data-i18n="doctor.copy">Copy</button>
+      <button class="phrase" id="doctor-again" data-i18n="doctor.again">Check again</button>
+      <button class="phrase primary" id="doctor-close" data-i18n="doctor.close">Close</button>
+    </menu>
+  </div>
+</dialog>
+
+<script src="/i18n.js"></script>
+<script src="/airspace.js"></script>
+<script type="module" src="/airspace3d.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,543 @@
+/*
+ * The toolbar panel.
+ *
+ * A dark card in the register of the simulator's own 2024 interface: neutral
+ * surfaces a shade apart, hairline edges, one typeface, and colour only where
+ * it means something. Green is the microphone open. Amber is the controller
+ * waiting on you. Everything else is white at three strengths.
+ *
+ * It replaced a copy of the weather panel -- a blue ground, a white dial and
+ * two lozenges -- which borrowed the simulator's grammar so faithfully that
+ * the one thing you opened it for, the frequency, was a small label on the
+ * edge of a compass.
+ *
+ * Written for Coherent GT, the browser inside the simulator, whose version
+ * moves between builds: flexbox but no grid, margins rather than flex gaps,
+ * the four offsets rather than `inset`, and no web fonts, because a font that
+ * has to be fetched is a font that is missing.
+ */
+
+:root {
+  --wa-bg: #111317;
+  --wa-surface: rgba(255, 255, 255, 0.05);
+  --wa-surface-2: rgba(255, 255, 255, 0.09);
+  --wa-edge: rgba(255, 255, 255, 0.08);
+  --wa-ink: #f4f5f7;
+  --wa-ink-2: rgba(244, 245, 247, 0.66);
+  --wa-ink-3: rgba(244, 245, 247, 0.40);
+  --wa-live: #34d17a;
+  --wa-live-dim: rgba(52, 209, 122, 0.16);
+  --wa-wait: #f5b841;
+  --wa-wait-dim: rgba(245, 184, 65, 0.14);
+  --wa-radius: 14px;
+}
+
+* { box-sizing: border-box; }
+
+.wa {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  padding: 16px;
+  color: var(--wa-ink);
+  font-family: inherit;
+  font-size: 14px;
+  background: var(--wa-bg);
+  overflow: hidden;
+}
+
+.wa-label {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 1.4px;
+  color: var(--wa-ink-3);
+  text-transform: uppercase;
+}
+.wa-label-right { text-align: right; }
+
+/* -------------------------------------------------------------- radio --- */
+
+.wa-radio {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: flex-start;
+  padding: 16px 16px 14px;
+  border-radius: var(--wa-radius);
+  background: var(--wa-surface);
+  border: 1px solid var(--wa-edge);
+}
+
+.wa-active { flex: 1 1 auto; min-width: 0; }
+
+/* Whether anybody answers on this frequency. A station is a steady dot; no
+   station is a hollow one, rather than a colour that means "error". */
+.wa-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin: 0 7px 1px 0;
+  border-radius: 50%;
+  border: 1.5px solid var(--wa-ink-3);
+  vertical-align: middle;
+}
+.wa-dot.is-on { background: var(--wa-ink); border-color: var(--wa-ink); }
+.wa-dot.is-live { background: var(--wa-live); border-color: var(--wa-live); }
+
+.wa-freq {
+  margin-top: 4px;
+  font-size: 38px;
+  font-weight: 600;
+  line-height: 1.05;
+  letter-spacing: -0.5px;
+  font-variant-numeric: tabular-nums;
+}
+.wa-freq.is-empty { color: var(--wa-ink-3); }
+
+.wa-station {
+  margin-top: 5px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--wa-ink-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.wa-station small {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--wa-ink-3);
+}
+
+.wa-standby-block {
+  flex: 0 0 auto;
+  margin-left: 12px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+}
+
+.wa-standby {
+  margin-top: 3px;
+  font-size: 17px;
+  font-weight: 600;
+  color: var(--wa-ink-2);
+  font-variant-numeric: tabular-nums;
+}
+
+.wa-swap {
+  width: 38px;
+  height: 38px;
+  margin-bottom: 10px;
+  border-radius: 12px;
+  background: var(--wa-surface-2);
+  border: 1px solid var(--wa-edge);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background-color 120ms ease;
+}
+.wa-swap svg { width: 20px; height: 20px; fill: var(--wa-ink-2); }
+.wa-swap:hover { background: rgba(255, 255, 255, 0.16); }
+.wa-swap:hover svg { fill: var(--wa-ink); }
+.wa-swap:active { background: rgba(255, 255, 255, 0.24); }
+.wa-swap.is-off { opacity: 0.35; cursor: default; }
+
+/* -------------------------------------------------------------- chips --- */
+
+.wa-chips {
+  flex: 0 0 auto;
+  display: flex;
+  margin-top: 10px;
+}
+
+.wa-chip {
+  flex: 1 1 0;
+  min-width: 0;
+  margin-left: 8px;
+  padding: 9px 10px 8px;
+  border-radius: 11px;
+  background: var(--wa-surface);
+  border: 1px solid var(--wa-edge);
+}
+.wa-chip:first-child { margin-left: 0; }
+.wa-chip-wide { flex: 2 1 0; }
+
+.wa-chip-label {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 1.2px;
+  color: var(--wa-ink-3);
+}
+
+.wa-chip-value {
+  margin-top: 3px;
+  font-size: 16px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-variant-numeric: tabular-nums;
+}
+
+.wa-chip-key { cursor: pointer; transition: background-color 120ms ease; }
+.wa-chip-key:hover { background: var(--wa-surface-2); }
+.wa-chip-key:active { background: rgba(255, 255, 255, 0.16); }
+.wa-chip-key .wa-chip-label:after {
+  content: " \25B6";
+  font-size: 8px;
+  letter-spacing: 0;
+}
+
+/* ---------------------------------------------------------- clearance --- */
+
+.wa-clear {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  margin-top: 10px;
+  padding: 9px 12px;
+  border-radius: 11px;
+  border: 1px solid var(--wa-edge);
+  min-height: 40px;
+}
+
+.wa-phase {
+  flex: 0 0 auto;
+  padding: 3px 9px;
+  border-radius: 999px;
+  background: var(--wa-surface-2);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  color: var(--wa-ink-2);
+}
+
+.wa-cleared {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin-left: 10px;
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.wa-assigned {
+  flex: 0 0 auto;
+  margin-left: 10px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--wa-ink-3);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The controller is waiting for you to say something. */
+.wa-clear.is-waiting {
+  border-color: rgba(245, 184, 65, 0.45);
+  background: var(--wa-wait-dim);
+}
+.wa-clear.is-waiting .wa-phase { background: var(--wa-wait); color: #1b1406; }
+
+/* --------------------------------------------------------------- feed --- */
+
+.wa-feed {
+  flex: 1 1 auto;
+  min-height: 90px;
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  overflow: hidden;
+}
+
+.wa-empty {
+  margin: auto;
+  font-size: 13px;
+  color: var(--wa-ink-3);
+}
+
+.wa-msg {
+  flex: 0 0 auto;
+  max-width: 88%;
+  margin-top: 8px;
+}
+
+.wa-msg-who {
+  margin: 0 2px 3px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--wa-ink-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.wa-msg-text {
+  padding: 8px 11px;
+  border-radius: 12px;
+  font-size: 13.5px;
+  line-height: 1.35;
+}
+
+/* The controller: the one you are reading for. */
+.wa-msg-atc { align-self: flex-start; }
+.wa-msg-atc .wa-msg-text {
+  background: var(--wa-surface-2);
+  border-top-left-radius: 4px;
+}
+
+/* You, read back to yourself. */
+.wa-msg-pilot { align-self: flex-end; }
+.wa-msg-pilot .wa-msg-who { text-align: right; }
+.wa-msg-pilot .wa-msg-text {
+  background: rgba(255, 255, 255, 0.92);
+  color: #15171b;
+  border-top-right-radius: 4px;
+}
+
+/* Everybody else on the frequency, and the crew: present, not competing. */
+.wa-msg-traffic { align-self: flex-start; max-width: 100%; }
+.wa-msg-traffic .wa-msg-text {
+  padding: 2px 2px;
+  font-size: 12px;
+  color: var(--wa-ink-3);
+}
+
+/* ------------------------------------------------------------ replies --- */
+
+.wa-replies {
+  flex: 0 0 auto;
+  display: flex;
+  flex-wrap: wrap;
+  margin-top: 6px;
+}
+
+.wa-reply {
+  flex: 0 0 auto;
+  margin: 6px 6px 0 0;
+  padding: 7px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--wa-edge);
+  background: var(--wa-surface);
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--wa-ink-2);
+  cursor: pointer;
+  transition: background-color 120ms ease, color 120ms ease;
+}
+.wa-reply:hover { background: var(--wa-surface-2); color: var(--wa-ink); }
+.wa-reply:active { background: rgba(255, 255, 255, 0.18); }
+.wa-reply.is-sent { color: var(--wa-ink); border-color: rgba(255, 255, 255, 0.4); }
+
+/* ------------------------------------------------------------ compose --- */
+
+/* One line above the composer for what the radio is doing: transmitting,
+   the controller speaking, a message on its way. Empty and collapsed the
+   rest of the time, so it never holds space for nothing. */
+.wa-status {
+  flex: 0 0 auto;
+  height: 0;
+  overflow: hidden;
+  margin-top: 8px;
+  font-size: 11.5px;
+  font-weight: 600;
+  line-height: 16px;
+  white-space: nowrap;
+  color: var(--wa-ink-3);
+}
+.wa-status.is-shown { height: 16px; }
+.wa-status.is-live { color: var(--wa-live); }
+
+.wa-compose {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  margin-top: 6px;
+  padding: 5px 5px 5px 14px;
+  border-radius: 999px;
+  background: var(--wa-surface-2);
+  border: 1px solid var(--wa-edge);
+  transition: border-color 120ms ease, background-color 120ms ease;
+}
+.wa-compose.is-focused { border-color: rgba(255, 255, 255, 0.34); }
+.wa-compose.is-live {
+  border-color: var(--wa-live);
+  background: var(--wa-live-dim);
+}
+
+.wa-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 36px;
+  padding: 0;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--wa-ink);
+  font-family: inherit;
+  font-size: 14px;
+}
+.wa-input::placeholder { color: var(--wa-ink-3); }
+
+/* Send: only there when there is something to send, so the microphone is
+   the one control on the line the rest of the time. */
+.wa-send {
+  flex: 0 0 auto;
+  display: none;
+  width: 36px;
+  height: 36px;
+  margin-left: 6px;
+  border-radius: 50%;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  background: var(--wa-ink);
+  transition: background-color 120ms ease;
+}
+.wa-send.is-shown { display: flex; }
+.wa-send svg { width: 17px; height: 17px; fill: #15171b; margin-left: 2px; }
+.wa-send:hover { background: #ffffff; }
+
+.wa-mic {
+  flex: 0 0 auto;
+  width: 44px;
+  height: 44px;
+  margin-left: 6px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  background: var(--wa-ink);
+  transition: background-color 120ms ease, transform 120ms ease;
+}
+.wa-mic svg { width: 22px; height: 22px; fill: #15171b; }
+.wa-mic:hover { background: #ffffff; }
+
+/* With text in the box, the microphone steps back beside the send key. */
+.wa-mic.is-quiet { background: rgba(255, 255, 255, 0.14); }
+.wa-mic.is-quiet svg { fill: var(--wa-ink-2); }
+
+/* Transmitting: the only green on the panel. */
+.wa-mic.is-live {
+  background: var(--wa-live);
+  transform: scale(1.08);
+  animation: wa-breathe 1.4s ease-in-out infinite;
+}
+.wa-mic.is-live svg { fill: #0a2816; }
+
+/* The controller speaking: the key steps back rather than lighting up. */
+.wa-mic.is-receiving { background: rgba(255, 255, 255, 0.14); }
+.wa-mic.is-receiving svg { fill: var(--wa-ink-2); }
+
+@keyframes wa-breathe {
+  0% { opacity: 1; }
+  50% { opacity: 0.8; }
+  100% { opacity: 1; }
+}
+
+/* ------------------------------------------------------------ landing --- */
+
+.wa-landing {
+  position: absolute;
+  top: 0; right: 0; bottom: 0; left: 0;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(10, 11, 14, 0.82);
+  cursor: pointer;
+}
+.wa-landing.is-shown { display: flex; }
+
+.wa-landing-card {
+  width: 100%;
+  padding: 22px 20px 16px;
+  border-radius: 18px;
+  background: #1a1d22;
+  border: 1px solid var(--wa-edge);
+  text-align: center;
+}
+
+.wa-landing-head {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 1.6px;
+  color: var(--wa-ink-3);
+}
+.wa-landing-head span { margin-left: 6px; }
+
+.wa-landing-rate {
+  margin-top: 10px;
+  font-size: 48px;
+  font-weight: 600;
+  letter-spacing: -1px;
+  font-variant-numeric: tabular-nums;
+}
+.wa-landing-rate small {
+  margin-left: 6px;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0;
+  color: var(--wa-ink-3);
+}
+
+.wa-landing-grade {
+  display: inline-block;
+  margin-top: 8px;
+  padding: 4px 12px;
+  border-radius: 999px;
+  background: var(--wa-surface-2);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.wa-landing-rows {
+  margin-top: 14px;
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--wa-ink-2);
+}
+
+.wa-landing-foot {
+  margin-top: 14px;
+  font-size: 11px;
+  color: var(--wa-ink-3);
+}
+
+/* --------------------------------------------------------------- veil --- */
+
+.wa-veil {
+  position: absolute;
+  top: 0; right: 0; bottom: 0; left: 0;
+  display: none;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 32px;
+  background: var(--wa-bg);
+  text-align: center;
+}
+.wa-veil.is-shown { display: flex; }
+
+.wa-veil-mark {
+  width: 52px;
+  height: 52px;
+  border-radius: 16px;
+  background: var(--wa-wait-dim);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.wa-veil-mark svg { width: 26px; height: 26px; fill: var(--wa-wait); }
+
+.wa-veil-title { margin-top: 16px; font-size: 17px; font-weight: 700; }
+.wa-veil-text { margin-top: 8px; font-size: 13px; line-height: 1.5; color: var(--wa-ink-2); }
+.wa-veil-detail { margin-top: 14px; font-size: 11px; color: var(--wa-ink-3); }

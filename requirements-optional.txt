@@ -1,0 +1,19 @@
+# Joystick / yoke push-to-talk button support
+pygame-ce>=2.4
+
+# The AI understanding layer, if you point it at the Claude API.
+# Not needed for the local Ollama provider, which is reached over plain HTTP,
+# and not needed at all if you leave ai.provider set to "none".
+anthropic>=1.0
+
+# Building the printed phrasebook with scripts/make_manual.py. Not needed to
+# fly; the PDF is a document, not part of the radio.
+fpdf2>=2.8
+
+# The voice-cloning tier: a controller cloned from a reference clip. Opt in
+# with voice.engine: chatterbox. It pulls in torch, which is why it is not in
+# the main requirements -- two gigabytes of model on top of a dependency the
+# CPU tier does not need. resemble-perth, its watermarker, still imports
+# pkg_resources, which setuptools removed; hence the pin.
+chatterbox-tts>=0.1.7
+setuptools<80

@@ -1,0 +1,61 @@
+# Preferential runway assignments.
+#
+# WHY THIS FILE EXISTS
+#
+# Most busy airports do not simply use the runway with the best headwind. They
+# have a preferential configuration driven by noise abatement, terrain, airspace
+# flow and the direction most instrument approaches are built for. San Francisco
+# lands west in calm wind, Heathrow lands west unless the easterly is strong,
+# Aspen lands one way and departs the other because of terrain.
+#
+# None of that is published in any open dataset. Runway selection therefore
+# falls back to the standard rule -- greatest headwind, longest hard surface --
+# which is correct airmanship but will sometimes disagree with what your home
+# field really does, most visibly in light or calm wind.
+#
+# Add a row for the fields you fly from and the ATIS, taxi and landing
+# clearances will all follow it.
+#
+# ident            ICAO identifier.
+# landing          Preferred landing runway ends, best first, separated by spaces.
+# departing        Preferred departure ends. Leave blank to reuse 'landing'.
+# max_tailwind_kt  Keep using the preference until the tailwind exceeds this
+#                  (5 kt is the usual operational limit, and 0 means 5).
+# max_crosswind_kt Optional. Likewise for the crosswind; 20 kt when absent.
+#                  Both limits count the gusts. Past either, the runway the
+#                  wind needs is used: a preference never overrides the wind.
+#
+# Example, for an airport that lands and departs west unless the easterly is
+# strong enough to matter:
+#
+#   KSFO,28R 28L,01L 01R,5
+#
+ident,landing,departing,max_tailwind_kt,max_crosswind_kt
+#
+# Seeded entries. Where each one comes from, and how sure it is:
+#
+# EBBR  Brussels preferential runway system (PRS): departures 25R, arrivals
+#       25L (and 25R); the 25s stop being preferential above 7 kt of
+#       tailwind or 20 kt of crosswind, gusts included. Source: Brussels
+#       Airspace and Traffic Control, "Preferential Runway System",
+#       batc.be; skeyes eAIP EB AD 2 EBBR. Daytime weekday configuration --
+#       the night and weekend schemes are not modelled.
+# EGLL  Heathrow "westerly preference": land and depart 27L/27R unless the
+#       easterly component is over 5 kt. Source: Heathrow Airport noise
+#       information. Runway alternation is not modelled.
+# EHAM  Schiphol's preference table (AIP Netherlands EHAM AD 2.21) could not
+#       be retrieved when this was written; 06 for landing and 36L for
+#       take-off is the combination Schiphol publishes as the one most used
+#       in the day (schiphol.nl, "Noise and runway combinations"). The 7 kt
+#       tailwind limit is the Dutch preferential system's -- check it.
+# LFPG  Charles de Gaulle lands on the outer runways (27R, 26L) and departs
+#       from the inner ones (27L, 26R), facing west by preference. The 5 kt
+#       tailwind figure is NOT verified against the French AIP.
+# KSFO  San Francisco "West Plan": arrivals 28L/28R, departures 01L/01R
+#       (the example above). The 5 kt figure is the usual operational limit,
+#       not a published one for SFO.
+EBBR,25L 25R,25R,7,20
+EGLL,27L 27R,27R 27L,5,
+EHAM,06,36L,7,20
+LFPG,27R 26L,27L 26R,5,
+KSFO,28L 28R,01L 01R,5,

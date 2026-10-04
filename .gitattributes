@@ -1,0 +1,2 @@
+*.bin binary
+*.COF text eol=lf

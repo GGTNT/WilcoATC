@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+     Icone de la barre d'outils : une tour de controle.
+
+     APLATS ET NON TRAITS, ET AUCUN ATTRIBUT fill. C'est la convention des icones de barre
+     d'outils du simulateur, relevee sur celles qui fonctionnent (FSLTL) : les formes sont
+     pleines et sans couleur declaree, et c'est le simulateur qui teinte l'icone selon l'etat
+     du bouton (repos, survol, panneau ouvert). Une icone dessinee au trait blanc ne suit pas
+     ces etats, et peut ne rien afficher du tout.
+
+     NI width NI height, seulement viewBox. Le bouton dimensionne l'icone lui-meme ; des
+     dimensions fixes l'empechent de le faire.
+-->
+<svg version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"
+     x="0px" y="0px" viewBox="0 0 64 64" style="enable-background:new 0 0 64 64;"
+     xml:space="preserve">
+
+  <!-- La vigie, evasee vers le haut comme toutes les tours de controle. -->
+  <polygon points="20,27 25,14 39,14 44,27"/>
+
+  <!-- Le fut, qui se resserre vers la base. -->
+  <polygon points="27.5,30 36.5,30 35,50 29,50"/>
+
+  <!-- L'assise. -->
+  <rect x="19" y="50" width="26" height="6"/>
+
+  <!-- Les ondes, de part et d'autre. C'est ce qui distingue une tour de controle d'un
+       batiment quelconque a la taille d'un bouton de barre d'outils. -->
+  <path d="M14.68 16 A20 20 0 0 0 14.68 36 L18.14 34 A16 16 0 0 1 18.14 18 Z"/>
+  <path d="M49.32 16 A20 20 0 0 1 49.32 36 L45.86 34 A16 16 0 0 0 45.86 18 Z"/>
+</svg>

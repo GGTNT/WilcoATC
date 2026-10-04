@@ -1,0 +1,22 @@
+# Descent floors, per field.
+#
+# WHY THIS FILE EXISTS
+#
+# An arrival is descended no lower than field elevation plus 3000 ft, or the
+# ground under the aircraft plus 2000 ft when the simulator reports it. That
+# is not enough in a valley: Innsbruck sits at 1900 ft with ridges at nine
+# thousand, and "field plus three thousand" is five thousand feet into rock.
+#
+# The real figure is the minimum sector altitude (MSA) printed on every
+# approach chart. No open dataset publishes it, so it is kept here by hand:
+# copy the highest MSA sector from your chart for the fields you fly to.
+#
+# ident     ICAO identifier.
+# floor_ft  The lowest altitude an arrival is descended to, in feet AMSL.
+# source    Where the figure came from (chart and date), for whoever checks.
+#
+# Example:
+#
+#   LOWI,10000,LOWI chart MSA sector (check your own chart)
+#
+ident,floor_ft,source

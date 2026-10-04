@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+     What puts the button in the toolbar.
+
+     The simulator does not read this file. It reads InGamePanels/wilcoatc.spb,
+     which is this compiled by the SDK's fspackagetool. The source is kept
+     because a compiled file nobody has the source of is a file nobody can
+     change: the id, the icon and the page the button opens all live here.
+
+     The Id MUST match the panel-id attribute on the <ingame-ui> element in
+     WilcoATC.html. They are the two halves of the same connection -- the
+     toolbar knows the button by this id and the page answers to it -- and a
+     mismatch is a button that opens an empty frame.
+
+     The icon name is the file name of the SVG in html_ui/icons/toolbar,
+     without the extension. It is shipped twice, in icons/toolbar and in
+     Textures/Menu/toolbar, because different simulator builds have looked in
+     each of them and the file is a kilobyte and a half.
+-->
+<SimBase.Document Type="AceXML" version="1,0">
+  <Descr>AceXML Document</Descr>
+  <SimGameConfiguration.InGamePanels>
+    <InGamePanel Id="PANEL_WILCOATC">
+      <Name>WilcoATC</Name>
+      <Icon>ICON_TOOLBAR_WILCOATC</Icon>
+      <PanelUrl>/InGamePanels/WilcoATC/WilcoATC.html</PanelUrl>
+    </InGamePanel>
+  </SimGameConfiguration.InGamePanels>
+</SimBase.Document>

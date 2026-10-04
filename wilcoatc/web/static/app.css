@@ -1,0 +1,2067 @@
+/*
+ * The panel.
+ *
+ * Monochrome on purpose. A cockpit already has colour and all of it means
+ * something, so a second screen that invents its own red and amber competes
+ * with the instruments. Everything here is black, white and grey; the only
+ * things allowed to stand out are the ones that are genuinely urgent.
+ *
+ * The layout is a white card on a near-black ground, which is also what makes
+ * it readable at a glance from a metre away on a tablet beside the yoke.
+ *
+ * No web fonts. This runs with no network in flight, so a font that has to be
+ * fetched would be a font that is missing exactly when it is needed.
+ */
+
+:root {
+  --ground: #0e0e10;
+  --card: #ffffff;
+  --ink: #141414;
+  --ink-2: #444444;
+  --ink-3: #555555;
+  --muted: #9a9a9a;
+  --muted-2: #6b6b6b;
+  --line: #ececec;
+  --line-2: #e0e0e0;
+  --wash: #f3f3f3;
+  --wash-2: #f5f5f5;
+  --field: #fafafa;
+  /* The map's own ground, a shade below the card it sits in. */
+  --surface: #f7f7f7;
+
+  --on-ground: rgba(255, 255, 255, 0.65);
+  --on-ground-line: rgba(255, 255, 255, 0.5);
+
+  --r-card: 20px;
+  --r-tile: 16px;
+  --r-control: 14px;
+  --r-chip: 999px;
+
+  /* The one colour in the interface. Reserved for a component that is
+     missing or a check that failed, which are the only things here a pilot
+     has to act on. */
+  --alarm: #b4342a;
+
+  --shadow-card: 0 16px 40px rgba(0, 0, 0, 0.5);
+  --shadow-tile: 0 12px 28px rgba(0, 0, 0, 0.4);
+
+  --sans: "Segoe UI Variable Display", "Segoe UI", Inter, -apple-system,
+          system-ui, "Helvetica Neue", Arial, sans-serif;
+
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+
+/* Several components below set their own display, which would otherwise beat
+   the browser's own rule for the hidden attribute and leave them on screen. */
+[hidden] { display: none !important; }
+
+html, body {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--ground);
+  font-family: var(--sans);
+  font-size: 14px;
+  color: var(--ink);
+  overflow: hidden;
+}
+
+button, input, select, textarea { font: inherit; color: inherit; }
+button { cursor: pointer; border: 0; background: none; }
+
+/* The dashed arc and the soft ellipses behind everything. They are the only
+   decoration, and they sit under a z-index so nothing has to think about them. */
+.ground-art {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background:
+    radial-gradient(60% 42% at 16% 104%, rgba(255,255,255,0.05), transparent 70%),
+    radial-gradient(52% 38% at 42% 108%, rgba(255,255,255,0.04), transparent 70%),
+    radial-gradient(38% 46% at 92% 6%, rgba(255,255,255,0.045), transparent 70%);
+}
+
+.ground-art svg { position: absolute; top: 18px; right: 44px; }
+
+/* ---------------------------------------------------------------- shell -- */
+
+.app {
+  position: relative;
+  z-index: 1;
+  height: 100%;
+  display: grid;
+  grid-template-columns: 236px minmax(0, 1fr);
+  gap: 24px;
+  padding: 28px;
+}
+
+.sidebar {
+  background: var(--card);
+  border-radius: 24px;
+  box-shadow: var(--shadow-card);
+  padding: 22px 16px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-height: 0;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 2px 8px 16px;
+}
+
+/* The logo carries its own ground, so the square is only there to round the
+   corners off it. */
+.brand .mark {
+  width: 38px;
+  height: 38px;
+  border-radius: 12px;
+  flex-shrink: 0;
+  object-fit: cover;
+  display: block;
+}
+
+.brand .name {
+  font-size: 18px;
+  font-weight: 800;
+  letter-spacing: -0.3px;
+}
+
+/* The two drawings at the foot of the side columns: an aeroplane on the radio
+   screen and a tower on the frequencies screen. They are decoration, so they
+   give way to the cards above them rather than competing for the height --
+   they keep a size when there is room and shrink when there is not. */
+.art {
+  flex: 0 1 auto;
+  min-height: 0;
+  height: 132px;
+  padding: 12px;
+  background: var(--wash-2);
+  color: var(--ink);
+  border-radius: var(--r-card);
+  box-shadow: var(--shadow-card);
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+}
+
+.art svg { width: auto; height: 100%; max-width: 100%; }
+
+/* The tower is drawn in white on black and stands on the ground, so it sits at
+   the bottom of its card rather than in the middle of it. */
+.art.dark {
+  background: var(--ink);
+  color: #fff;
+  height: 210px;
+  padding: 14px 12px 0;
+  place-items: end center;
+}
+
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 11px 14px;
+  border-radius: 12px;
+  color: var(--muted-2);
+  font-size: 14px;
+  font-weight: 600;
+  text-align: left;
+  transition: background 120ms ease, color 120ms ease;
+}
+
+.nav-item:hover { background: var(--wash); color: var(--ink); }
+
+.nav-item[aria-current="page"] {
+  background: var(--ink);
+  color: #fff;
+  font-weight: 700;
+}
+
+.nav-item[aria-current="page"]:hover { background: #000; }
+
+.spacer { flex: 1 1 auto; min-height: 8px; }
+
+.link-state {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: #f4f4f4;
+  border-radius: 12px;
+  padding: 10px 12px;
+  margin-bottom: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink-3);
+}
+
+.link-state .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--ink);
+  flex-shrink: 0;
+}
+
+.link-state.is-down .dot { background: #c9c9c9; }
+
+.whoami {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 8px;
+  width: 100%;
+  border-radius: 12px;
+  text-align: left;
+}
+
+.whoami:hover { background: var(--wash); }
+
+.whoami .initials {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: #f0f0f0;
+  display: grid;
+  place-items: center;
+  font-size: 13px;
+  font-weight: 800;
+  flex-shrink: 0;
+}
+
+.whoami .written { font-size: 13px; font-weight: 700; }
+.whoami .spoken {
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* --------------------------------------------------------------- main --- */
+
+.main {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.page-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.page-head .titles { flex: 1 1 260px; min-width: 0; }
+
+.page-head h1 {
+  margin: 0;
+  font-size: 25px;
+  font-weight: 800;
+  color: #fff;
+  letter-spacing: -0.4px;
+}
+
+.page-head .sub {
+  margin: 3px 0 0;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--on-ground);
+}
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border-radius: var(--r-chip);
+  padding: 9px 16px;
+  font-size: 12.5px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.pill.solid {
+  background: var(--card);
+  color: var(--ink);
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.4);
+}
+
+.pill.outline {
+  border: 1.5px solid var(--on-ground-line);
+  color: #fff;
+  padding: 8px 16px;
+  font-variant-numeric: tabular-nums;
+}
+
+.pill .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+  flex-shrink: 0;
+}
+
+/* A transmission in progress is the one thing that gets to pulse. */
+.pill.is-live .dot { animation: breathe 1.1s ease-in-out infinite; }
+
+@keyframes breathe {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.35; transform: scale(0.7); }
+}
+
+.screen {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  gap: 20px;
+}
+
+.screen[hidden] { display: none; }
+
+/* --------------------------------------------------------------- cards -- */
+
+.card {
+  background: var(--card);
+  border-radius: var(--r-card);
+  box-shadow: var(--shadow-card);
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+}
+
+.card.tight { padding: 18px 20px; }
+.card.dark { background: var(--ink); color: #fff; }
+
+.card-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.card-head h2 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 800;
+}
+
+.card-head .note {
+  margin-left: auto;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.label {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.8px;
+  color: var(--muted);
+  text-transform: uppercase;
+}
+
+.rule { height: 1px; background: var(--line); flex-shrink: 0; }
+
+.tile {
+  flex: 1 1 0;
+  border-radius: var(--r-tile);
+  padding: 14px 16px;
+  box-shadow: var(--shadow-tile);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.tile .value { font-size: 22px; font-weight: 800; }
+.tile .caption { font-size: 11.5px; font-weight: 600; color: #767676; }
+.tile.dark { background: var(--ink); color: #fff; }
+.tile.dark .caption { color: rgba(255, 255, 255, 0.7); }
+.tile.light { background: var(--card); color: var(--ink); }
+
+/* ---------------------------------------------------------- comms ------- */
+
+.col-main { flex: 1.6 1 0; min-width: 0; }
+.col-side {
+  width: 336px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-height: 0;
+}
+
+/* Cards in the side column keep the height their content needs; exactly one
+   of them takes what is left. Letting them all shrink squashed the weather
+   readout until its own grid spilled over the card below it. */
+.col-side > * { flex: 0 0 auto; }
+.col-side > .grow { flex: 1 1 auto; min-height: 120px; }
+/* Two lists sharing what is left, evenly. Sized from their content instead,
+   the long one takes everything and the short one is squeezed to a single
+   row -- which is what happened to the traffic beside the map. */
+.col-side > .split { flex: 1 1 0; min-height: 150px; }
+
+.tiles { display: flex; gap: 16px; }
+
+/* A missing download, said where it cannot be scrolled past. Uses the one
+   colour in the interface, which is reserved for exactly this. */
+.alert {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  background: var(--card);
+  border: 1.5px solid var(--alarm);
+  border-radius: var(--r-tile);
+  padding: 12px 14px;
+  font-size: 13px;
+  color: var(--ink-2);
+}
+
+.alert svg { flex-shrink: 0; color: var(--alarm); }
+.alert .alert-body { flex: 1 1 auto; min-width: 0; }
+.alert b { display: block; color: var(--alarm); font-size: 13.5px; }
+.alert button { flex: 0 0 auto; }
+
+.banner {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  background: var(--wash);
+  border-radius: 12px;
+  padding: 10px 14px;
+  font-size: 13px;
+  color: var(--ink-2);
+}
+
+.banner b { color: var(--ink); }
+.banner svg { flex-shrink: 0; }
+
+.transcript {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 2px;
+  margin: 0;
+  list-style: none;
+}
+
+.turn {
+  max-width: 76%;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.turn .who {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+  padding: 0 6px;
+}
+
+.turn .said {
+  border-radius: 4px 14px 14px 14px;
+  padding: 10px 14px;
+  font-size: 14px;
+  line-height: 1.45;
+  background: var(--wash);
+  color: #222;
+}
+
+.turn.from-atc { align-self: flex-start; }
+
+.turn.from-pilot { align-self: flex-end; }
+.turn.from-pilot .who { text-align: right; }
+.turn.from-pilot .said {
+  border-radius: 14px 4px 14px 14px;
+  background: var(--ink);
+  color: #fff;
+}
+
+/* Engine notes are neither side of the conversation, so they read as a note. */
+.turn.from-system {
+  align-self: center;
+  max-width: 88%;
+  text-align: center;
+}
+
+.turn.from-system .said {
+  background: none;
+  border: 1px dashed var(--line-2);
+  color: var(--muted-2);
+  border-radius: 10px;
+  font-size: 12.5px;
+  padding: 7px 12px;
+}
+
+.turn.is-error .said { border-color: var(--ink); color: var(--ink); }
+
+/* Traffic you overheard rather than took part in. Same side of the transcript
+   as the controller, because that is who is talking, but set back so a glance
+   still separates your own clearance from somebody else's. */
+.turn.is-traffic { max-width: 66%; }
+.turn.is-traffic .who { color: var(--muted-2); font-weight: 500; }
+.turn.is-traffic .said {
+  background: none;
+  border: 1px solid var(--line-2);
+  color: var(--muted-2);
+  font-size: 13px;
+  padding: 8px 12px;
+}
+
+/* Your own crew: the other seat, and the cabin. On the controller's side of
+   the transcript because it is somebody talking to you, but never dressed as
+   a transmission -- none of it went out on the radio, and a first officer's
+   callout read as a clearance would be the worst thing this feature could
+   do. So it is a quieter card with a rule down the leading edge, which is
+   the one shape nothing else in the transcript has. */
+.turn.is-crew { max-width: 72%; }
+.turn.is-crew .who { color: var(--muted-2); font-weight: 600; }
+.turn.is-crew .said {
+  background: var(--wash-2);
+  border-inline-start: 3px solid var(--muted);
+  border-radius: 4px 12px 12px 4px;
+  color: var(--ink-2);
+  font-size: 13px;
+}
+
+/* Right-to-left. The layout itself mirrors on its own -- it is flex and grid
+   all the way down -- so only the handful of places pinned to a physical side
+   need saying twice. */
+[dir="rtl"] .turn.from-pilot .who { text-align: left; }
+[dir="rtl"] .turn .said { border-radius: 14px 4px 14px 14px; }
+[dir="rtl"] .turn.from-pilot .said { border-radius: 4px 14px 14px 14px; }
+[dir="rtl"] .turn.is-crew .said { border-radius: 12px 4px 4px 12px; }
+
+/* A value the interface reports rather than one it offers to change. */
+.readout {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ink);
+  padding: 2px 0 4px;
+  /* One of these is a filesystem path, which has no spaces in it to break
+     at and is longer than the card. Without this it simply runs off the
+     side, and the folder somebody is trying to find is the half you cannot
+     see. */
+  overflow-wrap: anywhere;
+}
+
+.phrases { display: flex; gap: 8px; flex-wrap: wrap; }
+
+.phrase {
+  border: 1.5px solid var(--line-2);
+  color: var(--ink-2);
+  border-radius: var(--r-chip);
+  padding: 7px 14px;
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.phrase:hover { border-color: var(--ink); color: var(--ink); }
+
+.phrase.primary {
+  background: var(--ink);
+  border-color: var(--ink);
+  color: #fff;
+  font-weight: 700;
+}
+
+.phrase.primary:hover { background: #000; }
+
+.compose { display: flex; gap: 14px; align-items: center; }
+
+.compose input[type="text"] {
+  flex: 1 1 auto;
+  min-width: 0;
+  border: 1.5px solid var(--line-2);
+  border-radius: var(--r-control);
+  padding: 14px 16px;
+  font-size: 14px;
+  background: var(--field);
+  outline: none;
+}
+
+.compose input[type="text"]:focus { border-color: var(--ink); }
+
+.icon-button {
+  width: 48px;
+  height: 48px;
+  border-radius: var(--r-control);
+  background: #f2f2f2;
+  color: var(--ink);
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+}
+
+.icon-button:hover { background: var(--line-2); }
+.icon-button.small { width: 32px; height: 32px; border-radius: 10px; }
+
+.ptt {
+  width: 72px;
+  height: 72px;
+  border-radius: 50%;
+  background: var(--ink);
+  color: #fff;
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  box-shadow: 0 0 0 8px rgba(20, 20, 20, 0.1), 0 0 0 18px rgba(20, 20, 20, 0.04);
+  transition: transform 90ms ease, box-shadow 120ms ease;
+  touch-action: none;
+}
+
+.ptt:active, .ptt.is-keyed {
+  transform: scale(0.94);
+  box-shadow: 0 0 0 10px rgba(20, 20, 20, 0.18), 0 0 0 24px rgba(20, 20, 20, 0.07);
+}
+
+.hint { font-size: 12px; color: var(--muted); text-align: center; }
+
+kbd {
+  font: inherit;
+  font-weight: 700;
+  color: var(--ink-2);
+  background: #f2f2f2;
+  border-radius: 6px;
+  padding: 2px 8px;
+}
+
+.freq-big {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.freq-big .mhz {
+  font-size: 30px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.5px;
+}
+
+.freq-big .pos { font-size: 13px; font-weight: 800; color: #767676; }
+
+.with-dot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  color: var(--ink-3);
+}
+
+.with-dot .dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ink);
+  flex-shrink: 0;
+}
+
+.with-dot.is-off .dot { background: #d0d0d0; }
+
+/* Signal bars: how far away the station is, in four steps. */
+.bars { display: flex; align-items: flex-end; gap: 3px; }
+.bars i {
+  display: block;
+  width: 4px;
+  border-radius: 2px;
+  background: #e4e4e4;
+}
+.bars i:nth-child(1) { height: 6px; }
+.bars i:nth-child(2) { height: 10px; }
+.bars i:nth-child(3) { height: 14px; }
+.bars i:nth-child(4) { height: 18px; }
+.bars i.on { background: var(--ink); }
+
+.strip {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.strip .field { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.strip .field.wide { grid-column: span 2; }
+.strip .field .k {
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.6px;
+  color: var(--muted);
+  text-transform: uppercase;
+}
+.strip .field .v {
+  font-size: 15px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.badge {
+  background: #f2f2f2;
+  color: var(--ink);
+  border-radius: var(--r-chip);
+  padding: 4px 10px;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+/* ---------------------------------------------------------- airspace ---- */
+
+/* The card holds a inset surface rather than being one, so the map has a
+   margin of white around it the way a printed chart has. */
+.map-card {
+  flex: 1 1 0;
+  min-width: 0;
+  padding: 10px;
+  gap: 0;
+}
+
+.map-surface {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  border-radius: 14px;
+  overflow: hidden;
+  background: var(--surface);
+}
+
+.map-surface > svg { display: block; width: 100%; height: 100%; }
+
+/* The map itself is draggable, so the surface is a hand rather than an arrow
+   and becomes a closed one while it is being moved. Without the two states a
+   map you can throw across a continent looks exactly like a picture of one. */
+.map-surface > svg { cursor: grab; touch-action: none; }
+.map-surface > svg.is-dragging { cursor: grabbing; }
+.map-surface > svg:focus { outline: none; }
+.map-surface > svg:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: -2px;
+}
+
+/* An aeroplane on the map is a control: clicking one selects it, and the list
+   beside the map follows. It keeps its own pointer, so an aeroplane reads as
+   something you can press even though the map under it is something you
+   drag. */
+.map-surface .mark { cursor: pointer; }
+.map-surface .mark:focus { outline: none; }
+.map-surface .mark:focus-visible path,
+.map-surface .mark:focus-visible rect { stroke: var(--ink); stroke-width: 2.5; }
+
+/* Everything drawn as scenery -- coastlines, borders, airspace, coverage --
+   is not a target. Without this, dragging the map from a spot that happens to
+   have a country in it hits the outline rather than the surface. */
+.map-surface .regions,
+.map-surface .coverage,
+.map-surface .labels,
+.map-surface .scalebar,
+.map-surface .compass { pointer-events: none; }
+.map-surface > svg > path { pointer-events: none; }
+
+.map-overlay {
+  position: absolute;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.map-overlay.top-left { top: 14px; left: 14px; flex-wrap: wrap; }
+.map-overlay.bottom-left { bottom: 14px; left: 14px; }
+/* The second readout beside the scale: where the middle of the map is, or
+   that it is on the aeroplane. Quieter than the scale, because it answers a
+   question you ask less often. */
+.map-scale.soft { color: var(--muted-2); font-weight: 600; }
+.map-overlay.bottom-right { bottom: 14px; right: 14px; flex-direction: column; }
+
+/* Which layers are drawn. Filled is on, which is the way round every other
+   control in the panel reads. */
+.map-chip {
+  background: var(--card);
+  border: 0;
+  border-radius: var(--r-chip);
+  padding: 8px 15px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink-3);
+  box-shadow: 0 6px 14px rgba(0, 0, 0, 0.14);
+}
+
+.map-chip[aria-pressed="true"] {
+  background: var(--ink);
+  color: #fff;
+  font-weight: 700;
+  box-shadow: 0 6px 14px rgba(0, 0, 0, 0.2);
+}
+
+/* Zoom. Square keys rather than pills, because they are a pair of opposites
+   and a label on each would say the same word twice. */
+.map-key {
+  width: 38px;
+  height: 38px;
+  border: 0;
+  border-radius: 12px;
+  background: var(--card);
+  color: var(--ink);
+  box-shadow: 0 6px 14px rgba(0, 0, 0, 0.18);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* Following the aeroplane is a state, not an action, so the key stays lit
+   while it is on -- and goes out the moment you drag the map away, which is
+   how you find out that you have. */
+.map-key[aria-pressed="true"] { background: var(--ink); color: #fff; }
+
+/* How wide the map is, in the corner the design leaves free. A map without a
+   scale is a picture. */
+.map-scale {
+  background: var(--card);
+  border-radius: var(--r-chip);
+  padding: 6px 13px;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--ink);
+  box-shadow: 0 4px 10px rgba(0, 0, 0, 0.18);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The immersion card, switched off.
+ *
+ * Dimmed rather than hidden. A feature you cannot see is a feature nobody
+ * knows they have, and the point of this card is that somebody can read down
+ * it and decide whether they want any of it before turning it on. The
+ * switch at the top of the card stays at full strength, because it is the
+ * one control that still does something. */
+/* A card whose own switch is off. Dim rather than hidden: a feature you
+   cannot see is a feature nobody knows they have, and the point of these two
+   cards is that a pilot can read what they would be getting before they turn
+   it on. */
+.card.immersion.is-off > *:not(.card-head),
+.card.operator.is-off > *:not(.card-head) { opacity: 0.42; }
+.card.immersion.is-off .card-head h2,
+.card.operator.is-off .card-head h2 { opacity: 0.6; }
+.card.immersion .card-head { justify-content: space-between; }
+
+/* Named for the reader that needs it and the eye that does not. */
+.only-read {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+.rows { display: flex; flex-direction: column; gap: 2px; overflow-y: auto; min-height: 0; }
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 8px;
+  border-radius: 12px;
+  width: 100%;
+  text-align: left;
+}
+
+.row + .row { border-top: 1px solid var(--line); border-radius: 12px; }
+.row:hover { background: var(--wash); }
+
+.row .lead { min-width: 0; flex: 1 1 auto; }
+.row .lead .top { font-size: 13.5px; font-weight: 800; }
+.row .lead .bottom {
+  font-size: 11.5px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.row .trail { text-align: right; flex-shrink: 0; }
+.row .trail .top { font-size: 13px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.row .trail .bottom { font-size: 11.5px; color: var(--muted); }
+
+/* What the tower last told an aeroplane. Set in the ink rather than the
+   muted grey the line above it uses: it is the newest thing on the strip and
+   the reason to look at the strip at all. */
+.strip-card .told {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--ink-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The bay of strips under the transcript: one per aeroplane the controller is
+   working, side by side, scrolling sideways when there are more than fit. */
+.bay {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.bay-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.bay-head .note { margin: 0; margin-left: auto; }
+
+/* The one control in the bay. Filled, like the primary phrase under it: as
+   an outlined chip beside the count it read as a label and was not found. */
+.bay-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  align-self: center;
+  background: var(--ink);
+  border: 1.5px solid var(--ink);
+  color: #fff;
+  border-radius: var(--r-chip);
+  padding: 6px 13px;
+  font-size: 12.5px;
+  font-weight: 700;
+}
+
+.bay-action:hover { background: #000; }
+
+.bay-strips {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+
+.bay-strips .empty { padding: 6px 2px; }
+
+.strip-card {
+  flex: 0 0 auto;
+  min-width: 132px;
+  padding: 8px 11px;
+  border-radius: 12px;
+  background: var(--wash);
+  border-left: 3px solid transparent;
+}
+
+.strip-card .who {
+  font-size: 12.5px;
+  font-weight: 800;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.strip-card .doing {
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 2px;
+  white-space: nowrap;
+}
+
+/* On the frequency being listened to, so it can actually be heard. */
+.strip-card.is-here { border-left-color: var(--ink); background: var(--wash-2); }
+
+/* And in the simulator, so it can be looked for out of the window. */
+.strip-card.in-sim .who::after {
+  content: "";
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--ink);
+}
+
+/* On the frequency the pilot is listening to: these are the ones that can be
+   heard, so they are marked with a rule down the side rather than a fill,
+   which would fight with the tuned station above. */
+.row.is-tuned { background: var(--ink); }
+.row.is-tuned .lead .top,
+.row.is-tuned .trail .top { color: #fff; }
+.row.is-tuned .lead .bottom,
+.row.is-tuned .trail .bottom { color: rgba(255, 255, 255, 0.7); }
+
+.metar {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.metar .cell {
+  background: var(--wash);
+  border-radius: 12px;
+  padding: 10px 12px;
+}
+
+.metar .cell .k {
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.6px;
+  color: var(--muted);
+  text-transform: uppercase;
+}
+
+.metar .cell .v {
+  font-size: 15px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ------------------------------------------------------- frequencies ---- */
+
+.search {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--card);
+  border-radius: var(--r-control);
+  border: 1.5px solid var(--line-2);
+  padding: 11px 14px;
+}
+
+.search input {
+  flex: 1 1 auto;
+  min-width: 0;
+  border: 0;
+  outline: none;
+  background: none;
+  font-size: 14px;
+}
+
+.tabs { display: flex; gap: 8px; }
+
+.tab {
+  border-radius: var(--r-chip);
+  padding: 7px 16px;
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--on-ground);
+  border: 1.5px solid var(--on-ground-line);
+}
+
+.tab[aria-selected="true"] { background: var(--card); color: var(--ink); border-color: var(--card); }
+
+.group-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 4px 2px;
+}
+
+.group-head .name { font-size: 14px; font-weight: 800; }
+.group-head .meta { font-size: 11.5px; color: var(--muted); margin-left: auto; }
+
+.pos-tag {
+  width: 46px;
+  flex-shrink: 0;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.5px;
+  color: var(--ink);
+  background: #f2f2f2;
+  border-radius: 8px;
+  padding: 5px 0;
+  text-align: center;
+}
+
+.row.is-tuned .pos-tag { background: rgba(255, 255, 255, 0.2); color: #fff; }
+
+.tune {
+  border: 1.5px solid var(--line-2);
+  border-radius: var(--r-chip);
+  padding: 6px 14px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--ink-2);
+  flex-shrink: 0;
+}
+
+.tune:hover { border-color: var(--ink); color: var(--ink); }
+.row.is-tuned .tune { border-color: rgba(255, 255, 255, 0.4); color: #fff; }
+
+.atis-letter {
+  width: 44px;
+  height: 44px;
+  border-radius: 14px;
+  background: var(--ink);
+  color: #fff;
+  display: grid;
+  place-items: center;
+  font-size: 20px;
+  font-weight: 800;
+  flex-shrink: 0;
+}
+
+.atis-text {
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--ink-3);
+  overflow-y: auto;
+  min-height: 0;
+}
+
+/* ---------------------------------------------------------- settings ---- */
+
+.settings-grid {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  display: grid;
+  /* Never more than four columns, however wide the window is. The cards are
+     grouped into bands of similar height and the bands are three and four
+     cards long, so a fifth column splits a band across two rows and puts the
+     tall cards back beside the short ones. The max() is what caps it: once a
+     quarter of the width is over 320px it becomes the minimum track, and four
+     is all that fits. Below that the 320px floor takes over and the grid
+     drops to three columns, then two, then one. */
+  grid-template-columns:
+    repeat(auto-fit, minmax(max(320px, calc((100% - 60px) / 4)), 1fr));
+  gap: 20px;
+  align-content: start;
+  padding-bottom: 4px;
+  /* A row is as tall as the cards in it, never a share of what is left of the
+     window. Without this the rows divide the container height between them,
+     every card is given less than its content needs, and the overflow paints
+     out from under the card below -- which is what the settings screen did in
+     the desktop window, where there is room for three columns rather than
+     four and the cards are correspondingly taller. */
+  grid-auto-rows: min-content;
+}
+
+/* The cards are ordered in bands of similar content, because a row is as tall
+   as the tallest card in it and every other card in that row is stretched to
+   match -- which is what makes the screen read as bands rather than as a
+   ragged pile, and which only works while the cards in a row hold roughly the
+   same amount. The three that hold one control each get a row of their own.
+   A nested grid rather than pinning the next card to column 1: a definite
+   column position moves the auto-placement cursor, and every card after it
+   came out one slot further along, leaving a hole in the middle of each row.
+   The same tracks and the same gap as the grid outside, so the columns of the
+   two line up. */
+.settings-grid > .band {
+  grid-column: 1 / -1;
+  display: grid;
+  /* auto-fill rather than auto-fit: auto-fit collapses the track the third
+     card does not fill, and the three would then share the whole width and be
+     wider than every card in the rows below them. The track sizing is the
+     grid's own, so the two sets of columns line up. */
+  grid-template-columns:
+    repeat(auto-fill, minmax(max(320px, calc((100% - 60px) / 4)), 1fr));
+  gap: 20px;
+}
+
+/* The one card that does not fit a column. It carries four groups of
+   settings, and stacked they make a card taller than four screens; given the
+   full width of the grid -- and it is last, so it takes a row of its own --
+   the four groups sit side by side and the card is about as tall as the row
+   above it. Only where there is room: below this the grid is one or two
+   columns and the card is a column like any other. */
+@media (min-width: 1000px) {
+  .card.immersion { grid-column: 1 / -1; }
+}
+
+/* Each group inside it, as its own block. The card used to be one list of
+   switches with a rule every so often, which is readable in the way a wall of
+   text is readable -- nothing to catch the eye of somebody looking for the
+   one setting they came for. */
+.crew-groups {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(270px, 1fr));
+  gap: 14px;
+  align-items: start;
+}
+
+.crew-group {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  background: var(--wash);
+  border-radius: 14px;
+  padding: 14px 15px 15px;
+}
+
+.crew-group > .label:first-child {
+  margin: 0 0 2px;
+  color: var(--ink-3);
+}
+
+/* The switches inside a group sit on the group's own ground rather than on a
+   white card, so the rows that separate them are a shade of it. */
+.crew-group .setting + .setting { border-top: 1px solid var(--line); }
+.crew-group .setting { padding: 2px 0; }
+
+.setting {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 40px;
+}
+
+.setting .text { flex: 1 1 auto; min-width: 0; }
+.setting .text .name { font-size: 13.5px; font-weight: 700; }
+.setting .text .why { font-size: 11.5px; color: var(--muted); }
+
+.field-block { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+
+select, input[type="text"], input[type="number"] {
+  border: 1.5px solid var(--line-2);
+  border-radius: 10px;
+  background: var(--field);
+  padding: 9px 11px;
+  font-size: 13.5px;
+  outline: none;
+  min-width: 0;
+  max-width: 100%;
+}
+
+select:focus, input[type="text"]:focus, input[type="number"]:focus {
+  border-color: var(--ink);
+}
+
+.switch {
+  width: 44px;
+  height: 26px;
+  border-radius: var(--r-chip);
+  background: #e2e2e2;
+  padding: 3px;
+  flex-shrink: 0;
+  transition: background 130ms ease;
+}
+
+.switch::after {
+  content: "";
+  display: block;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+  transition: transform 130ms ease;
+}
+
+.switch[aria-pressed="true"] { background: var(--ink); }
+.switch[aria-pressed="true"]::after { transform: translateX(18px); }
+
+/* The knob slides toward the end of the track, and in Arabic, Hebrew and
+   Persian the end of the track is on the left. */
+[dir="rtl"] .switch[aria-pressed="true"]::after { transform: translateX(-18px); }
+
+/* The stock range control is the one blue thing the browser insists on. */
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--line-2);
+  outline: none;
+}
+
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--ink);
+  border: 3px solid #fff;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
+  cursor: pointer;
+}
+
+.chips { display: flex; gap: 8px; flex-wrap: wrap; }
+
+.chip {
+  border: 1.5px solid var(--line-2);
+  border-radius: var(--r-chip);
+  padding: 6px 13px;
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--ink-2);
+}
+
+.chip[aria-pressed="true"] {
+  background: var(--ink);
+  border-color: var(--ink);
+  color: #fff;
+}
+
+.saved {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  min-height: 16px;
+}
+
+.saved.is-warning { color: var(--ink); }
+
+/* A single transient line for the answers to actions -- a refused tune, a
+   frequency with nobody on it. It sits over the interface rather than in a
+   card, because the action that caused it can come from any screen. */
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: 26px;
+  transform: translate(-50%, 14px);
+  z-index: 20;
+  max-width: 620px;
+  background: var(--card);
+  color: var(--ink);
+  border-radius: var(--r-chip);
+  padding: 11px 20px;
+  font-size: 13px;
+  font-weight: 600;
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.55);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 160ms ease, transform 160ms ease;
+}
+
+.toast.is-shown { opacity: 1; transform: translate(-50%, 0); }
+
+/* ------------------------------------------------------- landing report -- */
+/*
+ * The card after touchdown. Monochrome like everything else: a hard landing
+ * is not something the pilot has to act on, so it gets a word rather than
+ * the alarm colour. The figure is the thing being looked for, so it is the
+ * biggest thing on the card by a distance.
+ */
+
+.landing-card {
+  position: fixed;
+  top: 22px;
+  right: 22px;
+  z-index: 25;
+  width: min(380px, calc(100vw - 32px));
+  max-height: calc(100vh - 44px);
+  overflow-y: auto;
+  background: var(--card);
+  color: var(--ink);
+  border-radius: var(--r-card);
+  padding: 20px 22px 18px;
+  box-shadow: var(--shadow-card);
+  opacity: 0;
+  transform: translateY(-12px);
+  transition: opacity 0.25s ease, transform 0.25s ease;
+}
+
+.landing-card.is-shown { opacity: 1; transform: none; }
+
+.landing-card .lr-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted-2);
+}
+
+.landing-card .lr-head span { flex: 1 1 auto; }
+
+.landing-card .lr-close {
+  border: 0;
+  background: var(--wash);
+  color: var(--ink-2);
+  width: 28px;
+  height: 28px;
+  border-radius: var(--r-chip);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.landing-card .lr-hero {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 10px 0 14px;
+}
+
+.landing-card .lr-rate {
+  font-size: 46px;
+  font-weight: 800;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+}
+
+.landing-card .lr-rate small {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--muted-2);
+  margin-inline-start: 4px;
+  letter-spacing: 0;
+}
+
+.landing-card .lr-grade {
+  margin-top: 6px;
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--ink-2);
+}
+
+.landing-card .lr-score {
+  text-align: end;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted-2);
+}
+
+.landing-card .lr-score b {
+  display: block;
+  font-size: 28px;
+  letter-spacing: 0;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+
+.landing-card .lr-meter {
+  height: 6px;
+  border-radius: var(--r-chip);
+  background: var(--wash);
+  overflow: hidden;
+  margin-bottom: 12px;
+}
+
+.landing-card .lr-meter i {
+  display: block;
+  height: 100%;
+  background: var(--ink);
+  border-radius: inherit;
+}
+
+.landing-card dl {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 7px 14px;
+  margin: 0;
+  font-size: 13px;
+}
+
+.landing-card dt { color: var(--muted-2); }
+.landing-card dd {
+  margin: 0;
+  text-align: end;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.landing-card h3 {
+  margin: 16px 0 8px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted-2);
+}
+
+.landing-card .lr-note {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--muted-2);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .landing-card { transition: none; }
+}
+
+/* --------------------------------------------------------------- dialogs -- */
+/*
+ * The browser's own dialog is a grey box with a hairline border, which reads
+ * as a page from another decade next to the cards. These are the same white
+ * card on the same dark scrim as everything else.
+ */
+
+dialog {
+  border: 0;
+  padding: 26px 28px;
+  border-radius: var(--r-card);
+  background: var(--card);
+  color: var(--ink);
+  box-shadow: 0 28px 70px rgba(0, 0, 0, 0.6);
+  max-width: min(520px, calc(100vw - 48px));
+}
+
+dialog::backdrop {
+  background: rgba(6, 6, 8, 0.72);
+  backdrop-filter: blur(2px);
+}
+
+dialog h2 {
+  margin: 0;
+  font-size: 19px;
+  font-weight: 800;
+  letter-spacing: -0.2px;
+}
+
+dialog p {
+  margin: 0;
+  font-size: 13.5px;
+  line-height: 1.55;
+  color: var(--ink-3);
+}
+
+/* The startup notice. Nothing on the page is reachable until it is answered,
+   so it says its piece, takes an acknowledgement, and gets out of the way. */
+.notice {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.notice .mark {
+  width: 44px;
+  height: 44px;
+  border-radius: 14px;
+  background: var(--ink);
+  color: #fff;
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+}
+
+.notice .points {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: var(--wash);
+  border-radius: 14px;
+  padding: 14px 16px;
+}
+
+.notice .points div {
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--ink-2);
+  padding-left: 16px;
+  position: relative;
+}
+
+.notice .points div::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 8px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+
+.agree {
+  display: flex;
+  align-items: flex-start;
+  gap: 11px;
+  cursor: pointer;
+  font-size: 13.5px;
+  font-weight: 600;
+  line-height: 1.45;
+  user-select: none;
+}
+
+.agree input {
+  appearance: none;
+  width: 20px;
+  height: 20px;
+  margin: 1px 0 0;
+  border: 2px solid var(--line-2);
+  border-radius: 6px;
+  flex-shrink: 0;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+
+.agree input:checked {
+  background: var(--ink);
+  border-color: var(--ink);
+}
+
+.agree input:checked::after {
+  content: "";
+  display: block;
+  width: 5px;
+  height: 10px;
+  margin: 1px 0 0 5px;
+  border: solid #fff;
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+
+.agree input:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+
+.phrase[disabled] {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.phrase[disabled]:hover { background: var(--ink); border-color: var(--ink); }
+
+/* ------------------------------------------------------------ states ---- */
+
+.empty {
+  padding: 18px 6px;
+  font-size: 13px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.scroll { overflow-y: auto; min-height: 0; }
+
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: #dcdcdc; border-radius: 999px; border: 3px solid transparent; background-clip: content-box; }
+::-webkit-scrollbar-track { background: transparent; }
+
+/* ------------------------------------------------------- narrow panes --- */
+/*
+ * The design is a 1440-wide desktop. On a tablet beside the yoke the side
+ * column has to go under the main one, and below that the sidebar becomes a
+ * row of icons, because a panel you cannot read is worse than no panel.
+ */
+
+@media (max-width: 1180px) {
+  .screen { flex-direction: column; }
+  .col-side { width: auto; flex-direction: row; flex-wrap: wrap; }
+  .col-side > * { flex: 1 1 260px; }
+  .col-side .art { display: none; }
+  .col-main { flex: 2 1 auto; min-height: 320px; }
+}
+
+@media (max-width: 900px) {
+  .app { grid-template-columns: 1fr; gap: 16px; padding: 16px; }
+  .sidebar {
+    flex-direction: row;
+    align-items: center;
+    gap: 4px;
+    padding: 10px 12px;
+    overflow-x: auto;
+  }
+  .brand { padding: 0 8px 0 0; }
+  .brand .name, .whoami .spoken, .link-state span { display: none; }
+  .nav-item { padding: 10px; }
+  .nav-item span { display: none; }
+  .spacer { min-height: 0; }
+  .link-state { margin: 0; }
+  .page-head h1 { font-size: 21px; }
+}
+
+/* ------------------------------------------------- components and setup -- */
+/*
+ * The three downloads, and the report on whether everything works.
+ *
+ * Monochrome like the rest, with one exception: a component that is missing
+ * or broken is the one thing on this page that is genuinely urgent, and it is
+ * allowed the only colour in the interface. Everything else -- present,
+ * working, switched off on purpose -- is told apart by weight and by whether
+ * the dot is filled, which reads at arm's length and survives being
+ * photographed for a bug report.
+ */
+
+.parts {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 2px 0 4px;
+}
+
+.part {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 0;
+  font-size: 13px;
+  border-bottom: 1px solid var(--line);
+}
+
+.part:last-child { border-bottom: 0; }
+.part .name { font-weight: 650; color: var(--ink); }
+.part .size { margin-left: auto; font-size: 12px; color: var(--muted); }
+
+.part .mark {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--ink);
+}
+
+.part.is-missing .mark {
+  background: transparent;
+  box-shadow: inset 0 0 0 2px var(--alarm);
+}
+
+.part.is-missing .name { color: var(--alarm); }
+
+/* The setup dialog. One decision and three bars. */
+.setup {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: min(430px, calc(100vw - 80px));
+}
+
+.setup .mark {
+  width: 44px;
+  height: 44px;
+  border-radius: 14px;
+  background: var(--ink);
+  color: #fff;
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+}
+
+.setup .steps {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  background: var(--wash);
+  border-radius: 14px;
+  padding: 16px;
+}
+
+.step .top {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.step .top .name { font-weight: 700; color: var(--ink); }
+.step .top .state { margin-left: auto; font-size: 12px; color: var(--muted); }
+.step.is-failed .top .state { color: var(--alarm); font-weight: 700; }
+
+.step .detail {
+  font-size: 11.5px;
+  color: var(--muted);
+  margin-top: 3px;
+  min-height: 14px;
+  /* A filename and a byte count, which can be longer than the box. */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.step .bar {
+  margin-top: 7px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--line-2);
+  overflow: hidden;
+}
+
+.step .bar i {
+  display: block;
+  height: 100%;
+  width: 0;
+  border-radius: 999px;
+  background: var(--ink);
+  transition: width 220ms ease;
+}
+
+/* Finished, and finished before we started, both read as "not the thing
+   currently happening" -- so they step back and let the running bar be the
+   only one at full weight. */
+.step.is-done .bar i,
+.step.is-skipped .bar i { background: var(--muted-2); }
+.step.is-failed .bar i { background: var(--alarm); }
+
+/* Work whose length nobody knows in advance: a model download that reports
+   nothing until it is finished. A bar that sat at zero for four minutes would
+   read as a hang, so this one sweeps instead. */
+.step.is-waiting .bar i {
+  width: 34% !important;
+  animation: sweep 1.4s ease-in-out infinite;
+}
+
+@keyframes sweep {
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(320%); }
+}
+
+.setup-note {
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--ink-3);
+  background: var(--wash);
+  border-radius: 12px;
+  padding: 12px 14px;
+}
+
+.setup-note.is-bad { color: var(--alarm); }
+
+/* The optional extra download. Laid out as a checkbox with the reason under
+   it rather than beside it, because the reason is the part that decides it
+   and a line of small print to the right of a tick box is not read. */
+.setup-extra {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 2px 10px;
+  align-items: center;
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--ink-2);
+}
+
+.setup-extra input { grid-row: 1; }
+.setup-extra small {
+  grid-column: 2;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--ink-3);
+}
+
+.setup-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin: 0;
+  padding: 0;
+}
+
+/* The diagnostics report. One row per check, and it has to be readable in a
+   screenshot pasted into a bug report, which is what it is mostly for. */
+.checks {
+  display: flex;
+  flex-direction: column;
+  max-height: min(52vh, 460px);
+  overflow-y: auto;
+  background: var(--wash);
+  border-radius: 14px;
+  padding: 4px 14px;
+}
+
+.check {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--line-2);
+}
+
+.check:last-child { border-bottom: 0; }
+
+.check .mark {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  margin-top: 5px;
+  flex-shrink: 0;
+  background: var(--ink);
+}
+
+.check.is-warn .mark { background: transparent; box-shadow: inset 0 0 0 2px var(--muted-2); }
+.check.is-off  .mark { background: #d0d0d0; }
+.check.is-error .mark { background: var(--alarm); }
+
+.check .body { min-width: 0; }
+.check .name { font-size: 13px; font-weight: 650; color: var(--ink); }
+.check.is-error .name { color: var(--alarm); }
+
+.check .detail {
+  font-size: 12px;
+  color: var(--ink-3);
+  line-height: 1.45;
+  margin-top: 2px;
+  /* Paths and METARs are long and must not push the dialog wider. */
+  overflow-wrap: anywhere;
+}
+
+/* ------------------------------------------------------- the 3D airport ---- */
+
+/* Over the chart and under the controls. It takes no pointer: the chart
+   underneath still does the dragging, the wheel and the picking, so the two
+   views are one map with one set of gestures. */
+.map3d {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  pointer-events: none;
+}
+
+.map3d-labels {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+/* A callsign and a level, over each aeroplane, the way the reference labels
+   its traffic: a white pill with black type, filled black when chosen. */
+.map3d-label {
+  position: absolute;
+  left: 0;
+  top: 0;
+  border: 0;
+  border-radius: var(--r-chip);
+  padding: 3px 10px;
+  background: #ffffff;
+  color: var(--ink);
+  font: 700 11px/1.3 inherit;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  box-shadow: 0 3px 8px rgba(0, 0, 0, 0.16);
+  pointer-events: auto;
+  cursor: pointer;
+}
+.map3d-label.is-chosen { background: var(--ink); color: #ffffff; }
+.map3d-label[hidden] { display: none; }
+
+/* The card for the aeroplane you clicked. */
+.craft-card {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  width: 300px;
+  /* Stops above the zoom keys in the corner below it. */
+  max-height: calc(100% - 180px);
+  overflow: auto;
+  background: #ffffff;
+  border-radius: 20px;
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.22);
+  padding: 18px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  z-index: 4;
+  color: var(--ink);
+}
+.craft-card[hidden] { display: none; }
+
+.craft-head { display: flex; align-items: flex-start; gap: 10px; }
+.craft-head .names { flex: 1 1 auto; min-width: 0; }
+.craft-callsign { font-size: 26px; font-weight: 800; letter-spacing: -0.5px; }
+.craft-spoken { font-size: 12.5px; color: var(--muted-2); }
+.craft-close {
+  border: 0;
+  background: #f2f2f2;
+  width: 30px;
+  height: 30px;
+  border-radius: 10px;
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.craft-tags { display: flex; gap: 6px; flex-wrap: wrap; }
+
+.craft-follow {
+  border: 1.5px solid var(--ink);
+  background: #ffffff;
+  color: var(--ink);
+  border-radius: var(--r-chip);
+  padding: 7px 14px;
+  font-size: 12.5px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.craft-follow.is-on { background: var(--ink); color: #ffffff; }
+.craft-tag {
+  background: #f2f2f2;
+  border-radius: var(--r-chip);
+  padding: 4px 10px;
+  font-size: 11px;
+  font-weight: 700;
+}
+.craft-tag.ink { background: var(--ink); color: #ffffff; }
+
+.craft-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 10px 8px;
+  background: #fafafa;
+  border-radius: 14px;
+  padding: 12px;
+}
+.craft-grid .k {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.craft-grid .v {
+  font-size: 14px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.craft-doing { font-size: 13px; font-weight: 700; }
+.craft-doing .told { color: var(--muted-2); font-weight: 600; }
+
+.craft-trip {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13.5px;
+  font-weight: 800;
+}
+.craft-trip .line { flex: 1 1 auto; height: 2px; background: #dcdcdc; }
+.craft-trip .soft { font-size: 11px; color: var(--muted); font-weight: 600; }
+
+/* The route, as a timeline: filled for passed, ringed for next, open for the
+   rest, and the destination as a black square flag like the reference's. */
+.craft-route {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding-left: 2px;
+}
+.craft-route::before {
+  content: "";
+  position: absolute;
+  left: 7px;
+  top: 10px;
+  bottom: 10px;
+  width: 2px;
+  background: #e2e2e2;
+}
+.craft-stop { position: relative; display: flex; align-items: center; gap: 12px; }
+.craft-stop .dot {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #ffffff;
+  border: 3px solid #d0d0d0;
+  box-sizing: border-box;
+  flex-shrink: 0;
+}
+.craft-stop.next .dot { border: 4px solid var(--ink); }
+.craft-stop.end .dot { border-radius: 4px; background: var(--ink); border: 0; }
+.craft-stop .what { font-size: 13px; font-weight: 700; }
+.craft-stop.next .what { font-weight: 800; }
+.craft-foot { font-size: 12px; color: var(--muted-2); }

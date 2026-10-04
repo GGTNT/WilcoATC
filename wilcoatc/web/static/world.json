@@ -1,0 +1,27 @@
+{
+ "version": 2,
+ "source": "Natural Earth (naturalearthdata.com), public domain",
+ "levels": [
+  {
+   "name": "coarse",
+   "file": "world-coarse.json",
+   "outlines": 265,
+   "points": 7270,
+   "size_kb": 92
+  },
+  {
+   "name": "fine",
+   "file": "world-fine.json",
+   "outlines": 667,
+   "points": 33544,
+   "size_kb": 558
+  },
+  {
+   "name": "detail",
+   "file": "world-detail.json",
+   "outlines": 3352,
+   "points": 252941,
+   "size_kb": 5165
+  }
+ ]
+}

@@ -1,14 +1,27 @@
-# Sorties de build .NET
-bin/
-obj/
+.venv/
+.venv.zip
+build/
+dist/
+__pycache__/
+*.pyc
+logs/
+out/
+bench/
+bench_run.log
+*.orig
+.pytest_cache/
+.write-test
 
-# Visual Studio
-.vs/
-*.user
-*.suo
+# Downloaded assets. Recreate with: python -m wilcoatc setup
+data/navdata/*.csv
+data/navdata/*.geojson
+data/navdata/VATSpy.dat
+data/navdata/nav.sqlite
+data/voices/
+data/models/
+data/metar_cache.json
 
-# Données OurAirports téléchargées localement (stretch) — ne pas versionner
-data/*.csv
-
-# Ne PAS ignorer les DLL SimConnect embarquées : elles sont nécessaires au build.
-!libs/*.dll
+# Local corrections are yours to keep, so these are tracked:
+!data/navdata/overrides.csv
+!data/navdata/preferred_runways.csv
+!data/navdata/minimum_altitudes.csv
