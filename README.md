@@ -29,8 +29,7 @@ ATC   Delta twelve thirty four, readback correct.
 > is a simulator add-on, so don't use it to prepare for real flights.
 
 This README is the overview. **The full user manual, covering every feature
-in detail, is in [`docs/MANUAL.md`](docs/MANUAL.md).** Developer notes and
-project conventions are in [`CLAUDE.md`](CLAUDE.md).
+in detail, is in [`docs/MANUAL.md`](docs/MANUAL.md).** Developer notes.
 
 ---
 
@@ -376,8 +375,7 @@ Some tests need the downloaded navigation data or voices. Run `setup` first.
 
 ## Contributing
 
-Issues and pull requests are welcome. Please read [`CLAUDE.md`](CLAUDE.md)
-first. It contains the project's rules, the most important of which are:
+Issues and pull requests are welcome. It contains the project's rules, the most important of which are:
 
 - **CPU first.** No mandatory GPU dependency, because the simulator is using the GPU.
 - **Pilots never type commands.** No user-facing message may tell a pilot to
