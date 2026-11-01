@@ -14,8 +14,15 @@ flies, which is what keeps the download a few hundred megabytes rather than
 three gigabytes of German and Polish for someone who only ever flies Kennedy.
 
     .venv\\Scripts\\python -m PyInstaller --noconfirm --clean wilcoatc.spec
+
+With ``WILCOATC_HQ=1`` in the environment -- which is what ``build.ps1 -HQ``
+does -- the same spec builds WilcoATC-HQ instead: the same program plus torch
+and Chatterbox, about a gigabyte more, so that a pilot can have the cloned
+controllers without a Python installation. The ordinary build leaves all of
+that out, and nobody who never ticks the box pays for it.
 """
 
+import os
 import re
 import sys
 from pathlib import Path
@@ -24,10 +31,13 @@ from PyInstaller.utils.hooks import (
     collect_data_files,
     collect_dynamic_libs,
     collect_submodules,
+    copy_metadata,
 )
 
 ROOT = Path(SPECPATH)  # noqa: F821 -- PyInstaller injects it
 WINDOWS = sys.platform == "win32"
+HQ = os.environ.get("WILCOATC_HQ", "") == "1"
+NAME = "WilcoATC-HQ" if HQ else "WilcoATC"
 
 # --- what ships alongside the code ----------------------------------------
 #
@@ -46,6 +56,22 @@ datas = [
     # floor. Without it the floor is field elevation plus 3000 ft, which in
     # the mountains is below the ridges.
     (str(ROOT / "wilcoatc" / "navdata" / "terrain_max.bin"), "wilcoatc/navdata"),
+    # Which interactive point is which door on each aircraft model, read
+    # beside integrations/doors.py. Without it no aeroplane's doors move.
+    (str(ROOT / "wilcoatc" / "integrations" / "doors.json"),
+     "wilcoatc/integrations"),
+    # Where each ground vehicle stands at the door it serves, read beside
+    # atc/servicelayout.py. Without it the vehicles go by fractions of the
+    # fuselage length.
+    (str(ROOT / "wilcoatc" / "atc" / "service_layout.json"), "wilcoatc/atc"),
+    (str(ROOT / "wilcoatc" / "atc" / "turnaround.json"), "wilcoatc/atc"),
+    # The first officer's checklists, one file per class of aeroplane, and
+    # the README a pilot writes their own from (atc/checklist_files.py).
+    (str(ROOT / "wilcoatc" / "atc" / "checklists"), "wilcoatc/atc/checklists"),
+    # Where each GSX passenger's walk is in its animation, read beside
+    # integrations/groundvehicles.py. Without it nobody is asked to walk.
+    (str(ROOT / "wilcoatc" / "integrations" / "walks.json"),
+     "wilcoatc/integrations"),
 ]
 
 # The airline telephony names do ship inside, as the fallback: build.ps1 only
@@ -88,6 +114,11 @@ binaries += collect_dynamic_libs("onnxruntime")   # the voices' engine
 binaries += collect_dynamic_libs("piper")         # espeakbridge
 binaries += collect_dynamic_libs("espeakng_loader")
 binaries += collect_dynamic_libs("av")            # audio decoding
+# Joystick push-to-talk: pygame-ce and its SDL. It used to arrive only
+# because the build environment happened to have it installed and
+# io.py imports it inside a function; a build made without it shipped a
+# program with no joystick at all, and said "pip install" to a pilot.
+binaries += collect_dynamic_libs("pygame")
 
 # CUDA is never used: the recogniser runs int8 on the CPU by design, so that
 # the program is not asking a pilot's graphics card for anything while the
@@ -113,6 +144,7 @@ hiddenimports += collect_submodules("uvicorn")
 hiddenimports += collect_submodules("pynput")
 hiddenimports += collect_submodules("piper")
 hiddenimports += collect_submodules("kokoro_onnx")
+hiddenimports += collect_submodules("pygame")
 
 # --- what stays out --------------------------------------------------------
 #
@@ -132,6 +164,57 @@ excludes = [
     "anthropic",                  # optional: only for the Claude provider
 ]
 
+# --- the HQ build: the cloning tier --------------------------------------
+#
+# What Chatterbox loads, measured by rendering one transmission and listing
+# sys.modules: torch, transformers and diffusers for the model; librosa --
+# and numba, soxr and scikit-learn behind it -- for its mel features; onnx
+# for s3tokenizer; and resemble-perth, the watermarker, which still imports
+# pkg_resources out of setuptools. Every one of those is excluded above for
+# the ordinary build and has to be let back in here.
+module_collection_mode = {}
+if HQ:
+    _needed = {"numba", "llvmlite", "librosa", "sklearn", "scikit_learn",
+               "soxr", "pooch", "joblib", "threadpoolctl", "lazy_loader",
+               "torch", "onnx", "transformers", "setuptools",
+               # PyInstaller's setuptools hook aliases setuptools' vendored
+               # copy of wheel, and refuses when wheel is excluded.
+               "wheel"}
+    excludes = [name for name in excludes if name not in _needed]
+    hiddenimports += [
+        "wilcoatc.audio.backends.chatterbox",
+        "pkg_resources",
+    ]
+    for package in ("chatterbox", "chatterbox_flash", "perth",
+                    "s3tokenizer", "conformer", "inflect"):
+        hiddenimports += collect_submodules(package)
+        datas += collect_data_files(package)
+    datas += collect_data_files("librosa")
+    # transformers and diffusers check the installed versions of what they
+    # depend on at import, through the packages' metadata, and refuse to
+    # start without it.
+    for package in ("torch", "torchaudio", "transformers", "diffusers",
+                    "tokenizers", "huggingface_hub", "safetensors", "regex",
+                    "tqdm", "numpy", "packaging", "filelock", "requests",
+                    "pyyaml", "librosa", "chatterbox-tts",
+                    "chatterbox-flash", "inflect", "resemble-perth",
+                    "s3tokenizer", "conformer", "einops", "omegaconf"):
+        try:
+            datas += copy_metadata(package)
+        except Exception:
+            pass
+    # The clips the cloned controllers are made from: open-licence speakers,
+    # with their attribution. Copied into the voice folder at setup.
+    datas.append((str(ROOT / "wilcoatc" / "audio" / "clones"),
+                  "wilcoatc/audio/clones"))
+    # Source as well as bytecode for the packages that read their own source
+    # at runtime -- torch's TorchScript, numba's jit under librosa -- which
+    # fail on a .pyc alone with "could not get source code".
+    module_collection_mode = {name: "pyz+py" for name in (
+        "torch", "torchaudio", "transformers", "diffusers", "librosa",
+        "chatterbox", "chatterbox_flash", "s3tokenizer", "perth",
+        "conformer")}
+
 a = Analysis(  # noqa: F821
     ["run_wilcoatc.py"],
     pathex=[str(ROOT)],
@@ -144,6 +227,7 @@ a = Analysis(  # noqa: F821
     excludes=excludes,
     noarchive=False,
     optimize=0,
+    module_collection_mode=module_collection_mode,
 )
 
 pyz = PYZ(a.pure)  # noqa: F821
@@ -281,5 +365,5 @@ coll = COLLECT(  # noqa: F821
     strip=False,
     upx=False,
     upx_exclude=[],
-    name="WilcoATC",
+    name=NAME,
 )

@@ -82,6 +82,7 @@ def _datatype(name: str, fallback: int) -> int:
 SIMCONNECT_DATATYPE_FLOAT64 = _datatype("FLOAT64", 4)
 SIMCONNECT_DATATYPE_STRING32 = _datatype("STRING32", 6)
 SIMCONNECT_DATATYPE_STRING64 = _datatype("STRING64", 7)
+SIMCONNECT_DATATYPE_STRING256 = _datatype("STRING256", 9)
 
 # Our own ids, unique inside this client only.
 _DEF_SEEN = 2461
@@ -141,6 +142,16 @@ _FIELDS: tuple[tuple[str, str, int], ...] = (
     # that cannot do that.
     ("ATC AIRLINE", "", SIMCONNECT_DATATYPE_STRING64),
     ("ATC FLIGHT NUMBER", "", SIMCONNECT_DATATYPE_STRING32),
+    # The container title, appended for the same reason. It is what the
+    # door table is matched on: a type says nothing about whether a model
+    # has doors that move, the title does.
+    ("TITLE", "", SIMCONNECT_DATATYPE_STRING256),
+    # Whether this object is the pilot's own aeroplane, appended last like
+    # the others. The pilot is in this list, and on 13 October, before
+    # their callsign or position was known, their own A321 was taken for a
+    # parked airliner and had two doors opened by this program. A
+    # callsign or a position can be missing; this cannot.
+    ("IS USER SIM", "bool", SIMCONNECT_DATATYPE_FLOAT64),
 )
 
 
@@ -185,6 +196,8 @@ class _ByTypeMessage(_Header):
         ("on_ground", ctypes.c_double),
         ("airline", ctypes.c_char * 64),
         ("flight_number", ctypes.c_char * 32),
+        ("title", ctypes.c_char * 256),
+        ("is_user", ctypes.c_double),
     ]
 
 
@@ -246,6 +259,8 @@ class Seen:
     # for an airliner, and the radio wants the second while the map and the
     # window want the first.
     registration: str = ""
+    # The simulator title: which model this is, for the doors.
+    title: str = ""
 
     @property
     def positioned(self) -> bool:
@@ -278,8 +293,11 @@ class SimAircraft:
         self._seen: dict[int, Seen] = {}
         self._polled_at = 0.0
         # The user's own aeroplane, which the simulator reports alongside the
-        # AI and which must never be treated as traffic.
+        # AI and which must never be treated as traffic: by callsign, and
+        # by the simulator's own word (IS USER SIM), which also gives its
+        # object id for everything else that must leave it alone.
         self.own_callsign = ""
+        self.user_object_id: int | None = None
 
     # -- setting up ---------------------------------------------------
 
@@ -383,11 +401,18 @@ class SimAircraft:
                 vertical_speed_fpm=float(reply.vertical_speed_fpm),
                 on_ground=bool(reply.on_ground),
                 at=time.monotonic(),
+                title=_text(getattr(reply, "title", b"")),
             )
         except Exception:
             log.debug("could not understand an aircraft reply", exc_info=True)
             return
         self._answered += 1
+        if float(getattr(reply, "is_user", 0.0) or 0.0) >= 0.5:
+            # The pilot's own aeroplane, said so by the simulator: never
+            # traffic, never parked, never anybody's doors to open.
+            self.user_object_id = seen.object_id
+            self._seen.pop(seen.object_id, None)
+            return
         if not seen.positioned:
             return
         # The user is in this list too. An aeroplane being sequenced behind

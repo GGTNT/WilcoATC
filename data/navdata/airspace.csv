@@ -1,0 +1,26 @@
+# Airspace volumes, kept by hand. One volume per row.
+#
+# Read alongside airspace_faa.csv (the US class B, C, D and surface E areas,
+# generated from FAA NASR by scripts/build_nasr.py). Where no volume covers
+# a position, the class round a field is still estimated from its size.
+#
+#   id          anything unique (EBKT-CTR)
+#   name        how it is named (Kortrijk CTR)
+#   class       A to G
+#   airport     the field it belongs to, if any (EBKT): its tower or
+#               approach is who a pilot needs to be talking to inside it
+#   lower_ft    the floor in feet (0 with SFC for the surface)
+#   lower_ref   SFC, AGL or MSL
+#   upper_ft    the ceiling in feet; the volume stops just below it
+#   upper_ref   AGL or MSL (a flight level: FL 65 is 6500 with MSL)
+#   shape       circle or polygon
+#   lat, lon    a circle's centre, decimal degrees WGS84
+#   radius_nm   a circle's radius in nautical miles
+#   points      a polygon's corners in order, "lat lon;lat lon;..." with no
+#               repeat of the first corner, e.g.
+#               50.90 3.10;50.90 3.40;50.70 3.40;50.70 3.10
+#   hours       H24, or as the AIP gives them (informative only)
+#   source      the AIP section (ENR 2.1, AD 2.17) and its date
+#
+# An arc in the AIP's description is drawn as enough corners to follow it.
+id,name,class,airport,lower_ft,lower_ref,upper_ft,upper_ref,shape,lat,lon,radius_nm,points,hours,source

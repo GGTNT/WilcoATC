@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<!--
+  The installer, from the "WilcoATC Installer" design. The window is the card:
+  frameless, so the title bar here is the one Windows lets the pilot drag
+  (pywebview-drag-region). app.py inlines the stylesheet, the script, the
+  catalogue, the fonts and the logo before handing this to the window.
+-->
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WilcoATC Setup</title>
+<style>/*STYLE*/</style>
+</head>
+<body>
+<div class="room" aria-hidden="true">
+  <div class="glow glow-a"></div>
+  <div class="glow glow-b"></div>
+  <div class="glow glow-c"></div>
+</div>
+
+<div class="card">
+  <div class="titlebar pywebview-drag-region">
+    <img src="LOGO_URI" alt="" class="titlebar-logo">
+    <span class="titlebar-name" data-t="window.title">WilcoATC Setup</span>
+    <button class="winbtn" id="minimize" data-aria="window.minimize" aria-label="Minimise">–</button>
+    <button class="winbtn winbtn-close" id="close" data-aria="window.close" aria-label="Close">✕</button>
+  </div>
+
+  <div class="body">
+    <aside class="rail">
+      <div id="rail"></div>
+      <div class="rail-fill"></div>
+      <!-- The installer's language, which is also the program's: it is
+           written to config.yaml as ui.language when the pilot picks one. -->
+      <label class="lang">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+        <select id="language" data-aria="window.language" aria-label="Language"></select>
+        <svg class="lang-caret" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+      </label>
+      <span class="rail-version mono" id="version"></span>
+    </aside>
+
+    <main class="main">
+      <div class="content" id="content">
+
+        <section class="step" data-step="0">
+          <img src="LOGO_URI" alt="" class="hero-logo">
+          <h1 class="big" data-t="welcome.title">Welcome aboard.</h1>
+          <p class="lead" id="welcome-text"></p>
+          <div class="chips">
+            <span class="chip" data-t="chip.free">Free &amp; open source</span>
+            <span class="chip" data-t="chip.offline">Works offline</span>
+            <span class="chip" data-t="chip.account">No account</span>
+          </div>
+        </section>
+
+        <section class="step" data-step="1">
+          <h1 data-t="licence.title">Licence</h1>
+          <p class="sub" data-t="licence.lead">The code is free to use, share and change; the data it ships with has its own terms.</p>
+          <div class="licence mono" id="licence"></div>
+          <button class="check" id="agree">
+            <span class="box" id="agree-box"></span>
+            <span data-t="licence.accept">I accept the licence</span>
+          </button>
+        </section>
+
+        <section class="step" data-step="2">
+          <h1 data-t="location.title">Where should it go?</h1>
+          <div class="pathrow">
+            <input id="path" class="path mono" spellcheck="false" autocomplete="off">
+            <button class="ghost" id="browse" data-t="location.browse">Browse…</button>
+          </div>
+          <div class="disk">
+            <div class="disk-line"><span id="disk-name"></span><span id="disk-need"></span></div>
+            <div class="disk-bar"><div class="disk-used" id="disk-used"></div><div class="disk-new" id="disk-new"></div></div>
+            <div class="path-note" id="path-note"></div>
+          </div>
+          <div class="options" id="options"></div>
+        </section>
+
+        <section class="step" data-step="3">
+          <h1 data-t="sim.title">Looking for Flight Simulator</h1>
+          <div id="sims" class="sims"></div>
+          <p class="sub small" id="sim-note"></p>
+          <!-- The WilcoATC button in the simulator's own toolbar: copied into
+               each Community folder found, and taken out by the uninstaller. -->
+          <div class="options" id="panel-box" hidden>
+            <button class="option" role="switch" id="panel-option">
+              <span class="track"><span class="knob"></span></span>
+              <span class="option-text"><span class="option-label" data-t="sim.panel">Toolbar panel in Flight Simulator</span><span class="option-sub" id="panel-sub"></span></span>
+            </button>
+          </div>
+        </section>
+
+        <section class="step" data-step="4">
+          <div class="install-head">
+            <h1 id="install-title"></h1>
+            <span class="pct mono" id="pct">0%</span>
+          </div>
+          <div class="progress"><div class="progress-fill" id="progress-fill"><div class="sheen"></div></div></div>
+          <span class="phase" id="phase"></span>
+          <div class="log mono" id="log"></div>
+        </section>
+
+        <section class="step" data-step="5">
+          <span class="done-mark"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"></path></svg></span>
+          <h1 class="big" data-t="finish.title">Ready for departure.</h1>
+          <p class="lead" data-t="finish.text">WilcoATC is installed. The first launch walks you through the downloads, your microphone, your push-to-talk key and SimBrief.</p>
+          <p class="sub small" id="finish-panel" hidden></p>
+          <button class="check" id="launch">
+            <span class="box" id="launch-box"></span>
+            <span data-t="finish.launch">Launch WilcoATC now</span>
+          </button>
+        </section>
+
+      </div>
+
+      <footer class="footer">
+        <a href="#" class="repo" id="repo">github.com/GGTNT/WilcoATC</a>
+        <div class="spacer"></div>
+        <button class="ghost pill" id="back" data-t="btn.back">Back</button>
+        <button class="primary pill" id="next">Next</button>
+      </footer>
+    </main>
+  </div>
+
+  <div class="overlay" id="quit" hidden>
+    <div class="dialog">
+      <span class="dialog-title" data-t="quit.title">Cancel setup?</span>
+      <span class="dialog-text" data-t="quit.text">Nothing has been changed on your PC yet. You can run the installer again anytime.</span>
+      <div class="dialog-buttons">
+        <button class="ghost pill" id="quit-stay" data-t="quit.stay">Keep installing</button>
+        <button class="danger pill" id="quit-go" data-t="quit.cancel">Cancel setup</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>/*BOOT*/</script>
+<script>/*SCRIPT*/</script>
+</body>
+</html>

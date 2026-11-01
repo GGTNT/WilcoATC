@@ -99,6 +99,9 @@ class Line:
     # The language it is said in, when that is not the crew's own: the
     # English repeat of a French announcement. Empty is the crew's language.
     language: str = ""
+    # Said within this long of its moment or not at all: a callout the
+    # radio held back. Zero for a line that keeps.
+    stale_s: float = 0.0
 
 
 # --------------------------------------------------------------------------
@@ -120,6 +123,24 @@ class Line:
 def _rolling(state, seen) -> bool:
     """Still on the ground. A takeoff callout after liftoff is noise."""
     return bool(getattr(state, "on_ground", False))
+
+
+def _airborne(state, seen) -> bool:
+    """Off the ground: "positive rate" to an aeroplane back on it is wrong."""
+    return not bool(getattr(state, "on_ground", True))
+
+
+def _xpdr_standby(state, seen) -> bool:
+    """The transponder is still off or on standby."""
+    return getattr(state, "transponder_state", -1) in (0, 1)
+
+
+def _landing_light_off(state, seen) -> bool:
+    return not bool(getattr(state, "landing_light", True))
+
+
+def _parking_brake_on(state, seen) -> bool:
+    return bool(getattr(state, "parking_brake", False))
 
 
 def _beacon_on(state, seen) -> bool:
@@ -149,6 +170,10 @@ def _signs_on(state, seen) -> bool:
 
 CONDITIONS = {
     "rolling": _rolling,
+    "airborne": _airborne,
+    "xpdr_standby": _xpdr_standby,
+    "landing_light_off": _landing_light_off,
+    "parking_brake_on": _parking_brake_on,
     "beacon_on": _beacon_on,
     "gear_down": _gear_down,
     "gear_up": _gear_up,
@@ -1718,6 +1743,12 @@ SCRIPTS: dict[str, dict[str, tuple[tuple[Line, ...], ...]]] = {
 
 ANSWERS: dict[str, dict[str, tuple[tuple[Line, ...], ...]]] = {
     "en": {
+        # The first officer, addressed and asked nothing a checklist can
+        # take.
+        "first_officer_attention": (
+            (Line(FIRST_OFFICER, "Go ahead.", INTERCOM),),
+            (Line(FIRST_OFFICER, "Yes?", INTERCOM),),
+        ),
         "cabin_attention": (
             (Line(PURSER, "Flight deck, go ahead.", INTERCOM),),
             (Line(PURSER, "Yes captain, what can I get you?", INTERCOM),),
@@ -1832,6 +1863,10 @@ ANSWERS: dict[str, dict[str, tuple[tuple[Line, ...], ...]]] = {
         ),
     },
     "fr": {
+        "first_officer_attention": (
+            (Line(FIRST_OFFICER, "Oui ?", INTERCOM),),
+            (Line(FIRST_OFFICER, "Je t'écoute.", INTERCOM),),
+        ),
         "cabin_attention": (
             (Line(PURSER, "Cockpit, je vous écoute.", INTERCOM),),
             (Line(PURSER, "Oui commandant, que puis-je vous apporter ?",
@@ -1928,6 +1963,10 @@ ANSWERS: dict[str, dict[str, tuple[tuple[Line, ...], ...]]] = {
         ),
     },
     "de": {
+        "first_officer_attention": (
+            (Line(FIRST_OFFICER, "Ja?", INTERCOM),),
+            (Line(FIRST_OFFICER, "Ich höre.", INTERCOM),),
+        ),
         "cabin_attention": (
             (Line(PURSER, "Cockpit, sprechen Sie.", INTERCOM),),
             (Line(PURSER, "Ja Kapitän, was darf ich Ihnen bringen?",
@@ -2142,6 +2181,7 @@ del _cue, _group
 # without losing the first officer, which is the split most people want.
 GROUP_SIDE: dict[str, str] = {
     "callouts": "copilot",
+    "notices": "copilot",
     "checklists": "copilot",
     "chatter": "copilot",
     "briefings": "cabin",
@@ -2150,9 +2190,616 @@ GROUP_SIDE: dict[str, str] = {
 }
 
 
+# --------------------------------------------------------------------------
+# the first officer's callouts (decided by wilcoatc.atc.callouts)
+# --------------------------------------------------------------------------
+#
+# One line each, said at its moment or dropped (``stale_s``, from the
+# settings). English is the airlines' and the light aeroplanes' alike; the
+# French is the light aviation's own ("vario positif", "vent arrière",
+# "travers seuil"); the German and Dutch are UNVERIFIED, written for this
+# program. A turboprop twin or a jet calls in English whatever the crew
+# speak (wilcoatc.atc.crew), as its operator's SOP does.
+
+CALLOUT_WORDS: dict[str, dict[str, str]] = {
+    "en": {
+        "airspeed_alive": "Airspeed alive.",
+        "eighty": "Eighty knots.",
+        "one_hundred": "One hundred knots.",
+        "v_one": "V one.",
+        "rotate": "Rotate.",
+        "v_two": "V two.",
+        "positive_rate": "Positive rate.",
+        "gear_up": "Gear up.",
+        "five_hundred_up": "Five hundred feet.",
+        "thousand_to_go": "One thousand to go.",
+        "localizer_alive": "Localizer alive.",
+        "glideslope_alive": "Glideslope alive.",
+        "one_thousand": "One thousand.",
+        "five_hundred": "Five hundred.",
+        "approaching_minimums": "Approaching minimums.",
+        "minimums": "Minimums.",
+        "downwind": "Downwind.",
+        "abeam": "Abeam the numbers.",
+        "base": "Turning base.",
+        "final_cleared": "Final, runway {runway}, cleared.",
+        "final_not_cleared": "Final, runway {runway}, not cleared yet.",
+        "final_cleared_plain": "Final, cleared.",
+        "final_not_cleared_plain": "Final, not cleared yet.",
+        "fifty": "Fifty.",
+        "thirty": "Thirty.",
+        "ten": "Ten.",
+        "runway_vacated": "Runway vacated.",
+        "speed": "Speed.",
+        "sink_rate": "Sink rate.",
+        "bank": "Bank.",
+        "altitude": "Altitude.",
+        "go_around": "Go around, flaps.",
+    },
+    "fr": {
+        "airspeed_alive": "Badin actif.",
+        "eighty": "Quatre-vingts nœuds.",
+        "one_hundred": "Cent nœuds.",
+        "v_one": "V un.",
+        "rotate": "Rotation.",
+        "v_two": "V deux.",
+        "positive_rate": "Vario positif.",
+        "gear_up": "Train rentré.",
+        "five_hundred_up": "Cinq cents pieds.",
+        "thousand_to_go": "Mille avant le niveau.",
+        "localizer_alive": "Localizer actif.",
+        "glideslope_alive": "Glide actif.",
+        "one_thousand": "Mille pieds.",
+        "five_hundred": "Cinq cents.",
+        "approaching_minimums": "Proche des minima.",
+        "minimums": "Minima.",
+        "downwind": "Vent arrière.",
+        "abeam": "Travers seuil.",
+        "base": "Étape de base.",
+        "final_cleared": "Finale piste {runway}, autorisés.",
+        "final_not_cleared": "Finale piste {runway}, pas encore autorisés.",
+        "final_cleared_plain": "Finale, autorisés.",
+        "final_not_cleared_plain": "Finale, pas encore autorisés.",
+        "fifty": "Cinquante.",
+        "thirty": "Trente.",
+        "ten": "Dix.",
+        "runway_vacated": "Piste dégagée.",
+        "speed": "Vitesse.",
+        "sink_rate": "Taux de descente.",
+        "bank": "Inclinaison.",
+        "altitude": "Altitude.",
+        "go_around": "Remise de gaz, volets.",
+    },
+    "de": {
+        "airspeed_alive": "Fahrt kommt.",
+        "eighty": "Achtzig Knoten.",
+        "one_hundred": "Hundert Knoten.",
+        "v_one": "V eins.",
+        "rotate": "Rotieren.",
+        "v_two": "V zwei.",
+        "positive_rate": "Positive Steigrate.",
+        "gear_up": "Fahrwerk eingefahren.",
+        "five_hundred_up": "Fünfhundert Fuß.",
+        "thousand_to_go": "Noch tausend.",
+        "localizer_alive": "Localizer lebt.",
+        "glideslope_alive": "Gleitpfad lebt.",
+        "one_thousand": "Tausend.",
+        "five_hundred": "Fünfhundert.",
+        "approaching_minimums": "Annähernd Minimum.",
+        "minimums": "Minimum.",
+        "downwind": "Gegenanflug.",
+        "abeam": "Querab Schwelle.",
+        "base": "Queranflug.",
+        "final_cleared": "Endanflug Piste {runway}, Landefreigabe.",
+        "final_not_cleared": "Endanflug Piste {runway}, noch keine "
+                             "Landefreigabe.",
+        "final_cleared_plain": "Endanflug, Landefreigabe.",
+        "final_not_cleared_plain": "Endanflug, noch keine Landefreigabe.",
+        "fifty": "Fünfzig.",
+        "thirty": "Dreißig.",
+        "ten": "Zehn.",
+        "runway_vacated": "Piste verlassen.",
+        "speed": "Fahrt.",
+        "sink_rate": "Sinkrate.",
+        "bank": "Querlage.",
+        "altitude": "Höhe.",
+        "go_around": "Durchstarten, Klappen.",
+    },
+    "nl": {
+        "airspeed_alive": "Snelheid komt op.",
+        "eighty": "Tachtig knopen.",
+        "one_hundred": "Honderd knopen.",
+        "v_one": "V één.",
+        "rotate": "Roteren.",
+        "v_two": "V twee.",
+        "positive_rate": "Positief stijgen.",
+        "gear_up": "Wielen op.",
+        "five_hundred_up": "Vijfhonderd voet.",
+        "thousand_to_go": "Nog duizend.",
+        "localizer_alive": "Localizer actief.",
+        "glideslope_alive": "Glijpad actief.",
+        "one_thousand": "Duizend.",
+        "five_hundred": "Vijfhonderd.",
+        "approaching_minimums": "Minimum nadert.",
+        "minimums": "Minimum.",
+        "downwind": "Rugwind.",
+        "abeam": "Dwars drempel.",
+        "base": "Basis.",
+        "final_cleared": "Eindnadering baan {runway}, vrijgegeven.",
+        "final_not_cleared": "Eindnadering baan {runway}, nog niet "
+                             "vrijgegeven.",
+        "final_cleared_plain": "Eindnadering, vrijgegeven.",
+        "final_not_cleared_plain": "Eindnadering, nog niet vrijgegeven.",
+        "fifty": "Vijftig.",
+        "thirty": "Dertig.",
+        "ten": "Tien.",
+        "runway_vacated": "Baan vrij.",
+        "speed": "Snelheid.",
+        "sink_rate": "Daalsnelheid.",
+        "bank": "Helling.",
+        "altitude": "Hoogte.",
+        "go_around": "Doorstarten, kleppen.",
+    },
+}
+
+# What has to be true still when a callout comes due (CONDITIONS).
+CALLOUT_NEEDS: dict[str, str] = {
+    "airspeed_alive": "rolling", "eighty": "rolling",
+    "one_hundred": "rolling", "v_one": "rolling", "rotate": "rolling",
+    "positive_rate": "airborne", "v_two": "airborne", "gear_up": "gear_up",
+}
+
+# The deviation calls, which may be made again (callouts.DEVIATION_EVERY_S).
+DEVIATION_CUES = frozenset({"speed", "sink_rate", "bank", "altitude"})
+
+# --------------------------------------------------------------------------
+# what the first officer notices (decided by wilcoatc.atc.notices)
+# --------------------------------------------------------------------------
+#
+# A colleague's words, never an order: "gear's still up", not "gear down".
+# UNVERIFIED: the wording is this program's, in every language, chosen to
+# be what a pilot monitoring says rather than taken from an SOP (which
+# prescribes the callouts, not these). "{qnh}", "{set}" and "{frequency}"
+# are figures said digit by digit, "{side}" the tank's side.
+
+NOTICE_WORDS: dict[str, dict[str, str]] = {
+    "en": {
+        "xpdr_standby": "We're still on standby on the transponder.",
+        "flaps_takeoff": "Flaps aren't set for takeoff.",
+        "parking_brake_power": "Parking brake's still on.",
+        "landing_light_off": "Landing light's off.",
+        "gear_up_final": "Gear's still up!",
+        "altimeter_not_set": "QNH was {qnh}, we're still on {set}.",
+        "frequency_not_tuned": "We haven't got {frequency} in yet.",
+        "fuel_reserve": "We're below the reserve fuel.",
+        "wrong_tank": "We're still on the {side} tank, and it's getting low.",
+        "fuel_selector_off": "Fuel selector's off!",
+        "left": "left", "right": "right",
+    },
+    "fr": {
+        "xpdr_standby": "On est toujours en standby au transpondeur.",
+        "flaps_takeoff": "Les volets ne sont pas en position décollage.",
+        "parking_brake_power": "Le frein de parc est toujours serré.",
+        "landing_light_off": "Le phare d'atterrissage est éteint.",
+        "gear_up_final": "Le train est toujours rentré !",
+        "altimeter_not_set": "Le QNH était {qnh}, on est toujours sur {set}.",
+        "frequency_not_tuned": "On n'a pas encore affiché {frequency}.",
+        "fuel_reserve": "On est sous la réserve de carburant.",
+        "wrong_tank": "On est toujours sur le réservoir {side}, il se vide.",
+        "fuel_selector_off": "Le robinet carburant est fermé !",
+        "left": "gauche", "right": "droit",
+    },
+    "de": {
+        "xpdr_standby": "Transponder steht noch auf Standby.",
+        "flaps_takeoff": "Klappen sind nicht für den Start gesetzt.",
+        "parking_brake_power": "Parkbremse ist noch gesetzt.",
+        "landing_light_off": "Landelicht ist aus.",
+        "gear_up_final": "Fahrwerk ist noch oben!",
+        "altimeter_not_set": "QNH war {qnh}, wir stehen noch auf {set}.",
+        "frequency_not_tuned": "{frequency} ist noch nicht gerastet.",
+        "fuel_reserve": "Wir sind unter der Reserve.",
+        "wrong_tank": "Wir sind noch auf dem {side} Tank, und der wird leer.",
+        "fuel_selector_off": "Der Brandhahn ist zu!",
+        "left": "linken", "right": "rechten",
+    },
+    "nl": {
+        "xpdr_standby": "Transponder staat nog op standby.",
+        "flaps_takeoff": "Kleppen staan niet voor de start.",
+        "parking_brake_power": "Parkeerrem staat er nog op.",
+        "landing_light_off": "Landingslicht is uit.",
+        "gear_up_final": "Wielen zijn nog op!",
+        "altimeter_not_set": "QNH was {qnh}, we staan nog op {set}.",
+        "frequency_not_tuned": "{frequency} staat er nog niet in.",
+        "fuel_reserve": "We zitten onder de reserve.",
+        "wrong_tank": "We staan nog op de {side} tank, en die raakt leeg.",
+        "fuel_selector_off": "Brandstofkraan is dicht!",
+        "left": "linker", "right": "rechter",
+    },
+}
+
+# What has to be true still when a notice comes due (CONDITIONS), and how
+# long one waits for the radio to clear before it is dropped as no longer
+# true.
+NOTICE_NEEDS: dict[str, str] = {
+    "xpdr_standby": "xpdr_standby", "landing_light_off": "landing_light_off",
+    "gear_up_final": "gear_up", "parking_brake_power": "parking_brake_on",
+}
+NOTICE_PATIENCE_S = 30.0
+
+
+# The first officer's own words back to the pilot: an acknowledgement, and
+# what was set. "{v1}" and the rest are figures said digit by digit.
+FIRST_OFFICER_WORDS: dict[str, dict[str, str]] = {
+    "en": {
+        "quiet": "Quiet cockpit.",
+        "reserve": "Reserve noted.",
+        "callouts_only": "Callouts only.",
+        "normal": "Back to normal.",
+        "v1": "V one {v1}", "vr": "rotate {vr}", "v2": "V two {v2}",
+        "vapp": "approach speed {vapp}",
+        "minimums": "Minimums {value}.",
+        "left": "left", "right": "right", "centre": "centre",
+    },
+    "fr": {
+        "quiet": "Cockpit silencieux.",
+        "reserve": "Réserve notée.",
+        "callouts_only": "Annonces seulement.",
+        "normal": "Retour à la normale.",
+        "v1": "V un {v1}", "vr": "rotation {vr}", "v2": "V deux {v2}",
+        "vapp": "vitesse d'approche {vapp}",
+        "minimums": "Minima {value}.",
+        "left": "gauche", "right": "droite", "centre": "centre",
+    },
+    "de": {
+        "quiet": "Ruhiges Cockpit.",
+        "reserve": "Reserve notiert.",
+        "callouts_only": "Nur Ausrufe.",
+        "normal": "Wieder normal.",
+        "v1": "V eins {v1}", "vr": "rotieren {vr}", "v2": "V zwei {v2}",
+        "vapp": "Anfluggeschwindigkeit {vapp}",
+        "minimums": "Minimum {value}.",
+        "left": "links", "right": "rechts", "centre": "Mitte",
+    },
+    "nl": {
+        "quiet": "Stille cockpit.",
+        "reserve": "Reserve genoteerd.",
+        "callouts_only": "Alleen callouts.",
+        "normal": "Weer normaal.",
+        "v1": "V één {v1}", "vr": "roteren {vr}", "v2": "V twee {v2}",
+        "vapp": "naderingssnelheid {vapp}",
+        "minimums": "Minimum {value}.",
+        "left": "links", "right": "rechts", "centre": "midden",
+    },
+}
+
+
+
+# The first officer's answers to the pilot's questions, and their side
+# of a radio call handed over (Phase 4). UNVERIFIED: the wording is
+# this program's, as for the notices; "{value}" is figures or words.
+FIRST_OFFICER_ANSWERS: dict[str, dict[str, str]] = {
+    "en": {
+        "squawk": "Squawk {value}.",
+        "qnh": "QNH {value}.",
+        "no_qnh": "No QNH yet.",
+        "runway": "Runway {value}.",
+        "no_runway": "No runway yet.",
+        "said": "He said: {value}",
+        "nothing_said": "Nothing from him yet.",
+        "no_clearance": "No clearance yet.",
+        "circuit": "{where}, runway {runway}.",
+        "not_in_circuit": "We're not in the circuit.",
+        "frequency": "{station}, {value}.",
+        "no_frequency": "I can't find that one.",
+        "distance": "{value} miles to {place}.",
+        "no_distance": "I don't know where we're going.",
+        "your_radio": "Your radio.",
+        "radio_yours": "The radio's yours.",
+        "readback_yours": "That readback's yours.",
+        "not_on": "We're not on {station}.",
+        "which_call": "Which call?",
+        "ground": "ground",
+    },
+    "fr": {
+        "squawk": "Transpondeur {value}.",
+        "qnh": "QNH {value}.",
+        "no_qnh": "Pas encore de QNH.",
+        "runway": "Piste {value}.",
+        "no_runway": "Pas encore de piste.",
+        "said": "Il a dit : {value}",
+        "nothing_said": "Rien de sa part pour l'instant.",
+        "no_clearance": "Pas encore de clairance.",
+        "circuit": "{where}, piste {runway}.",
+        "not_in_circuit": "On n'est pas dans le tour de piste.",
+        "frequency": "{station}, {value}.",
+        "no_frequency": "Je ne la trouve pas.",
+        "distance": "{value} nautiques de {place}.",
+        "no_distance": "Je ne sais pas où on va.",
+        "your_radio": "À toi la radio.",
+        "radio_yours": "La radio est à toi.",
+        "readback_yours": "Ce collationnement est pour toi.",
+        "not_on": "On n'est pas sur {station}.",
+        "which_call": "Quel appel ?",
+        "ground": "le sol",
+    },
+    "de": {
+        "squawk": "Squawk {value}.",
+        "qnh": "QNH {value}.",
+        "no_qnh": "Noch kein QNH.",
+        "runway": "Piste {value}.",
+        "no_runway": "Noch keine Piste.",
+        "said": "Er sagte: {value}",
+        "nothing_said": "Noch nichts von ihm.",
+        "no_clearance": "Noch keine Freigabe.",
+        "circuit": "{where}, Piste {runway}.",
+        "not_in_circuit": "Wir sind nicht in der Platzrunde.",
+        "frequency": "{station}, {value}.",
+        "no_frequency": "Die finde ich nicht.",
+        "distance": "{value} Meilen bis {place}.",
+        "no_distance": "Ich weiß nicht, wohin wir fliegen.",
+        "your_radio": "Dein Funk.",
+        "radio_yours": "Der Funk gehört dir.",
+        "readback_yours": "Die Rücklesung ist deine.",
+        "not_on": "Wir sind nicht auf {station}.",
+        "which_call": "Welcher Anruf?",
+        "ground": "Ground",
+    },
+    "nl": {
+        "squawk": "Squawk {value}.",
+        "qnh": "QNH {value}.",
+        "no_qnh": "Nog geen QNH.",
+        "runway": "Baan {value}.",
+        "no_runway": "Nog geen baan.",
+        "said": "Hij zei: {value}",
+        "nothing_said": "Nog niets van hem.",
+        "no_clearance": "Nog geen klaring.",
+        "circuit": "{where}, baan {runway}.",
+        "not_in_circuit": "We zitten niet in het circuit.",
+        "frequency": "{station}, {value}.",
+        "no_frequency": "Die kan ik niet vinden.",
+        "distance": "{value} mijl naar {place}.",
+        "no_distance": "Ik weet niet waar we heen gaan.",
+        "your_radio": "Jouw radio.",
+        "radio_yours": "De radio is van jou.",
+        "readback_yours": "Die readback is voor jou.",
+        "not_on": "We zitten niet op {station}.",
+        "which_call": "Welke oproep?",
+        "ground": "ground",
+    },
+}
+
+# The circuit's legs and where on them, as the first officer says them.
+LEG_WORDS: dict[str, dict[str, str]] = {
+    "en": {
+        "upwind": "upwind",
+        "crosswind": "crosswind",
+        "downwind": "downwind",
+        "base": "base",
+        "final": "final",
+        "early": "early",
+        "midfield": "midfield",
+        "late": "late",
+        "long": "long",
+        "short": "short",
+        "_order": "{stage} {leg}",
+    },
+    "fr": {
+        "upwind": "montée face au vent",
+        "crosswind": "vent traversier",
+        "downwind": "vent arrière",
+        "base": "étape de base",
+        "final": "finale",
+        "early": "début",
+        "midfield": "milieu",
+        "late": "fin",
+        "long": "longue",
+        "short": "courte",
+        "_order": "{stage} de {leg}",
+    },
+    "de": {
+        "upwind": "Abflug",
+        "crosswind": "Querabflug",
+        "downwind": "Gegenanflug",
+        "base": "Queranflug",
+        "final": "Endanflug",
+        "early": "Anfang",
+        "midfield": "Mitte",
+        "late": "Ende",
+        "long": "langer",
+        "short": "kurzer",
+        "_order": "{stage} {leg}",
+    },
+    "nl": {
+        "upwind": "opstijgen",
+        "crosswind": "dwarswind",
+        "downwind": "rugwind",
+        "base": "basis",
+        "final": "eindnadering",
+        "early": "begin",
+        "midfield": "midden",
+        "late": "eind",
+        "long": "lange",
+        "short": "korte",
+        "_order": "{stage} {leg}",
+    },
+}
+
+
+# --------------------------------------------------------------------------
+# the first officer running a checklist
+# --------------------------------------------------------------------------
+#
+# The items themselves are in the checklist files (wilcoatc/atc/checklists);
+# these are the words around them. "{Title}" is the checklist's title with
+# a capital, "{title}" without. The German and Dutch wording is UNVERIFIED:
+# written for this program, not taken from an operator's SOP.
+
+CHECKLIST_WORDS: dict[str, dict[str, str]] = {
+    "en": {
+        "start": "{Title} checklist.",
+        "complete": "{Title} checklist complete.",
+        "complete_open": "{Title} checklist complete, {open}.",
+        "open_one": "one item open",
+        "open_many": "{n} items open",
+        "holding": "Holding the checklist.",
+        "offer": "{Title} checklist when you're ready?",
+        "which": "Which checklist?",
+        "none": "No {title} checklist on this aeroplane.",
+        "not_running": "No checklist running.",
+        "expected": "{challenge}... {response}?",
+        "show_state": "{challenge}... I show {state}.",
+        "show_value": "{challenge}... I show {value}.",
+        "flaps_up": "{challenge}... I show them up.",
+        "flaps_at": "{challenge}... I show position {value}.",
+        "percent": "{value} percent",
+        "decimal": "decimal",
+    },
+    "fr": {
+        "start": "Check-list {title}.",
+        "complete": "Check-list {title} terminée.",
+        "complete_open": "Check-list {title} terminée, {open}.",
+        "open_one": "un point en suspens",
+        "open_many": "{n} points en suspens",
+        "holding": "Je suspends la check-list.",
+        "offer": "Check-list {title} quand tu veux ?",
+        "which": "Quelle check-list ?",
+        "none": "Pas de check-list {title} sur cet avion.",
+        "not_running": "Pas de check-list en cours.",
+        "expected": "{challenge}... {response} ?",
+        "show_state": "{challenge}... je le vois {state}.",
+        "show_value": "{challenge}... je lis {value}.",
+        "flaps_up": "{challenge}... je les vois rentrés.",
+        "flaps_at": "{challenge}... je lis le cran {value}.",
+        "percent": "{value} pour cent",
+        "decimal": "décimal",
+    },
+    "de": {
+        "start": "Checkliste {title}.",
+        "complete": "Checkliste {title} beendet.",
+        "complete_open": "Checkliste {title} beendet, {open}.",
+        "open_one": "ein Punkt offen",
+        "open_many": "{n} Punkte offen",
+        "holding": "Checkliste angehalten.",
+        "offer": "Checkliste {title}, wenn du so weit bist?",
+        "which": "Welche Checkliste?",
+        "none": "Keine Checkliste {title} für dieses Flugzeug.",
+        "not_running": "Keine Checkliste aktiv.",
+        "expected": "{challenge}... {response}?",
+        "show_state": "{challenge}... bei mir {state}.",
+        "show_value": "{challenge}... ich lese {value}.",
+        "flaps_up": "{challenge}... bei mir eingefahren.",
+        "flaps_at": "{challenge}... ich lese Stufe {value}.",
+        "percent": "{value} Prozent",
+        "decimal": "Komma",
+    },
+    "nl": {
+        "start": "{Title} checklist.",
+        "complete": "{Title} checklist voltooid.",
+        "complete_open": "{Title} checklist voltooid, {open}.",
+        "open_one": "één punt open",
+        "open_many": "{n} punten open",
+        "holding": "Checklist onderbroken.",
+        "offer": "{Title} checklist als je zover bent?",
+        "which": "Welke checklist?",
+        "none": "Geen {title} checklist voor dit toestel.",
+        "not_running": "Geen checklist bezig.",
+        "expected": "{challenge}... {response}?",
+        "show_state": "{challenge}... bij mij staat het {state}.",
+        "show_value": "{challenge}... ik lees {value}.",
+        "flaps_up": "{challenge}... bij mij ingetrokken.",
+        "flaps_at": "{challenge}... ik lees stand {value}.",
+        "percent": "{value} procent",
+        "decimal": "decimaal",
+    },
+}
+
+# What a switch is, said back: (when true, when false), by variable, with
+# "switch" for every variable not named. The transponder's modes by the
+# simulator's numbering, 0 off to 4 altitude.
+CHECKLIST_STATES: dict[str, dict[str, tuple[str, str]]] = {
+    "en": {
+        "switch": ("it on", "it off"),
+        "parking_brake": ("it set", "it released"),
+        "gear_down": ("it down", "it up"),
+        "spoilers_armed": ("them armed", "them disarmed"),
+        "autopilot": ("it engaged", "it off"),
+        "gps_drives_nav1": ("GPS", "NAV"),
+        "transponder_state": ("off", "standby", "test", "on", "ALT"),
+    },
+    "fr": {
+        "switch": ("allumé", "éteint"),
+        "parking_brake": ("serré", "desserré"),
+        "gear_down": ("sorti", "rentré"),
+        "spoilers_armed": ("armé", "désarmé"),
+        "autopilot": ("engagé", "déconnecté"),
+        "avionics_master": ("sur marche", "sur arrêt"),
+        "battery_master": ("sur marche", "sur arrêt"),
+        "gps_drives_nav1": ("sur GPS", "sur NAV"),
+        "transponder_state": ("arrêt", "standby", "test", "on", "ALT"),
+    },
+    "de": {
+        "switch": ("an", "aus"),
+        "parking_brake": ("angezogen", "gelöst"),
+        "gear_down": ("ausgefahren", "eingefahren"),
+        "spoilers_armed": ("scharf", "nicht scharf"),
+        "gps_drives_nav1": ("auf GPS", "auf NAV"),
+        "transponder_state": ("aus", "Standby", "Test", "an", "ALT"),
+    },
+    "nl": {
+        "switch": ("aan", "uit"),
+        "parking_brake": ("aan", "los"),
+        "gear_down": ("uit", "in"),
+        "spoilers_armed": ("gewapend", "niet gewapend"),
+        "gps_drives_nav1": ("op GPS", "op NAV"),
+        "transponder_state": ("uit", "standby", "test", "aan", "ALT"),
+    },
+}
+
+# The figures as the first officer says them across the flight deck: plain
+# digits, not the radio's "niner".
+CHECKLIST_DIGITS: dict[str, tuple[str, ...]] = {
+    "en": ("zero", "one", "two", "three", "four", "five", "six", "seven",
+           "eight", "nine"),
+    "fr": ("zéro", "un", "deux", "trois", "quatre", "cinq", "six", "sept",
+           "huit", "neuf"),
+    "de": ("null", "eins", "zwei", "drei", "vier", "fünf", "sechs", "sieben",
+           "acht", "neun"),
+    "nl": ("nul", "één", "twee", "drie", "vier", "vijf", "zes", "zeven",
+           "acht", "negen"),
+}
+
+
+# The callouts replace what each language had for the same cues ("V one.
+# Rotate." as one line, "Minimums. Runway in sight", which nobody in here can
+# know), one line each, all of them the callouts' switch.
+for _language, _calls in CALLOUT_WORDS.items():
+    for _cue, _text in _calls.items():
+        SCRIPTS[_language][_cue] = ((Line(
+            FIRST_OFFICER, _text, INTERCOM,
+            needs=CALLOUT_NEEDS.get(_cue, "")),),)
+        CUE_GROUPS[_cue] = "callouts"
+del _language, _calls, _cue, _text
+
+# The notices, the same way, in their own group so that "callouts only"
+# keeps them.
+for _language, _calls in NOTICE_WORDS.items():
+    for _cue, _text in _calls.items():
+        if _cue in ("left", "right"):
+            continue
+        SCRIPTS[_language][_cue] = ((Line(
+            FIRST_OFFICER, _text, INTERCOM,
+            needs=NOTICE_NEEDS.get(_cue, ""),
+            patience_s=NOTICE_PATIENCE_S),),)
+        CUE_GROUPS[_cue] = "notices"
+del _language, _calls, _cue, _text
+
+
 __all__ = [
     "Line", "SCRIPTS", "ANSWERS", "EN", "FR", "DE", "NL", "CUE_GROUPS",
     "GROUP_SIDE", "CUE_RECORDINGS", "RECORDED_ONLY",
+    "CHECKLIST_WORDS", "CHECKLIST_STATES", "CHECKLIST_DIGITS",
+    "CALLOUT_WORDS", "CALLOUT_NEEDS", "DEVIATION_CUES", "FIRST_OFFICER_WORDS",
+    "NOTICE_WORDS", "NOTICE_NEEDS", "FIRST_OFFICER_ANSWERS", "LEG_WORDS",
     "FIRST_OFFICER", "CAPTAIN", "PURSER", "CABIN", "GROUND", "INTERCOM",
     "CABIN_PA",
 ]

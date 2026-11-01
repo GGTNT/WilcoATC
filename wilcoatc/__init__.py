@@ -12,14 +12,16 @@ PyInstaller build carries none unless the spec is told to add it. See the
 version resource in ``wilcoatc.spec``, and "Windows Defender" in the README.
 """
 
-__version__ = "1.0.0"
+__version__ = "2.0.0"
 
 #: What goes in the executable's version resource. Not decoration: a scanner
 #: reads these fields, and a file with a publisher looks less like the packed
 #: samples that deliberately have none.
 PRODUCT_NAME = "WilcoATC"
 COMPANY_NAME = "WilcoATC"
-COPYRIGHT = "The code is yours to do as you like with."
+COPYRIGHT = "Copyright (C) 2026 GGTNT and the WilcoATC contributors. GNU AGPL v3."
+#: The SPDX identifier of the code's licence; its text is LICENSE.
+LICENCE = "AGPL-3.0-only"
 DESCRIPTION = "Local air traffic control for Microsoft Flight Simulator"
 
-__all__ = ["__version__", "PRODUCT_NAME", "COMPANY_NAME", "COPYRIGHT", "DESCRIPTION"]
+__all__ = ["__version__", "PRODUCT_NAME", "COMPANY_NAME", "COPYRIGHT", "LICENCE", "DESCRIPTION"]

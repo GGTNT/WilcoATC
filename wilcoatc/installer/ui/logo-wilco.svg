@@ -1,0 +1,65 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <clipPath id="sq"><rect width="512" height="512" rx="116"></rect></clipPath>
+    <filter id="haze" x="-60%" y="-60%" width="220%" height="220%"><feGaussianBlur stdDeviation="44"></feGaussianBlur></filter>
+    <filter id="frost" x="-20%" y="-20%" width="140%" height="140%"><feGaussianBlur stdDeviation="6"></feGaussianBlur></filter>
+    <radialGradient id="base" cx="50%" cy="50%" r="70%">
+      <stop offset="0" stop-color="#151a33"></stop>
+      <stop offset="1" stop-color="#1F232B"></stop>
+    </radialGradient>
+    <linearGradient id="glassFill" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#fff" stop-opacity=".16"></stop>
+      <stop offset=".5" stop-color="#fff" stop-opacity=".03"></stop>
+      <stop offset="1" stop-color="#fff" stop-opacity=".09"></stop>
+    </linearGradient>
+    <linearGradient id="glassEdge" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#fff" stop-opacity=".55"></stop>
+      <stop offset=".5" stop-color="#fff" stop-opacity=".06"></stop>
+      <stop offset="1" stop-color="#fff" stop-opacity=".35"></stop>
+    </linearGradient>
+    <linearGradient id="gloss" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fff" stop-opacity=".2"></stop>
+      <stop offset=".4" stop-color="#fff" stop-opacity="0"></stop>
+    </linearGradient>
+    <radialGradient id="mid" cx="50%" cy="52%" r="30%">
+      <stop offset="0" stop-color="#1F232B" stop-opacity=".55"></stop>
+      <stop offset="1" stop-color="#1F232B" stop-opacity="0"></stop>
+    </radialGradient>
+    <linearGradient id="rim" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#fff" stop-opacity=".5"></stop>
+      <stop offset=".5" stop-color="#fff" stop-opacity=".06"></stop>
+      <stop offset="1" stop-color="#fff" stop-opacity=".25"></stop>
+    </linearGradient>
+    <filter id="shadow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="12"></feGaussianBlur>
+      <feOffset dy="12"></feOffset>
+      <feComponentTransfer><feFuncA type="linear" slope=".5"></feFuncA></feComponentTransfer>
+      <feMerge><feMergeNode></feMergeNode><feMergeNode in="SourceGraphic"></feMergeNode></feMerge>
+    </filter>
+  </defs>
+  <g clip-path="url(#sq)">
+    <rect width="512" height="512" fill="url(#base)"></rect>
+    <g filter="url(#haze)" style="mix-blend-mode:screen">
+      <ellipse cx="30" cy="50" rx="190" ry="160" fill="#4C7BC0"></ellipse>
+      <ellipse cx="500" cy="100" rx="150" ry="180" fill="#5FC4DE"></ellipse>
+      <ellipse cx="470" cy="480" rx="200" ry="160" fill="#F08A4B"></ellipse>
+      <ellipse cx="20" cy="470" rx="150" ry="130" fill="#8FCB7A" opacity=".9"></ellipse>
+      <ellipse cx="320" cy="330" rx="100" ry="80" fill="#F08A4B" opacity=".35"></ellipse>
+    </g>
+    <g filter="url(#frost)">
+      <path d="M-40 230 C 60 130, 170 160, 260 210 S 430 300, 560 190 L 560 380 C 440 470, 330 380, 250 360 S 60 360, -40 430 Z" fill="url(#glassFill)"></path>
+    </g>
+    <path d="M-40 230 C 60 130, 170 160, 260 210 S 430 300, 560 190" fill="none" stroke="url(#glassEdge)" stroke-width="4"></path>
+    <path d="M-40 430 C 60 360, 170 360, 250 360 S 440 470, 560 380" fill="none" stroke="url(#glassEdge)" stroke-width="1.5" opacity=".7"></path>
+    <g filter="url(#frost)">
+      <path d="M150 -40 C 230 60, 380 40, 440 120 S 470 260, 560 300 L 560 -40 Z" fill="url(#glassFill)" opacity=".8"></path>
+    </g>
+    <path d="M150 -40 C 230 60, 380 40, 440 120 S 470 260, 560 300" fill="none" stroke="url(#glassEdge)" stroke-width="2"></path>
+    <rect width="512" height="512" fill="url(#mid)"></rect>
+    <rect width="512" height="512" fill="url(#gloss)"></rect>
+    <g filter="url(#shadow)" transform="translate(256 262) rotate(-45) scale(.62) translate(-256 -256)">
+      <path fill="#ECEFF4" d="M256 16 C270 16 282 40 284 80 L286 190 L470 320 L470 352 L286 300 L282 410 L340 455 L340 478 L280 462 L272 490 C266 500 246 500 240 490 L232 462 L172 478 L172 455 L230 410 L226 300 L42 352 L42 320 L226 190 L228 80 C230 40 242 16 256 16 Z"></path>
+    </g>
+  </g>
+  <rect x="2" y="2" width="508" height="508" rx="114" fill="none" stroke="url(#rim)" stroke-width="4"></rect>
+</svg>

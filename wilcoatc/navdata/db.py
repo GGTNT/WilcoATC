@@ -13,14 +13,15 @@ import json
 import math
 import re
 import sqlite3
+import threading
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import Iterable, Sequence
 
 from ..paths import command_hint
-from .build import DB_PATH, bearing_deg, haversine_nm
-from .channels import same_channel
+from .build import DB_PATH, bearing_deg, haversine_nm, put_in_place
+from .channels import carrier, same_channel
 
 # How far from the transmitter each kind of station is still plausible, in
 # nautical miles. These are line-of-sight/coverage figures, not legal airspace
@@ -63,7 +64,8 @@ POSITION_SUFFIX_SHORT: dict[str, str] = dict(POSITION_SUFFIX, DEL="Delivery")
 
 # Outside US-administered airspace the enroute position is "Control", not
 # "Center", and approach control is often "Radar" or "Director".
-POSITION_SUFFIX_ICAO: dict[str, str] = dict(POSITION_SUFFIX, CTR="Control")
+POSITION_SUFFIX_ICAO: dict[str, str] = dict(POSITION_SUFFIX, CTR="Control",
+                                            INFO="Information")
 
 # What each position is called on a French frequency. "Prévol" is the French
 # name for the pre-departure clearance position, and a pilot calling "Orly
@@ -147,6 +149,16 @@ POSITION_SUFFIX_BY_LANGUAGE: dict[str, dict[str, str]] = {
     "pt": POSITION_SUFFIX_PT,
 }
 
+# What makes an INFO station a "Radio" rather than an "Information", in the
+# published name; and what is cut off a facility name before the suffix goes
+# on ("Bresso Radio IT" is Bresso, "LILLE INFO" is Lille).
+_RADIO_WORDS = re.compile(r"\b(?:RADIO|RDO|A/G)\b", re.I)
+# The position words in any case; a language tag ("IT", "IT/EN") only in
+# capitals, so a name that ends in a short word keeps it.
+_INFO_TAIL = re.compile(
+    r"(?:\s+(?:(?i:RADIO|RDO|INFO|INFORMATION|AFIS|A/G)|[A-Z]{2}(?:/[A-Z]{2})?|"
+    r"\[[^\]]*\]))+$")
+
 # Tie-break weight when several stations share a frequency at the same place.
 # Lower is preferred, so a controller beats a broadcast and ATIS beats AWOS.
 _POSITION_WEIGHT: dict[str, float] = {
@@ -178,8 +190,10 @@ _CENTRE_SUFFIX_BY_PREFIX: tuple[tuple[str, str], ...] = (
 _CENTRE_WORDS = re.compile(r"\b(?:CENTER|CENTRE|CNTR|ARTCC|ACC|UAC)\b", re.I)
 # Words that do not: a country field files its own frequency as "Bairnsdale
 # Control", and Munich files its centre as "Munchen Con". Either is a centre
-# only when the name is the sector's.
-_CONTROL_WORDS = re.compile(r"\b(?:CONTROL|CON|RADAR|RDR)\b", re.I)
+# only when the name is the sector's. "CTR" is here rather than above because
+# it is also a control zone; South Bend files Chicago Center as "CHICAGO CTR",
+# which was handed out as "Chicago Ctr Center".
+_CONTROL_WORDS = re.compile(r"\b(?:CONTROL|CON|RADAR|RDR|CTR)\b", re.I)
 
 
 def _restyled(name: str) -> str:
@@ -206,8 +220,83 @@ def _names_match(a: str, b: str) -> bool:
     return bool(a and b) and (a in b or b in a)
 
 
+# Words that name a position, a part of the field or a kind of frequency, and
+# never a place. A frequency row whose facility is nothing but these is the
+# source's remark column cut down to a name: Sheremetyevo files its ground
+# frequencies as "Twy", "Twy A" and "Twy D E", Canada its MF as "Mandatory",
+# the UK and Togo an air/ground station as "G Voice" (A/G VOICE RDO), Russia
+# "Taxiing", Japan "Remote". 96 rows at 70-odd fields in the built database.
+_NOT_A_NAME = frozenset("""
+    twy taxiway taxi taxiing rwy runway apron apn ramp stand
+    info information tower twr ground gnd delivery del clearance clnc clr
+    approach app departure dep radar control ctl con centre center ctr
+    atis ctaf unicom multicom radio rdo mandatory remote voice
+    ops operations frequency freq aerodrome airport field afis fis service
+    traffic advisory and of the north south east west primary secondary
+    alt alternate main i ii iii iv
+""".split())
+
+
+# Letters a frequency's name and a word of its airport's name must agree on
+# for the one to be the other cut short (after LocalTC: four).
+ABBREVIATION_STEM = 4
+
+
+def unabbreviated(facility: str, airport_name: str) -> str:
+    """A field's name put back where its frequency data cut it short.
+
+    Fiumicino's tower, ground and delivery are filed as FIUME while its
+    approach is ROMA, so a flight was handed from Roma Approach to "Fiume
+    Tower" -- a different town. A shortened word starts like a word of the
+    airport's own name and is shorter than it, but is not always a prefix of
+    it (FIUME has an E where FIUMICINO has an I), so the two are matched on
+    their first four letters. A word the data did not shorten is the same
+    length and stays; a word that names a position ("Intl", "Twr") is never
+    a name.
+    """
+    if not facility or not airport_name:
+        return facility
+    full = [w for w in re.findall(r"[^\W\d_]+", airport_name)
+            if _folded(w) not in _NOT_A_NAME]
+
+    def put_back(m: re.Match) -> str:
+        word = m.group(0)
+        if len(word) < ABBREVIATION_STEM or _folded(word) in _NOT_A_NAME:
+            return word
+        stem = _folded(word)[:ABBREVIATION_STEM]
+        found = next((f for f in full if len(f) > len(word)
+                      and _folded(f).startswith(stem)), None)
+        return found.capitalize() if found else word
+
+    return re.sub(r"[^\W\d_]+", put_back, facility)
+
+
+def field_facility(facility: str, position: str, spoken: str, airport_name: str = "") -> str:
+    """The facility a field's own frequency answers as.
+
+    Where the published name is nothing but position and field words (see
+    ``_NOT_A_NAME``), the airport's own spoken name instead: "Twy Ground" is
+    not a controller, and Sheremetyevo's Ground and Delivery cast from a
+    permutation of their own as "Twy" while the Tower was "Sheremetyevo". A
+    name that is the field's own is kept however generic it reads (North
+    Auxiliary Airfield is "North"). A centre keeps its own rules,
+    :func:`_answering_centre`.
+    """
+    if position == "CTR" or not spoken:
+        return facility
+    facility = unabbreviated(facility, airport_name)
+    words = re.findall(r"[a-z0-9]+", _folded(facility or ""))
+    generic = all(w in _NOT_A_NAME or w.isdigit() or len(w) == 1
+                  for w in words)
+    if words and not generic:
+        return facility
+    if words and _names_match(facility, spoken):
+        return facility
+    return spoken
+
+
 # The words a centre's own name can already end in.
-_OWN_POSITION_WORD = re.compile(r"\b(?:Radar|Information)$", re.I)
+_OWN_POSITION_WORD = re.compile(r"\b(?:Radar|Information|Radio|Oceanic)$", re.I)
 # The words a sector's callsign is stripped of, so the language being spoken
 # supplies its own: "Paris Control" is Paris Contrôle in French.
 _GENERIC_CENTRE_WORD = re.compile(r"\s+(?:Control|Centre|Center)$", re.I)
@@ -329,6 +418,56 @@ def transition_altitude(ident: str) -> int:
     return DEFAULT_TRANSITION_FT if dialect_for(code) == "faa" else 6000
 
 
+# Which national VFR practice a field follows: how a circuit is joined, what
+# the airspace is called, how an information service talks. Keyed and
+# ordered like _TRANSITION_BY_PREFIX above, and for the same reason -- the
+# ICAO prefix is the only thing about a field that reliably says which
+# state's manual its controllers learnt from. Anything not listed is plain
+# ICAO (Doc 4444 / Doc 9432), which is what a state without its own variant
+# uses.
+#
+#   faa   FAA JO 7110.65 and the AIM
+#   uk    CAP 413
+#   fr    the DGAC Manuel de phraséologie
+#   de    German-speaking practice: Germany, Austria and Switzerland share
+#         the Platzrunde, the Flugleiter at small fields and the DFS-style
+#         information service ("Langen Information"). Austria and
+#         Switzerland are grouped here on that practice, not on a manual.
+#         UNVERIFIED: that Swiss and Austrian VFR wording follows the German
+#         rather than plain ICAO. Only the VFR wording follows the region:
+#         the language a controller speaks is still the field's own
+#         (atc.language.reply_language), so Geneva, Sion and Lausanne answer
+#         in French and nothing here makes them German.
+_VFR_REGION_BY_PREFIX: tuple[tuple[tuple[str, ...], str], ...] = (
+    (_FAA_PREFIXES, "faa"),
+    (("EG",), "uk"),
+    (("LF",), "fr"),
+    (("ED", "ET", "LO", "LS"), "de"),
+    # VFR altitudes in metres. China gives them in metres (its whole
+    # altitude system is metric, RVSM included). UNVERIFIED: Mongolia (ZM,
+    # inside "Z") and the Russian regions below are grouped with it on the
+    # same practice, not on their AIPs; Russia moved its flight levels to
+    # feet in 2017 and what it does below the transition altitude was not
+    # checked. Other former-Soviet states are left as ICAO.
+    (("Z", "UU", "UW", "UR", "UL", "US", "UN", "UI", "UH", "UE", "UO"),
+     "metric"),
+)
+
+DEFAULT_VFR_REGION = "icao"
+
+
+def vfr_region(ident: str) -> str:
+    """``faa``, ``uk``, ``fr``, ``de``, ``metric``, or ``icao`` for
+    everywhere else."""
+    code = (ident or "").upper()
+    if not code:
+        return DEFAULT_VFR_REGION
+    for prefixes, region in _VFR_REGION_BY_PREFIX:
+        if code.startswith(prefixes):
+            return region
+    return DEFAULT_VFR_REGION
+
+
 def transition_level(altitude_ft: int, qnh_hpa: float, ident: str = "") -> int:
     """The lowest flight level in use above a transition altitude, in feet.
 
@@ -405,7 +544,18 @@ class Station:
     distance_nm: float = 0.0
     dialect: str = "faa"
 
+    def __post_init__(self) -> None:
+        # The simulator names a 25 kHz frequency by its 8.33 kHz channel
+        # name -- Heathrow Tower as 118.505 -- and its rows were stored that
+        # way, so the controller said and the panel showed a number that is
+        # on no chart. The carrier is the frequency (118.500); tuning either
+        # name still finds it (channels.same_channel), and a genuine 8.33
+        # channel is its own carrier and is left alone.
+        object.__setattr__(self, "mhz", carrier(self.mhz))
+
     def _named(self, table: dict[str, str]) -> str:
+        if self.position == "INFO":
+            return self._info_named(table)
         suffix = table.get(self.position, self.position)
         facility = self.facility.strip()
         if not facility:
@@ -419,6 +569,31 @@ class Station:
         if facility.lower().endswith(suffix.lower()):
             return facility
         return f"{facility} {suffix}"
+
+    @property
+    def is_radio(self) -> bool:
+        """An INFO station that is a "Radio": a flight service station (the
+        FAA's Denver Radio, Canada's London Radio) or an air/ground or
+        AFIS service published as one (Egelsbach Radio, Bresso Radio,
+        Brighton City's RDO). Everything else is an "Information"."""
+        if self.position != "INFO":
+            return False
+        if self.dialect == "faa":
+            return True
+        return bool(_RADIO_WORDS.search(f"{self.facility} {self.description}"))
+
+    def _info_named(self, table: dict[str, str]) -> str:
+        """An information service's name.
+
+        One suffix per language made every one of them the same thing:
+        "Kortrijk Radio" for Kortrijk Information, "Langen Radio" for Langen
+        Information, "Egelsbach Information" in French for Egelsbach Radio
+        and "Bresso Radio IT Radio" for Bresso Radio. A "Radio" is a name and
+        is the same in every language; "Information" is translated.
+        """
+        facility = _INFO_TAIL.sub("", self.facility.strip()).strip()
+        suffix = "Radio" if self.is_radio else table.get("INFO", "Information")
+        return f"{facility} {suffix}" if facility else suffix
 
     def callsign_in(self, language: str = "en", short: bool = False) -> str:
         """How this position is addressed, in a given language."""
@@ -481,6 +656,28 @@ class Runway:
     # its whole landing roll, at taxi speed, in the air.
     le_elev_ft: float | None = None
     he_elev_ft: float | None = None
+    # Where these came from: "db" (OurAirports), "sim" (the running
+    # simulator's facility data) or "cache" (the simulator's, kept from an
+    # earlier session; navdata/runway_cache.py). The simulator's are the
+    # ones the aeroplane rolls on, so they win whenever there are any.
+    source: str = "db"
+    # Each end's ILS ident, where the simulator gives one ("" none or not
+    # known), and how far its landing threshold is displaced from the end.
+    le_ils: str = ""
+    he_ils: str = ""
+    # What that navaid is: "ILS" where the simulator publishes an ILS (or
+    # localizer) approach to the end, "VOR" where it has a navaid there and
+    # no such approach, "" before the approaches are known
+    # (integrations.runways.with_ils_kinds).
+    le_ils_kind: str = ""
+    he_ils_kind: str = ""
+    le_displaced_ft: float = 0.0
+    he_displaced_ft: float = 0.0
+    # One end closed and the other open (the simulator says each): the
+    # closed one is not a landing direction (runway_ends), the runway still
+    # is a runway to cross. Both closed is ``closed``.
+    le_closed: bool = False
+    he_closed: bool = False
 
     def ends(self) -> list[tuple[str, float | None, float | None, float | None]]:
         """``[(ident, heading, lat, lon), ...]`` for both directions."""
@@ -531,18 +728,59 @@ class NavDB:
 
     def __init__(self, path: Path | str = DB_PATH):
         self.path = Path(path)
+        # A rebuild made while the last session held the file open.
+        put_in_place(self.path)
         if not self.path.exists():
             raise FileNotFoundError(
                 f"Nav database missing at {self.path}. "
                 f"Run: {command_hint('setup')}"
             )
-        self._conn = sqlite3.connect(f"file:{self.path}?mode=ro", uri=True,
-                                     check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
-        self._boundaries: list[tuple[str, float, float, float, float, list]] | None = None
+        # A connection per thread, opened on first use: see ``_conn``.
+        self._local = threading.local()
+        self._opened: list[tuple[threading.Thread, sqlite3.Connection]] = []
+        self._opened_lock = threading.Lock()
+        self._conn                      # fail here, not mid-flight, if unreadable
+        self._boundaries: list[tuple] | None = None
+        self._enroute = None
         self._preferences: dict[str, tuple[list[str], list[str], float]] | None = None
         # Per-field descent floors from ``minimum_altitudes.csv``.
         self._minimums: dict[str, int] | None = None
+        # Staffing hours from ``service_hours.csv``, read on first use.
+        self._service_hours: dict[tuple[str, str], str] | None = None
+        # The VFR data (navdata.vfrdata), each read on first use.
+        self._circuit_data = None
+        self._vrps = None
+        self._airspace = None
+
+    @property
+    def _conn(self) -> sqlite3.Connection:
+        """This thread's connection to the database.
+
+        One connection was shared by every thread, opened with
+        ``check_same_thread`` off, and the engine's tick and the panel's
+        server read it at once: the Airspace screen's refresh came back with
+        another query's columns ("tuple index out of range" in
+        :meth:`stations`) or "bad parameter or other API misuse". sqlite3
+        does not serialise a connection's statements for its callers. The
+        database is read-only, so a connection each costs nothing but a
+        file handle -- and a thread that has ended has its handle closed the
+        next time a thread opens one, because the server's workers and the
+        synthesiser's come and go.
+        """
+        conn = getattr(self._local, "conn", None)
+        if conn is None:
+            conn = sqlite3.connect(f"file:{self.path}?mode=ro", uri=True,
+                                   check_same_thread=False)
+            conn.row_factory = sqlite3.Row
+            self._local.conn = conn
+            with self._opened_lock:
+                ended = [c for t, c in self._opened if not t.is_alive()]
+                self._opened = [(t, c) for t, c in self._opened
+                                if t.is_alive()]
+                self._opened.append((threading.current_thread(), conn))
+            for old in ended:
+                old.close()
+        return conn
 
     # ------------------------------------------------------------------
     # airports
@@ -748,16 +986,19 @@ class NavDB:
 
     def stations(self, ident: str, position: str | None = None) -> list[Station]:
         ident = (ident or "").strip().upper()
-        sql = "SELECT * FROM frequencies WHERE ident = ?"
+        sql = ("SELECT f.*, a.spoken AS aspoken, a.name AS aname FROM frequencies f"
+               " LEFT JOIN airports a ON a.ident = f.ident WHERE f.ident = ?")
         args: list = [ident]
         if position:
-            sql += " AND position = ?"
+            sql += " AND f.position = ?"
             args.append(position)
-        sql += " ORDER BY priority ASC, mhz ASC"
+        sql += " ORDER BY f.priority ASC, f.mhz ASC"
         return [
             Station(
                 ident=r["ident"], position=r["position"], mhz=r["mhz"],
-                facility=r["facility"], description=r["description"] or "",
+                facility=field_facility(r["facility"], r["position"],
+                                        r["aspoken"] or "", r["aname"] or ""),
+                description=r["description"] or "",
                 priority=r["priority"], dialect=dialect_for(r["ident"]),
             )
             for r in self._conn.execute(sql, args).fetchall()
@@ -893,7 +1134,7 @@ class NavDB:
         rows = self._conn.execute(
             """
             SELECT f.*, a.lat AS alat, a.lon AS alon, a.size_rank AS rank,
-                   a.spoken AS aspoken
+                   a.spoken AS aspoken, a.name AS aname
             FROM frequencies f
             JOIN airports a ON a.ident = f.ident
             WHERE f.mhz BETWEEN ? AND ?
@@ -926,7 +1167,8 @@ class NavDB:
                 - 0.05 * r["rank"]
                 + _POSITION_WEIGHT.get(r["position"], 0.5)
             )
-            facility = r["facility"]
+            facility = field_facility(r["facility"], r["position"],
+                                      r["aspoken"] or "", r["aname"] or "")
             if r["position"] == "CTR":
                 facility = _answering_centre(facility, r["description"] or "",
                                              r["aspoken"] or "")
@@ -946,11 +1188,26 @@ class NavDB:
                     ),
                 )
             )
+        # A centre answers anywhere in its sector, not within so many miles
+        # of the field its frequency happens to be filed at: five hundred
+        # miles from Singapore, Singapore Control's number answered nobody.
+        # The rows filed at fields for the same centre on this channel are
+        # the same controller, and go, or which of them answered would
+        # depend on which field is nearest.
+        tolerance_khz = int(round(tolerance * 1000))
+        sector = self.enroute.on_frequency(mhz, lat, lon, altitude_ft,
+                                           tolerance_khz)
+        if sector is not None:
+            answering = sector.station(mhz)
+            scored = [(s, st) for s, st in scored
+                      if not (st.position == "CTR"
+                              and same_channel(st.mhz, answering.mhz,
+                                               tolerance_khz))]
+            scored.append((-1.0, answering))
         # Sector positions answer ahead of a field that happens to share the
         # number: the aeroplane is inside their airspace.
-        for station in self._sector_candidates(
-                mhz, lat, lon, int(round(tolerance * 1000))):
-            scored.append((-1.0, station))
+        for station in self._sector_candidates(mhz, lat, lon, tolerance_khz):
+            scored.append((-2.0, station))
         scored.sort(key=lambda t: t[0])
         return [s for _, s in scored]
 
@@ -976,7 +1233,59 @@ class NavDB:
     # ------------------------------------------------------------------
 
     @lru_cache(maxsize=512)
+    # -- the simulator's runways, ahead of the database's ----------------
+
+    def set_sim_runways(self, ident: str, runways) -> None:
+        """The running simulator's runways for ``ident``: from now on they
+        are the field's (integrations/runways.py). Empty or None forgets
+        them, and the cache or the database is used again."""
+        ident = (ident or "").strip().upper()
+        if not hasattr(self, "_sim_runways"):
+            self._sim_runways = {}
+        if runways:
+            self._sim_runways[ident] = tuple(runways)
+        else:
+            self._sim_runways.pop(ident, None)
+
+    def use_runway_cache(self, cache) -> None:
+        """Read the simulator's runways kept from earlier sessions
+        (navdata/runway_cache.py) before the database's. Off unless asked
+        for, so a test reads the database whatever is cached on the
+        machine."""
+        self._runway_cache = cache
+        self._cached_runways = {}
+
+    def runway_source(self, ident: str) -> str:
+        """Where ``ident``'s runways come from now: sim, cache or db."""
+        found = self._overlay(ident)
+        return found[0].source if found else "db"
+
+    def _overlay(self, ident: str):
+        ident = (ident or "").strip().upper()
+        live = getattr(self, "_sim_runways", {}).get(ident)
+        if live:
+            return live
+        cache = getattr(self, "_runway_cache", None)
+        if cache is None:
+            return None
+        memo = self._cached_runways
+        if ident not in memo:
+            memo[ident] = cache.load(ident)
+        return memo[ident]
+
     def runways(self, ident: str, include_closed: bool = False) -> tuple[Runway, ...]:
+        """The field's runways, longest first: the simulator's (live, or
+        kept from an earlier session) when there are any, else the
+        database's. Closed ones are left out unless asked for."""
+        found = self._overlay(ident)
+        if found:
+            out = [rw for rw in found if include_closed or not rw.closed]
+            out.sort(key=lambda rw: -(rw.length_ft or 0))
+            return tuple(out)
+        return self.db_runways(ident, include_closed)
+
+    def db_runways(self, ident: str, include_closed: bool = False) -> tuple[Runway, ...]:
+        """OurAirports' runways for ``ident``, whatever the simulator says."""
         ident = (ident or "").strip().upper()
         rows = self._conn.execute(
             "SELECT * FROM runways WHERE ident = ?", (ident,)
@@ -1046,6 +1355,18 @@ class NavDB:
                 best = rw.he_ident if apart > 90.0 else rw.le_ident
         return best
 
+    def runway_strip(self, ident: str, runway: str) -> str:
+        """The runway a designator is one end of, as "06/24": the same for
+        both ends, so a watch that keys on it sees one runway where a pilot
+        backtracking along 06 to the 24 threshold sees one. A designator the
+        field does not have is its own strip."""
+        key = normalize_runway(runway)
+        for rw in self.runways(ident):
+            ends = (normalize_runway(rw.le_ident), normalize_runway(rw.he_ident))
+            if key in ends:
+                return "/".join(ends)
+        return key
+
     def runway_within_limits(self, ident: str, runway: str, wind_dir: float,
                              wind_kt: float, gust_kt: float = 0.0,
                              variable: bool = False,
@@ -1068,6 +1389,79 @@ class NavDB:
                     and abs(speed * math.sin(angle)) <= max_crosswind_kt)
         return False
 
+    # How close an end has to be, in heading and in where its threshold is,
+    # to be the same end under another number. UNVERIFIED: chosen; a
+    # renumbering moves the number by one (ten degrees of variation), never
+    # the runway, and the next runway over is far more than this away.
+    SAME_END_DEG = 15.0
+    SAME_END_M = 800.0
+
+    def _same_end(self, ident: str, name: str):
+        """The current end that ``name`` -- an end of the database's -- is,
+        under whatever the simulator calls it; None if none matches."""
+        from .build import haversine_nm
+
+        key = normalize_runway(name)
+        old = next(((hdg, lat, lon) for rw in self.db_runways(ident)
+                    for end, hdg, lat, lon in rw.ends()
+                    if normalize_runway(end) == key), None)
+        if old is None or None in old:
+            return None
+        best = None
+        for rw in self.runways(ident):
+            for end, hdg, lat, lon in rw.ends():
+                if None in (hdg, lat, lon):
+                    continue
+                turn = abs((hdg - old[0] + 540.0) % 360.0 - 180.0)
+                apart = haversine_nm(lat, lon, old[1], old[2]) * 1852.0
+                if turn <= self.SAME_END_DEG and apart <= self.SAME_END_M \
+                        and (best is None or apart < best[0]):
+                    best = (apart, end)
+        return best[1] if best else None
+
+    def current_runway(self, ident: str, name: str) -> str:
+        """``name`` as the field calls it now: itself where the field has
+        it, else the end the database knew by that number, renumbered by
+        the simulator's scenery ("25" where the signs say "26"); itself
+        again where nothing matches."""
+        if not name or self.has_runway(ident, name):
+            return name
+        if self.runway_source(ident) == "db":
+            return name
+        found = self._same_end(ident, name)
+        return normalize_runway(found) if found else name
+
+    def runway_differences(self, ident: str) -> dict:
+        """What the simulator's runways and the database's disagree on:
+        ends renumbered (old -> new), ends only one side has, and how far
+        each matched threshold is moved, in metres."""
+        from .build import haversine_nm
+
+        if self.runway_source(ident) == "db":
+            return {}
+        db_ends = {normalize_runway(e): (h, la, lo)
+                   for rw in self.db_runways(ident) for e, h, la, lo in rw.ends()}
+        sim_ends = {normalize_runway(e): (h, la, lo)
+                    for rw in self.runways(ident) for e, h, la, lo in rw.ends()}
+        renamed, moved = {}, {}
+        for end in db_ends:
+            if end in sim_ends:
+                a, b = db_ends[end], sim_ends[end]
+                if None not in a[1:] and None not in b[1:]:
+                    metres = haversine_nm(a[1], a[2], b[1], b[2]) * 1852.0
+                    if metres >= 30.0:
+                        moved[end] = round(metres)
+                continue
+            found = self._same_end(ident, end)
+            if found:
+                renamed[end] = normalize_runway(found)
+        db_only = sorted(e for e in db_ends
+                         if e not in sim_ends and e not in renamed)
+        sim_only = sorted(e for e in sim_ends if e not in db_ends
+                          and e not in renamed.values())
+        return {"renamed": renamed, "threshold_moved_m": moved,
+                "db_only": db_only, "sim_only": sim_only}
+
     def has_runway(self, ident: str, runway: str) -> bool:
         """Whether the field has this landing direction."""
         key = normalize_runway(runway)
@@ -1079,6 +1473,11 @@ class NavDB:
         ends: list[tuple[str, float, Runway]] = []
         for rw in self.runways(ident):
             for end_ident, hdg, _lat, _lon in rw.ends():
+                # An end the simulator says is closed is no landing
+                # direction; its runway is still there to be crossed.
+                if (end_ident == rw.le_ident and rw.le_closed) or (
+                        end_ident == rw.he_ident and rw.he_closed):
+                    continue
                 if hdg is None:
                     hdg = _heading_from_ident(end_ident)
                 if hdg is None:
@@ -1235,6 +1634,101 @@ class NavDB:
                         self._minimums[code] = floor
         return self._minimums.get((ident or "").strip().upper(), 0)
 
+    def service_hours(self, ident: str, position: str) -> str:
+        """When a field's position is staffed, as written in
+        ``service_hours.csv`` -- "H24", "HJ", "0800-1700" -- or "" when the
+        file says nothing about it (which means open; see that file)."""
+        if self._service_hours is None:
+            self._service_hours = {}
+            path = self.path.parent / "service_hours.csv"
+            if path.exists():
+                import csv
+
+                with path.open(encoding="utf-8", newline="") as fh:
+                    rows = [ln for ln in fh if not ln.lstrip().startswith("#")]
+                for r in csv.DictReader(rows):
+                    code = (r.get("ident") or "").strip().upper()
+                    where = (r.get("position") or "").strip().upper()
+                    hours = (r.get("hours") or "").strip()
+                    if code and where and hours:
+                        self._service_hours[(code, where)] = hours
+        return self._service_hours.get(
+            ((ident or "").strip().upper(), (position or "").strip().upper()), "")
+
+    # --- the VFR data -----------------------------------------------------
+
+    def approach_areas(self):
+        """Every approach area (navdata.approach_areas), read once from
+        beside the database."""
+        from .approach_areas import FILE_NAME, ApproachAreas
+
+        if getattr(self, "_approach_areas", None) is None:
+            self._approach_areas = ApproachAreas.load(self.path.parent / FILE_NAME)
+        return self._approach_areas
+
+    def approach_area(self, ident: str):
+        """The approach area a field's own coordinates fall in -- the
+        smallest of several -- or None. Never matched by name."""
+        airport = self.airport(ident)
+        if airport is None:
+            return None
+        return self.approach_areas().for_field(airport.ident, airport.lat,
+                                               airport.lon)
+
+    def _vfr_files(self, stem: str) -> list[Path]:
+        """The generated file first, the hand-kept one after it, so a hand
+        row wins (navdata.vfrdata)."""
+        folder = self.path.parent
+        return [folder / f"{stem}_faa.csv", folder / f"{stem}.csv"]
+
+    def circuit_data(self, ident: str, runway: str):
+        """The published circuit for one runway end, or None.
+
+        A :class:`~wilcoatc.navdata.vfrdata.CircuitData`: the side ("" when
+        unknown) and the height above the field (0 when unknown).
+        """
+        from .vfrdata import load_circuits
+
+        if self._circuit_data is None:
+            self._circuit_data = load_circuits(self._vfr_files("circuits"))
+        return self._circuit_data.get(
+            ((ident or "").strip().upper(), normalize_runway(runway or "")))
+
+    def vrps(self, ident: str) -> list:
+        """The visual reporting points of a field, spoken or not."""
+        from .vfrdata import load_vrps
+
+        if self._vrps is None:
+            self._vrps = load_vrps(self._vfr_files("vrps"))
+        return list(self._vrps.get((ident or "").strip().upper(), []))
+
+    def airspace_volumes(self) -> list:
+        from .vfrdata import load_airspace
+
+        if self._airspace is None:
+            self._airspace = load_airspace(self._vfr_files("airspace"))
+        return self._airspace
+
+    def airspace_at(self, lat: float, lon: float, altitude_ft: float,
+                    ground_ft: float | None = None) -> list:
+        """Every volume the point is in, most restrictive class first.
+
+        ``ground_ft`` is the ground under the point, for limits given above
+        it; without one, the nearest field's elevation within ten miles is
+        used, else the sea.
+        """
+        if ground_ft is None:
+            near = self.nearest_airport(lat, lon, max_nm=10.0)
+            ground_ft = float(getattr(near, "elev_ft", 0.0) or 0.0) if near else 0.0
+        found = [v for v in self.airspace_volumes()
+                 if v.contains(lat, lon, altitude_ft, ground_ft)]
+        return sorted(found, key=lambda v: v.cls)
+
+    def airspace_over(self, lat: float, lon: float) -> list:
+        """Every volume whose outline covers the point, at any height."""
+        return sorted((v for v in self.airspace_volumes() if v.covers(lat, lon)),
+                      key=lambda v: v.cls)
+
     def parallel_runways(self, ident: str, end_ident: str) -> list[str]:
         """Other runway ends pointing the same way, e.g. 27L given 27R."""
         target = _heading_from_ident(end_ident)
@@ -1299,18 +1793,64 @@ class NavDB:
         for r in self._conn.execute("SELECT * FROM boundaries"):
             self._boundaries.append(
                 (r["id"], r["min_lat"], r["max_lat"], r["min_lon"], r["max_lon"],
-                 json.loads(r["polygon"]))
+                 json.loads(r["polygon"]), bool(r["oceanic"]))
             )
 
     def fir_at(self, lat: float, lon: float) -> dict | None:
         """The ARTCC / FIR whose boundary contains a position."""
         self._load_boundaries()
-        for fid, min_lat, max_lat, min_lon, max_lon, rings in self._boundaries:
+        for fid, min_lat, max_lat, min_lon, max_lon, rings, oceanic \
+                in self._boundaries:
             if not (min_lat <= lat <= max_lat and min_lon <= lon <= max_lon):
                 continue
             if any(_point_in_ring(lon, lat, ring) for ring in rings):
-                return self._fir_details(fid)
+                details = self._fir_details(fid)
+                details["oceanic"] = oceanic
+                details["box"] = (min_lat, max_lat, min_lon, max_lon)
+                return details
         return None
+
+    def fir(self, fid: str) -> dict | None:
+        """One FIR by its boundary id, as :meth:`fir_at` describes it.
+
+        For ``freq <FIR>`` and the audit, which ask about a FIR by name
+        rather than by a position inside it. The box covers every piece.
+        """
+        self._load_boundaries()
+        fid = (fid or "").strip().upper()
+        pieces = [b for b in self._boundaries if b[0].upper() == fid]
+        if not pieces:
+            return None
+        details = self._fir_details(pieces[0][0])
+        # New York is a domestic centre with an oceanic piece under the same
+        # id: domestic if any piece is, and the ocean said separately.
+        details["oceanic"] = all(b[6] for b in pieces)
+        details["has_oceanic"] = any(b[6] for b in pieces)
+        details["box"] = (min(b[1] for b in pieces), max(b[2] for b in pieces),
+                          min(b[3] for b in pieces), max(b[4] for b in pieces))
+        details["named"] = self._conn.execute(
+            "SELECT 1 FROM firs WHERE icao = ? OR boundary = ? LIMIT 1",
+            (pieces[0][0], pieces[0][0])).fetchone() is not None
+        return details
+
+    def fir_ids(self) -> list[str]:
+        """Every FIR outline's id, once, in the order the data has them."""
+        self._load_boundaries()
+        return list(dict.fromkeys(b[0] for b in self._boundaries))
+
+    @property
+    def enroute(self):
+        """Who works the cruise where: :class:`wilcoatc.atc.enroute.EnRoute`.
+
+        Built on first use. It lives in ``atc`` because it is the controller's
+        picture of the sky, and it is reached from here because the question
+        "who answers on this frequency" (:meth:`candidate_stations`) is this
+        class's, and a centre answers anywhere in its sector.
+        """
+        if self._enroute is None:
+            from ..atc.enroute import EnRoute
+            self._enroute = EnRoute(self)
+        return self._enroute
 
     def _fir_details(self, fid: str) -> dict:
         row = self._conn.execute(
@@ -1326,14 +1866,27 @@ class NavDB:
     def center_station(
         self, lat: float, lon: float, altitude_ft: float = 0.0
     ) -> Station | None:
-        """The enroute centre for a position, with a real frequency if one exists.
+        """The enroute centre for a position: the sector's controller.
 
-        Centre sector frequencies are not published in any open worldwide
-        dataset, so the facility *name* comes from the boundary polygons (which
-        is what the pilot hears and reads back) and the *frequency* is taken
-        from the nearest airport that publishes a centre frequency. Where no
-        such frequency is on file the station is returned with ``mhz`` of 0 and
-        the caller keeps the pilot with approach instead of inventing a number.
+        Which sector, and on what frequency, is :mod:`wilcoatc.atc.enroute`'s
+        answer, and inside any boundary it always has a frequency -- sourced,
+        or invented and logged as such. Outside every boundary (a sliver of
+        coast the outlines miss) the nearest row that names a centre still
+        answers, as it did before the sectors existed.
+        """
+        sector = self.enroute.which(lat, lon, altitude_ft)
+        if sector is not None:
+            return sector.station()
+        found = self.borrowed_centre(lat, lon, None)
+        return found[0] if found is not None else None
+
+    def borrowed_centre(self, lat: float, lon: float,
+                        fir: dict | None) -> tuple[Station, float] | None:
+        """A centre frequency filed at an airfield, for the sector here.
+
+        Most of the world's area control frequencies are in no open dataset
+        except as rows filed at a field, so a sector with nothing better
+        borrows the nearest one that names it.
 
         The nearest such airport has to be in the same country as the
         aeroplane. It used to be simply the nearest within two hundred and
@@ -1346,33 +1899,60 @@ class NavDB:
         on it is worse than no frequency: the pilot has left the one station
         that could still hear them.
         """
-        sector = self.sector_centre(lat, lon, altitude_ft)
-        if sector is not None:
-            return sector
-
-        fir = self.fir_at(lat, lon)
         spoken = fir["spoken"] if fir else ""
-
         found = self._nearest_center_frequency(
             lat, lon, regions=self._regions_at(lat, lon, fir), sector=spoken)
         if found is not None and not self._same_centre(spoken, *found):
             found = None
-        if found is not None:
-            station, _d = found
-            called = self._centre_called(station.facility,
-                                         station.description, spoken, _d)
-            if called != station.facility:
-                station = Station(
-                    ident=station.ident, position="CTR", mhz=station.mhz,
-                    facility=called,
-                    description=station.description, distance_nm=station.distance_nm,
-                    dialect=station.dialect,
-                )
-            return station
-        if not spoken:
+        if found is None:
             return None
-        return Station(ident="", position="CTR", mhz=0.0, facility=spoken,
-                       dialect=dialect_for((fir or {}).get("icao", "")))
+        station, d = found
+        called = self._centre_called(station.facility,
+                                     station.description, spoken, d)
+        if called != station.facility:
+            station = Station(
+                ident=station.ident, position="CTR", mhz=station.mhz,
+                facility=called,
+                description=station.description, distance_nm=station.distance_nm,
+                dialect=station.dialect,
+            )
+        return station, d
+
+    def centre_rows_named(self, spoken: str, box: tuple[float, float, float, float],
+                          margin_deg: float = 1.0) -> list[tuple[Station, float, float]]:
+        """Every centre row in and around a boundary that names it.
+
+        ``box`` is the boundary's (south, north, west, east). Returned as
+        (station, lat, lon) of the field each row is filed at, so the caller
+        can measure from wherever it is asking. A sector is answered on any of
+        them: Minnipa and Wudinna both file Melbourne on 125.9, and from five
+        hundred miles inside the sector Singapore's own number is still
+        Singapore's.
+        """
+        if not spoken:
+            return []
+        south, north, west, east = box
+        rows = self._conn.execute(
+            """
+            SELECT f.*, a.lat AS alat, a.lon AS alon
+            FROM frequencies f JOIN airports a ON a.ident = f.ident
+            WHERE f.position = 'CTR'
+              AND a.lat BETWEEN ? AND ? AND a.lon BETWEEN ? AND ?
+            """,
+            (south - margin_deg, north + margin_deg,
+             west - margin_deg, east + margin_deg),
+        ).fetchall()
+        out = []
+        for r in rows:
+            name = centre_name(r["facility"], r["description"] or "", spoken)
+            if not name or not _names_match(name, spoken):
+                continue
+            out.append((Station(ident=r["ident"], position="CTR", mhz=r["mhz"],
+                                facility=spoken,
+                                description=r["description"] or "",
+                                dialect=dialect_for(r["ident"])),
+                        r["alat"], r["alon"]))
+        return out
 
     # How near a borrowed centre frequency has to be published for it to
     # count as this sector's, when the name on it is not the name of the
@@ -1469,6 +2049,13 @@ class NavDB:
         out = []
         for row in rows:
             if not same_channel(mhz, row["mhz"], tolerance_khz):
+                continue
+            # The sector data files towers, approaches and grounds too, and
+            # each of them answered here as a centre, ahead of the field's own
+            # row: de Gaulle's tower frequency was answered by a position
+            # with the ident "LF". Only area positions answer by sector; FSS
+            # stays, because real oceanic stations (Brisbane Radio) are FSS.
+            if (row["type"] or "").upper() not in ("CTR", "FSS"):
                 continue
             if self._sector_rows(lat, lon, self.SECTOR_ANSWER_MARGIN_DEG,
                                  owner=row["key"]):
@@ -1619,7 +2206,11 @@ class NavDB:
     # ------------------------------------------------------------------
 
     def close(self) -> None:
-        self._conn.close()
+        with self._opened_lock:
+            opened, self._opened = self._opened, []
+        for _, conn in opened:
+            conn.close()
+        self._local = threading.local()
 
 
 def _segment_position(

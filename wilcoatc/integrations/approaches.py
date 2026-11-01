@@ -23,7 +23,7 @@ from __future__ import annotations
 import logging
 import struct
 
-from ..atc.approaches import TYPE_NAMES, FieldApproaches, runway_from
+from ..atc.approaches import KINDS, Approach, FieldApproaches, runway_from
 from ..logs import decision
 from .taxiways import ask_facility
 
@@ -52,16 +52,27 @@ def decode(blocks: dict[int, list[bytes]], ident: str) -> FieldApproaches | None
             log.info("%s: a %d-byte approach block where %d were expected; "
                      "not using the simulator's approaches", ident, len(raw), size)
             return None
-        kind, _suffix, number, designator, faf_m, missed_ft = \
+        kind, suffix, number, designator, faf_m, missed_ft = \
             struct.unpack(_SHAPE, raw)
-        name = TYPE_NAMES.get(kind)
+        name = KINDS.get(kind)
         runway = runway_from(number, designator)
-        decision("approach_data", airport=ident, runway=runway, type=name or kind,
+        # The chart's letter (ILS Z, VOR-A), an ASCII code. A procedure to
+        # no runway is a circling-only one, kept now that a circle can be
+        # flown (the IFR plan, Phase 4); before, it was dropped.
+        letter = chr(suffix) if 65 <= suffix <= 90 else ""
+        kept = bool(name and (runway or letter))
+        decision("approach_data", airport=ident, runway=runway or None,
+                 type=name or kind, suffix=letter or None,
                  faf_raw_m=round(faf_m, 1), missed_raw=round(missed_ft, 1),
-                 kept=bool(name and runway))
-        if name and runway:
-            found.add(runway, name, faf_ft=max(0.0, faf_m) * FT_PER_M,
-                      missed_ft=max(0.0, missed_ft))
+                 kept=kept)
+        if kept:
+            # RNAV minima lines and RNP AR are not read yet: the fields
+            # (HAS_LPV, IS_RNPAR, ...) are to be checked against a running
+            # simulator first. UNVERIFIED.
+            found.add_procedure(Approach(
+                name, runway, letter,
+                faf_ft=max(0.0, faf_m) * FT_PER_M,
+                missed_ft=max(0.0, missed_ft)))
     return found
 
 

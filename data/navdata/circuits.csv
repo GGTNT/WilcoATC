@@ -1,0 +1,13 @@
+# Circuit side and height per runway end, kept by hand.
+#
+# A row here wins over the same runway end in circuits_faa.csv (generated
+# from FAA NASR by scripts/build_nasr.py). Nothing known about a runway end
+# leaves it left-hand at 1,000 ft above the field, unless the simulator's own
+# runway data gives a pattern altitude.
+#
+#   ident          the field's identifier as the nav database has it (EBKT)
+#   runway         the runway end (24, 06, 27L)
+#   side           left or right, or empty when only the height is known
+#   height_ft_agl  circuit height above the field in feet, or empty
+#   source         the AIP section and its date, or the chart and its date
+ident,runway,side,height_ft_agl,source

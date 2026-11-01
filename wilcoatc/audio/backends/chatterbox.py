@@ -118,6 +118,17 @@ VARIANTS: dict[str, dict] = {
         languages=frozenset({"en", "fr", "de", "es", "it", "pt", "nl"}),
         size_mb=3300,
     ),
+    # Block diffusion rather than one token at a time: sixteen speech tokens
+    # per block, a few denoising steps each, and a two-step vocoder. Its own
+    # package (chatterbox-flash), built on this one. See FLASH_STEPS.
+    "flash": dict(
+        repo="ResembleAI/chatterbox-flash",
+        files=("ve.safetensors", "t3_flash.safetensors", "s3gen.safetensors",
+               "tokenizer.json"),
+        sentinel="t3_flash.safetensors",
+        languages=frozenset({"en"}),
+        size_mb=3200,
+    ),
 }
 
 #: The model when the config does not say. See the module docstring for
@@ -136,6 +147,14 @@ TEMPERATURE = 0.8
 #: faithful to the text and measurably slower in delivery, and at 0.5 the
 #: lines come out half as long again, which reads as a drawl.
 TURBO_TEMPERATURE = 0.8
+
+#: Denoising steps per block for the Flash model; its card's default is 10.
+#: Measured on a CPU (eight threads, bfloat16) over one twenty-word
+#: clearance cloned from the same clip, seconds of rendering per second of
+#: speech and words lost through the recogniser: the standard model 4.1-4.2
+#: and 11-13%; Flash at 10 steps 2.0 and 9-17%, at 6 steps 1.35 and 11%, at
+#: 4 steps 1.05 and 11-15%. Six is where the time stops buying words.
+FLASH_STEPS = 6
 
 #: Below this, under the clip's own peak, is the padding the model adds.
 TRIM_DB = -45.0
@@ -271,6 +290,9 @@ class ChatterboxTTS:
                 return False
             if not any(self.prompt_dir.glob("*")):
                 return False
+            if self.variant == "flash" \
+                    and find_spec("chatterbox_flash") is None:
+                return False
             return find_spec("chatterbox") is not None
         except Exception:                            # pragma: no cover
             return False
@@ -301,15 +323,25 @@ class ChatterboxTTS:
                         "voice.engine to auto for the quick tier.",
                         self.variant, torch.get_num_threads(),
                         "about as long as it takes to say"
-                        if self.variant == "turbo"
+                        if self.variant in ("turbo", "flash")
                         else "a little over twice as long as it takes to say")
                 cls = self._class()
-                self._model = cls.from_local(str(self.model_dir), device)
+                if self.variant == "flash":
+                    # bfloat16 on the CPU as well as the card: measured twice
+                    # as quick as float32 there, and no worse for words.
+                    self._model = cls.from_local(str(self.model_dir), device,
+                                                 dtype=torch.bfloat16)
+                else:
+                    self._model = cls.from_local(str(self.model_dir), device)
                 self._device = device
                 log.info("chatterbox %s loaded on %s", self.variant, device)
             return self._model
 
     def _class(self):
+        if self.variant == "flash":
+            from chatterbox_flash import ChatterboxFlashTTS
+
+            return ChatterboxFlashTTS
         if self.variant == "turbo":
             from chatterbox.tts_turbo import ChatterboxTurboTTS
 
@@ -400,6 +432,14 @@ class ChatterboxTTS:
         return best[1], rate
 
     def _generate(self, model, text: str, spoken: str):
+        if self.variant == "flash":
+            # FlashInfer and CUDA graphs are the card's; everywhere else the
+            # package's plain torch engine, which is the one measured above.
+            card = self._device == "cuda"
+            return model.generate(text, exaggeration=EXAGGERATION,
+                                  num_steps=FLASH_STEPS,
+                                  backend="auto" if card else "torch",
+                                  use_cuda_graph=card)
         if self.variant == "turbo":
             return model.generate(text, temperature=TURBO_TEMPERATURE)
         if self.variant == "multilingual":

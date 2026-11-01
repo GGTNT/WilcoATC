@@ -39,6 +39,14 @@ _SHARED = frozenset({
     "uniform", "whiskey", "xray", "yankee", "zulu",
 })
 
+# English words the other grammars accept too, because their pilots say them:
+# "Stuttgart Tower" as often as "Stuttgart Turm", "Radiocheck" as often as
+# "Funkprobe". As evidence they are English: at Heubach "Heubach Tower, ...,
+# request radio check" scored one German word ("tower") against one English.
+_BORROWED_ENGLISH = frozenset({
+    "tower", "ground", "approach", "delivery", "departure", "apron", "check",
+})
+
 _WORD = re.compile(r"[^\W\d_]{3,}", re.UNICODE)
 
 
@@ -64,6 +72,9 @@ def _words(language: str) -> frozenset[str]:
         for _, pattern in _RULES:
             clean = re.sub(r"[()\[\]{}|?*+^$.\\]", " ", pattern)
             found |= {w.lower() for w in _WORD.findall(clean)}
+        found |= _BORROWED_ENGLISH
+    else:
+        found -= _BORROWED_ENGLISH
     return frozenset(found - _SHARED)
 
 
@@ -118,4 +129,51 @@ def language_of_text(text: str, candidates) -> str:
     return default
 
 
-__all__ = ["language_of_text"]
+def by_words(text: str, candidates) -> str | None:
+    """The one language whose phraseology is in the transmission, or None
+    when the words do not say: none of them, or as many of one as another.
+
+    For a first call, where nothing else is known yet, this beats the
+    recogniser's tag. At Heubach "Heubach Tower, DEHUH, request radio check"
+    was tagged German -- the field's German name pulls the guess -- and three
+    of its words are English phraseology and none German.
+    """
+    options = list(dict.fromkeys(str(c).lower()[:2] for c in candidates if c))
+    scores = sorted(((_score(text, lang), lang) for lang in options),
+                    reverse=True)
+    if not scores or scores[0][0] == 0:
+        return None
+    tied = [lang for score, lang in scores if score == scores[0][0]]
+    if len(tied) == 1:
+        return tied[0]
+    # A tie the grammars settle: told the station's name, the recogniser
+    # writes a spoken "Heubach Turm" as "Heubach Tower", and "Tower" then
+    # weighs as much as the "Funkprobe" that only German understands.
+    understood = [lang for lang in tied if _understands(text, lang)]
+    return understood[0] if len(understood) == 1 else None
+
+
+def clearly_in(text: str, language: str, than: str,
+               words: int = 2) -> bool:
+    """Whether a transmission is in ``language`` over several words, rather
+    than one word of it on a frequency worked in ``than``: its grammar makes
+    sense of it, ``than``'s does not, and more of its phraseology is in it.
+    Callsigns and numbers count for neither, which is why two words are
+    several ("Delta douze trente-quatre, demande la descente").
+
+    The recogniser's language tag is a guess from the sound and is wrong on
+    short English calls with a local accent: at Kortrijk an English taxi call
+    was tagged French. A frequency changes language on the words, never on
+    the tag.
+    """
+    if language == than:
+        return True
+    ours, theirs = _score(text, language), _score(text, than)
+    # ``than`` understanding it counts only on words of its own: German
+    # takes "radio check" as German pilots say it, and at Heubach that kept
+    # an English radio check on a German frequency in German.
+    return (ours >= words and ours > theirs and _understands(text, language)
+            and (theirs == 0 or not _understands(text, than)))
+
+
+__all__ = ["by_words", "clearly_in", "language_of_text"]

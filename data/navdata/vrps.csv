@@ -1,0 +1,28 @@
+# Visual reporting points, kept by hand.
+#
+# A field's points here replace that field's points from vrps_faa.csv
+# (generated from FAA NASR by scripts/build_nasr.py).
+#
+#   ident        the field's identifier (EBKT)
+#   name         what is said on the radio ("November", "Sierra"). A point
+#                with no name is never said by the controller.
+#   code         an identifier from a navigation database, if any (VPxxx)
+#   lat, lon     decimal degrees, WGS84, north and east positive: 50.8167
+#   kind         entry, exit, both, holding or svfr. "svfr" is a Special
+#                VFR reporting point: used for Special VFR routes, and for
+#                ordinary VFR only where the field has no other point.
+#   altitude_ft  the altitude published for the point, or empty
+#   source       the chart or AIP page and its date, e.g. "SIA VAC LFQQ,
+#                AIRAC 2610 (01 OCT 2026)"
+#
+# Belgium (EBKT, EBCI, EBAW) is to be filled in from the skeyes eAIP, AD 2
+# chart pages, one row per point, by whoever has the eAIP open.
+ident,name,code,lat,lon,kind,altitude_ft,source
+LFQQ,N,,50.645278,2.929167,svfr,,"SIA AIP FRANCE AD 2 LFQQ TXT 19 FEB 2026 (AMDT 03/26), read in the eAIP AIRAC 2610 (01 OCT 2026) package; Special VFR reporting points table: A25 motorway / TGV line intersection"
+LFQQ,W,,50.522778,2.793056,svfr,,"SIA AIP FRANCE AD 2 LFQQ TXT 19 FEB 2026 (AMDT 03/26), read in the eAIP AIRAC 2610 (01 OCT 2026) package; Special VFR reporting points table: railway / canal intersection south of La Bassee"
+LFQQ,SE,,50.471111,3.227778,svfr,,"SIA AIP FRANCE AD 2 LFQQ TXT 19 FEB 2026 (AMDT 03/26), read in the eAIP AIRAC 2610 (01 OCT 2026) package; Special VFR reporting points table: A23 interchange with D938"
+LFQQ,SA,,50.518333,3.133611,svfr,,"SIA AIP FRANCE AD 2 LFQQ TXT 19 FEB 2026 (AMDT 03/26), read in the eAIP AIRAC 2610 (01 OCT 2026) package; Special VFR reporting points table: traffic circle east of Pont-a-Marcq"
+LFQQ,SW,,50.457222,2.971389,svfr,,"SIA AIP FRANCE AD 2 LFQQ TXT 19 FEB 2026 (AMDT 03/26), read in the eAIP AIRAC 2610 (01 OCT 2026) package; Special VFR reporting points table: A1 and TGV bridges over the Deule canal"
+LFQQ,NG,,50.603056,3.113333,holding,,"SIA AIP FRANCE AD 2 LFQQ TXT 19 FEB 2026 (AMDT 03/26), read in the eAIP AIRAC 2610 (01 OCT 2026) package; VFR holding points table: overhead the Lille Metropole golf course, on ATC instruction only"
+LFPN,S,,48.709722,2.110278,entry,,"SIA AIP FRANCE AD 2 LFPN TXT 06 11 JUN 2026 (AMDT 07/26), read in the eAIP AIRAC 2610 (01 OCT 2026) package; Reporting points table: northern hill of the Chevreuse valley, R171 TSU / 2.7 NM DME ILS TNO"
+LFPN,NH,,48.759167,2.100000,both,,"SIA AIP FRANCE AD 2 LFPN TXT 06 11 JUN 2026 (AMDT 07/26), read in the eAIP AIRAC 2610 (01 OCT 2026) package; Reporting points table: no description or use given for this point"

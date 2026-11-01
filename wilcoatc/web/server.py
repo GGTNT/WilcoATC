@@ -17,6 +17,7 @@ import logging
 import threading
 import time
 from collections import deque
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -25,15 +26,20 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+from .. import __version__
+from .. import config as cfg
+from ..atc.enroute import is_invented
 from ..atc.language import LANGUAGE_NAMES, languages_for
 from ..atc.written import as_written
-from ..navdata.channels import channel_name, same_channel
+from ..navdata.channels import carrier_khz, same_channel, shown
 from ..navdata.db import STATION_RANGE_NM
 from ..audio.announcements import EVENTS as ANNOUNCEMENT_EVENTS
 from ..engine import Engine, Event, announcement_roots
 from ..health import report as health_report
+from ..audio.io import InputMeter
 from ..install import Installer, SIZES_MB as SETUP_STEPS
 from ..logs import METRICS, RING, SESSION_ID, diagnostics
+from ..update import Updater, cleanup as update_cleanup, quit_process
 
 log = logging.getLogger(__name__)
 
@@ -165,28 +171,34 @@ def create_app(engine: Engine, broadcaster: Broadcaster) -> FastAPI:
 
         order = ["ATIS", "AWOS", "DEL", "GND", "TWR", "DEP", "APP", "CTR",
                  "CTAF", "INFO"]
-        rows = [
-            {
-                # The channel as a radio selects it, which is what the charts
-                # and the simulator show. Tuning it works either way: the
-                # match is made on the carrier, not on the digits.
-                "mhz": channel_name(station.mhz),
+        rows = []
+        seen: set[tuple[str, int]] = set()
+        # Nearest field first: the airport you are standing on matters more
+        # than one nine miles away that happens to publish a tower frequency
+        # alphabetically earlier.
+        for station in sorted(
+                stations,
+                key=lambda s: (round(s.distance_nm),
+                               order.index(s.position) if s.position in order else 99,
+                               s.priority, s.mhz)):
+            # One row a channel at a field: 126.625 from one source and
+            # 126.630 from another are one transmitter, and listing both
+            # read as two frequencies.
+            channel = (station.ident, carrier_khz(station.mhz))
+            if channel in seen:
+                continue
+            seen.add(channel)
+            rows.append({
+                # The number a controller there says (channels.shown): the
+                # channel name in 8.33 airspace, the carrier elsewhere.
+                # Tuning either works: the match is made on the carrier.
+                "mhz": shown(station.mhz, station.ident),
                 "carrier": round(station.mhz, 3),
                 "position": station.position,
                 "callsign": station.callsign,
                 "ident": station.ident,
                 "distance_nm": round(station.distance_nm, 1),
-            }
-            # Nearest field first: the airport you are standing on matters
-            # more than one nine miles away that happens to publish a tower
-            # frequency alphabetically earlier.
-            for station in sorted(
-                stations,
-                key=lambda s: (round(s.distance_nm),
-                               order.index(s.position) if s.position in order else 99,
-                               s.priority, s.mhz),
-            )
-        ]
+            })
         return {"airport": name, "stations": rows[:60]}
 
     @app.get("/api/airspace")
@@ -250,12 +262,16 @@ def create_app(engine: Engine, broadcaster: Broadcaster) -> FastAPI:
                 "runways": runways,
                 **where,
             })
+            channels: set[int] = set()
             for station in db.stations(airport.ident):
+                if carrier_khz(station.mhz) in channels:
+                    continue                # one mark a channel
+                channels.add(carrier_khz(station.mhz))
                 span = STATION_RANGE_NM.get(station.position, 40.0)
                 stations.append({
                     "ident": station.ident,
                     "position": station.position,
-                    "mhz": channel_name(station.mhz),
+                    "mhz": shown(station.mhz, station.ident),
                     "carrier": round(station.mhz, 3),
                     "callsign": station.callsign,
                     "range_nm": span,
@@ -275,7 +291,7 @@ def create_app(engine: Engine, broadcaster: Broadcaster) -> FastAPI:
         # what is within the drawn range, nearest first, so a busy field does
         # not push the map past what it can show.
         traffic = []
-        for flight in engine.traffic.positions():
+        for flight in engine.traffic.positions(parked=True):
             where = offsets(flight["lat"], flight["lon"])
             if where["distance_nm"] > reach:
                 continue
@@ -335,7 +351,11 @@ def create_app(engine: Engine, broadcaster: Broadcaster) -> FastAPI:
         south, north = min(south, north), max(south, north)
         if north == south:
             return {"span_nm": span_nm, "airports": [], "boundaries": [],
-                    "traffic": [], "stations": [], "ownship": _ownship(engine)}
+                    "traffic": [], "stations": [], "ownship": _ownship(engine),
+                    "route": _route_view(engine),
+                    "areas": _areas_view(engine),
+                    "final": _final_view(engine),
+                    "live": _live_view(engine)}
 
         # How much of the world is on screen, which is what everything below
         # is decided by.
@@ -406,11 +426,15 @@ def create_app(engine: Engine, broadcaster: Broadcaster) -> FastAPI:
         if detail["stations"]:
             tuned = engine.station
             for entry in airports[:detail["station_fields"]]:
+                channels: set[int] = set()
                 for station in db.stations(entry["ident"]):
+                    if carrier_khz(station.mhz) in channels:
+                        continue            # one mark a channel
+                    channels.add(carrier_khz(station.mhz))
                     stations.append({
                         "ident": station.ident,
                         "position": station.position,
-                        "mhz": channel_name(station.mhz),
+                        "mhz": shown(station.mhz, station.ident),
                         "carrier": round(station.mhz, 3),
                         "callsign": station.callsign,
                         "range_nm": STATION_RANGE_NM.get(station.position, 40.0),
@@ -433,6 +457,10 @@ def create_app(engine: Engine, broadcaster: Broadcaster) -> FastAPI:
             # looking at: panning away to see where you are going must not
             # empty the list of the people you are talking to.
             "nearby": _within_reach(engine),
+            "route": _route_view(engine),
+            "areas": _areas_view(engine),
+            "final": _final_view(engine),
+            "live": _live_view(engine),
         }
 
     @app.get("/api/live")
@@ -589,8 +617,13 @@ def create_app(engine: Engine, broadcaster: Broadcaster) -> FastAPI:
             # Off the installer's thread: loading Kokoro is 300 MB and a
             # couple of seconds, and the panel should not be waiting on it to
             # be told the download finished.
+            # The cloned voices were asked for by name, so asking is also the
+            # pilot choosing them: the controllers switch over as well.
             try:
-                engine.voices_installed()
+                if state.get("hq") and state.get("hq_available"):
+                    engine.use_cloned_voices()
+                else:
+                    engine.voices_installed()
             except Exception:                        # pragma: no cover
                 log.debug("could not pick up the new voices", exc_info=True)
 
@@ -618,6 +651,7 @@ def create_app(engine: Engine, broadcaster: Broadcaster) -> FastAPI:
             force=bool(body.get("force")),
             all_voices=bool(body.get("all_voices")),
             hq=bool(body.get("hq")),
+            vatglasses=bool(body.get("vatglasses")),
         )
         return {"started": started, "setup": installer.state()}
 
@@ -670,18 +704,74 @@ def create_app(engine: Engine, broadcaster: Broadcaster) -> FastAPI:
 
         found = await asyncio.to_thread(JoystickPushToTalk.learn, 8.0)
         if found is None:
-            devices, reason = JoystickPushToTalk.scan()
+            devices, reason = await asyncio.to_thread(JoystickPushToTalk.scan)
             return {"ok": False, "reason": reason or "nothing pressed",
                     "devices": len(devices)}
-        index, button, name = found
-        return {"ok": True, "index": index, "button": button, "name": name}
+        controller, button = found
+        return {"ok": True, "id": controller.id, "index": controller.index,
+                "button": button, "name": controller.name}
+
+    _controller_routes(app)
+
+    meter = InputMeter()
+
+    @app.get("/api/mic/level")
+    async def mic_level(device: str = "") -> dict:
+        """How loud the microphone is, for the setup screen's bar."""
+        return await asyncio.to_thread(meter.read, _device_value(device))
 
     @app.get("/api/settings")
     async def settings() -> dict:
-        """The configuration the panel can change, and the choices for it."""
+        """The configuration, and the choices only the machine knows
+        (devices, voices)."""
         return {"config": _settings_view(engine),
+                "version": __version__,
                 "devices": _devices(engine.config.voice.engine),
                 "announcements": _announcements(engine)}
+
+    # ------------------------------------------------------------------
+    # a newer version (wilcoatc/update.py)
+    # ------------------------------------------------------------------
+
+    updater = Updater(
+        on_change=lambda state: broadcaster.publish(
+            {"kind": "update", "update": state}),
+        skipped_version=engine.config.ui.skipped_version)
+    update_cleanup()
+    if engine.config.ui.check_updates:
+        updater.check_in_background()
+
+    @app.get("/api/update")
+    async def update_state() -> dict:
+        return updater.snapshot()
+
+    @app.post("/api/update/check")
+    async def update_check() -> dict:
+        """Asked for from Settings, so asked whatever ``check_updates`` says."""
+        return await asyncio.to_thread(updater.check)
+
+    @app.post("/api/update/download")
+    async def update_download() -> dict:
+        return {"started": updater.download(), "update": updater.snapshot()}
+
+    @app.post("/api/update/cancel")
+    async def update_cancel() -> dict:
+        updater.cancel()
+        return updater.snapshot()
+
+    @app.post("/api/update/skip")
+    async def update_skip(body: dict | None = None) -> dict:
+        """This version is not wanted: never offered again, a later one is."""
+        version = str((body or {}).get("version") or "")
+        updater.skip(version)
+        await commit({"ui.skipped_version": version})
+        return updater.snapshot()
+
+    @app.post("/api/update/apply")
+    async def update_apply() -> dict:
+        """Hand over to the batch file and close; it starts the new one."""
+        ok = await asyncio.to_thread(updater.apply, quit_process)
+        return {"ok": ok, "update": updater.snapshot()}
 
     @app.post("/api/announcements/rescan")
     async def rescan_announcements() -> dict:
@@ -695,33 +785,44 @@ def create_app(engine: Engine, broadcaster: Broadcaster) -> FastAPI:
         engine.announcements.forget()
         return {"ok": True, "announcements": _announcements(engine)}
 
-    @app.post("/api/settings")
-    async def update_settings(payload: dict) -> dict:
-        """Apply a change, and write it to config.yaml so it survives a restart.
+    async def commit(changes: dict) -> dict:
+        """Check, apply and write a change: the one path every write takes.
 
-        Some of these take effect on the next transmission and some need the
-        engine restarted; ``restart_required`` says which, rather than letting
-        the pilot wonder why the recogniser is still in the old language.
+        Some settings take effect on the next transmission and some need the
+        program restarted; ``restart_required`` says which of these did,
+        rather than letting the pilot wonder why the recogniser is still in
+        the old language.
         """
-        changed = _apply_settings(engine, payload)
-        if not changed:
-            return {"ok": False, "error": "nothing recognised in that change"}
+        try:
+            changed = _apply_settings(engine, changes)
+        except SettingsRefused as refused:
+            first = next(iter(refused.errors.values()))
+            return {"ok": False, "errors": refused.errors,
+                    "error": first["text"],
+                    "config": _settings_view(engine)}
         if any(name.startswith("ptt.") for name in changed):
             # The listener is built from these, so it has to be built again.
             # Off the event loop: stopping one joins its polling thread.
             await asyncio.to_thread(engine.rebind_ptt)
-        try:
-            engine.config.save()
-        except Exception as exc:
-            log.warning("could not write config.yaml: %s", exc)
-            return {"ok": False, "error": f"could not save: {exc}",
-                    "config": _settings_view(engine)}
+        if changed:
+            try:
+                engine.config.save()
+            except Exception as exc:
+                log.warning("could not write config.yaml: %s", exc)
+                return {"ok": False, "error": f"could not save: {exc}",
+                        "config": _settings_view(engine)}
         return {
             "ok": True,
             "changed": sorted(changed),
-            "restart_required": sorted(changed & RESTART_REQUIRED),
+            "restart_required": sorted(
+                path for path in changed if cfg.SETTINGS[path].restart),
             "config": _settings_view(engine),
         }
+
+    @app.post("/api/settings")
+    async def update_settings(payload: dict) -> dict:
+        """Settings by their full paths: ``{"traffic.density": 0.5}``."""
+        return await commit(payload or {})
 
     @app.post("/api/sound-test")
     async def sound_test() -> dict:
@@ -772,6 +873,25 @@ def create_app(engine: Engine, broadcaster: Broadcaster) -> FastAPI:
         for line in lines:
             await asyncio.to_thread(engine.crew.say, line)
         return {"ok": True, "text": lines[0].text}
+
+    @app.post("/api/voice-preview")
+    async def voice_preview(body: dict | None = None) -> dict:
+        """Hear one first officer before choosing them.
+
+        Not the crew test: this must work with the crew switched off -- the
+        first-run setup offers the voice before anybody has turned immersion
+        on -- and must play the voice in the picker, not the one saved.
+        """
+        voice = str((body or {}).get("voice") or "auto")
+        try:
+            transmission, name, text = await asyncio.to_thread(
+                _first_officer_preview, engine.synth, engine.config, voice)
+        except Exception as exc:
+            log.warning("voice preview failed: %s", exc)
+            return {"ok": False, "error": str(exc)}
+        engine.cabin.play(transmission.audio, transmission.sample_rate,
+                          label="preview")
+        return {"ok": True, "name": name, "text": text}
 
     # ------------------------------------------------------------------
     # actions
@@ -852,6 +972,18 @@ def create_app(engine: Engine, broadcaster: Broadcaster) -> FastAPI:
         ok, callsign, why = engine.spawn_on_runway()
         return {"ok": ok, "callsign": callsign, "error": why}
 
+    @app.post("/api/debug/board_nearest")
+    async def debug_board_nearest() -> dict:
+        """Testing (traffic.debug.triggers): board the nearest parked one."""
+        ok, callsign, why = engine.debug_board_nearest()
+        return {"ok": ok, "callsign": callsign, "error": why}
+
+    @app.post("/api/debug/arrival_nearest")
+    async def debug_arrival_nearest() -> dict:
+        """Testing (traffic.debug.triggers): an arrival to the nearest stand."""
+        ok, callsign, why = engine.debug_arrival_nearest()
+        return {"ok": ok, "callsign": callsign, "error": why}
+
     @app.post("/api/simbrief")
     async def simbrief(payload: dict) -> dict:
         """Fill the flight in from the latest SimBrief plan."""
@@ -864,6 +996,23 @@ def create_app(engine: Engine, broadcaster: Broadcaster) -> FastAPI:
             described = await asyncio.to_thread(engine.load_flight_plan, user)
         except SimBriefError as why:
             return {"ok": False, "error": str(why)}
+        except Exception as exc:                    # pragma: no cover
+            return {"ok": False, "error": str(exc)}
+        return {"ok": True, "plan": described,
+                "flight": _plan_view(engine.plan),
+                "settings": _settings_view(engine)}
+
+    @app.post("/api/route_file")
+    async def route_file(payload: dict) -> dict:
+        """A simulator flight plan, its text sent by the panel's button: the
+        window has no path to give, only what the pilot picked."""
+        from ..engine import NotAFlightPlan
+
+        text = payload.get("text") or ""
+        try:
+            described = await asyncio.to_thread(engine.load_route_text, text)
+        except NotAFlightPlan:
+            return {"ok": False, "not_a_plan": True}
         except Exception as exc:                    # pragma: no cover
             return {"ok": False, "error": str(exc)}
         return {"ok": True, "plan": described,
@@ -930,238 +1079,131 @@ def create_app(engine: Engine, broadcaster: Broadcaster) -> FastAPI:
 # settings
 # --------------------------------------------------------------------------
 #
-# Only a subset of config.yaml is exposed. The rest is either a path, a model
-# size that wants a download, or a tuning constant that nobody should be moving
-# from a web page in flight.
+# What each setting is -- its range, its choices, whether a change needs a
+# restart -- is config.SETTINGS, and the checking is config.check, so the
+# file and this module cannot disagree. This used to be a hand-kept table of
+# the thirty settings the panel offered, and anything not in it was dropped
+# without a word: the panel saved traffic.callsigns for months and the
+# server refused it every time.
 
-# Settings the running engine cannot pick up on its own. The recogniser and the
-# voices are built once at startup, so changing what they are is a restart.
-RESTART_REQUIRED: set[str] = {
-    "speech.languages", "speech.model", "audio.input_device",
-    "audio.output_device", "ai.provider", "ai.model", "voice.seed",
-}
+#: Settings whose value is never sent to the panel, only whether one is set.
+SECRETS = frozenset(path for path, setting in cfg.SETTINGS.items()
+                    if setting.kind == "secret")
+
+
+class SettingsRefused(Exception):
+    """Some of a change could not be written; none of it was."""
+
+    def __init__(self, errors: dict[str, dict]):
+        super().__init__(", ".join(sorted(errors)))
+        self.errors = errors
+
+
+def _gsx_installed() -> bool:
+    try:
+        from ..integrations.groundvehicles import gsx_installed
+        return gsx_installed()
+    except Exception:
+        return False
 
 
 def _settings_view(engine: Engine) -> dict[str, Any]:
-    config = engine.config
-    return {
-        "audio": {
-            "input_device": config.audio.input_device,
-            "output_device": config.audio.output_device,
-            "volume": round(config.audio.volume, 2),
-            "radio_effects": config.audio.radio_effects,
-        },
-        "ptt": {
-            "mode": config.ptt.mode,
-            "key": config.ptt.key,
-            "joystick_index": config.ptt.joystick_index,
-            "joystick_button": config.ptt.joystick_button,
-        },
-        "speech": {
-            "model": config.speech.model,
-            # Empty means the language follows the aeroplane, which is the
-            # default and is not something the interface offers to change.
-            "languages": list(config.speech.languages),
-        },
-        "ui": {"language": config.ui.language,
-               "landing_report": config.ui.landing_report},
-        "simbrief": {"username": config.simbrief.username},
-        "gsx": {"enabled": config.gsx.enabled,
-                "bridge": config.gsx.bridge,
-                "lvar_file": config.gsx.lvar_file},
-        "traffic": {
-            "enabled": config.traffic.enabled,
-            "density": round(config.traffic.density, 2),
-        },
-        "network": {
-            "provider": config.network.provider,
-            "use_online_atis": config.network.use_online_atis,
-        },
-        "atc": {
-            "dialect": config.atc.dialect,
-            "strict_icao_digits": config.atc.strict_icao_digits,
-            "proactive_handoff": config.atc.proactive_handoff,
-        },
-        "voice": {"seed": config.voice.seed},
-        # The operator, as opposed to the radio. The chain itself is measured
-        # and stays out of the panel; what is offered is how much of the
-        # person holding the transmit bar comes with it.
-        "delivery": {
-            "imperfections": {
-                "enabled": config.delivery.imperfections.enabled,
-                "breath_db": config.delivery.imperfections.breath_db,
-                "wind_db": config.delivery.imperfections.wind_db,
-                "hesitation_chance":
-                    config.delivery.imperfections.hesitation_chance,
-                "mid_hesitation_chance":
-                    config.delivery.imperfections.mid_hesitation_chance,
-            },
-        },
-        "immersion": {
-            "enabled": config.immersion.enabled,
-            "copilot": config.immersion.copilot,
-            "copilot_voice": config.immersion.copilot_voice,
-            "copilot_gender": config.immersion.copilot_gender,
-            "callouts": config.immersion.callouts,
-            "confirmations": config.immersion.confirmations,
-            "checklists": config.immersion.checklists,
-            "radio_readbacks": config.immersion.radio_readbacks,
-            "cabin": config.immersion.cabin,
-            "cabin_voice": config.immersion.cabin_voice,
-            "cabin_gender": config.immersion.cabin_gender,
-            "briefings": config.immersion.briefings,
-            "announcements": config.immersion.announcements,
-            "service": config.immersion.service,
-            "chimes": config.immersion.chimes,
-            "boarding_music": config.immersion.boarding_music,
-            "applause": config.immersion.applause,
-            "realism": config.immersion.realism,
-            "bilingual": config.immersion.bilingual,
-            "recordings": config.immersion.recordings,
-            "recordings_dir": config.immersion.recordings_dir,
-            "volume": round(config.immersion.volume, 2),
-            "airline": config.immersion.airline,
-            "captain_name": config.immersion.captain_name,
-            "interphone": config.immersion.interphone,
-            "verbosity": config.immersion.verbosity,
-            "language": config.immersion.language,
-        },
-        "gsx": {
-            "enabled": config.gsx.enabled,
-            "control": config.gsx.control,
-            "voice": config.gsx.voice,
-        },
-        "sim": {
-            "enabled": config.sim.enabled,
-            "frequencies_from_sim": config.sim.frequencies_from_sim,
-        },
-        "logging": {
-            "level": config.logging.level,
-            "console_level": config.logging.console_level,
-            "structured": config.logging.structured,
-            "radio": config.logging.radio,
-            "keep_days": config.logging.keep_days,
-        },
-        "ai": {"provider": config.ai.provider, "model": config.ai.model},
-        "weather": {"online": config.weather.online,
-                    "prefer_sim": config.weather.prefer_sim},
-        "flight": {
-            "callsign": config.flight.callsign,
-            "aircraft_type": config.flight.aircraft_type,
-            "departure": config.flight.departure,
-            "destination": config.flight.destination,
-            "cruise_altitude_ft": config.flight.cruise_altitude_ft,
-            "ifr": config.flight.ifr,
-        },
-    }
+    """The whole configuration, as the panel reads it, the API key left out.
+
+    Three derived values ride along for the cards still drawn by hand: the
+    test buttons, and whether GSX Pro is there to have its vehicles used.
+    """
+    view = asdict(engine.config)
+    for path in SECRETS:
+        *sections, name = path.split(".")
+        where = view
+        for step in sections:
+            where = where[step]
+        where[name] = ""
+    traffic = view["traffic"]
+    traffic["debug_triggers"] = bool(engine.config.traffic.debug.triggers)
+    traffic["gsx_vehicles"] = bool(engine.config.traffic.handling.gsx_vehicles)
+    traffic["gsx_installed"] = _gsx_installed()
+    # Who flies the traffic, "auto" resolved: the choice the card lights.
+    try:
+        from ..integrations.fsltl import traffic_source
+
+        traffic["source_resolved"] = traffic_source(engine.config.traffic)
+    except Exception:
+        traffic["source_resolved"] = "wilcoatc"
+    return view
 
 
-# What each editable setting is, so a value from a browser is coerced rather
-# than trusted. Anything not named here is refused.
-_SETTING_TYPES: dict[str, str] = {
-    "audio.input_device": "device", "audio.output_device": "device",
-    "audio.volume": "float", "audio.radio_effects": "bool",
-    "ptt.mode": "str", "ptt.key": "str",
-    "ptt.joystick_index": "int", "ptt.joystick_button": "int",
-    "speech.model": "str", "speech.languages": "languages",
-    "atc.dialect": "str", "atc.strict_icao_digits": "bool",
-    "atc.proactive_handoff": "bool",
-    "traffic.enabled": "bool", "traffic.density": "float",
-    "ui.language": "str", "ui.landing_report": "bool",
-    "simbrief.username": "str", "simbrief.load_on_start": "bool",
-    "gsx.enabled": "bool", "gsx.bridge": "str", "gsx.lvar_file": "str",
-    "gsx.control": "bool", "gsx.voice": "bool",
-    "voice.seed": "str",
-    "delivery.imperfections.enabled": "bool",
-    "delivery.imperfections.breath_db": "float",
-    "delivery.imperfections.wind_db": "float",
-    "delivery.imperfections.hesitation_chance": "float",
-    "delivery.imperfections.mid_hesitation_chance": "float",
-    "immersion.enabled": "bool", "immersion.copilot": "bool",
-    "immersion.copilot_voice": "str", "immersion.copilot_gender": "str",
-    "immersion.callouts": "bool", "immersion.confirmations": "bool",
-    "immersion.checklists": "bool", "immersion.radio_readbacks": "bool",
-    "immersion.cabin": "bool", "immersion.cabin_voice": "str",
-    "immersion.cabin_gender": "str", "immersion.briefings": "bool",
-    "immersion.announcements": "bool", "immersion.service": "bool",
-    "immersion.chimes": "bool", "immersion.volume": "float",
-    "immersion.boarding_music": "bool", "immersion.applause": "bool",
-    "immersion.realism": "bool", "immersion.bilingual": "bool",
-    "immersion.recordings": "bool", "immersion.recordings_dir": "str",
-    "immersion.airline": "str", "immersion.verbosity": "str",
-    "immersion.captain_name": "str", "immersion.interphone": "bool",
-    "immersion.language": "str",
-    "sim.enabled": "bool", "sim.frequencies_from_sim": "bool",
-    "ai.provider": "str", "ai.model": "str",
-    "weather.online": "bool", "weather.prefer_sim": "bool",
-    "flight.callsign": "str", "flight.aircraft_type": "str",
-    "flight.departure": "str", "flight.destination": "str",
-    "flight.cruise_altitude_ft": "int", "flight.ifr": "bool",
-    "network.provider": "str", "network.use_online_atis": "bool",
-    "logging.level": "str", "logging.console_level": "str",
-    "logging.structured": "bool", "logging.radio": "bool",
-    "logging.keep_days": "int",
-}
-
-
-def _coerce(kind: str, value: Any) -> Any:
-    if kind == "bool":
-        return bool(value)
-    if kind == "int":
-        return int(value or 0)
-    if kind == "float":
-        return float(value)
-    if kind == "device":
-        # Null means the system default, which is not the same as index zero.
-        if value in (None, "", "default"):
-            return None
+def _check_all(changes: dict) -> dict[str, Any]:
+    """Each value as its setting stores it, or SettingsRefused for them all."""
+    accepted: dict[str, Any] = {}
+    refused: dict[str, dict] = {}
+    for path, value in (changes or {}).items():
+        if path in SECRETS and (value is None or not str(value).strip()):
+            # Empty keeps the key that is set: the panel never had it to
+            # send back.
+            continue
         try:
-            return int(value)
-        except (TypeError, ValueError):
-            return str(value)
-    if kind == "languages":
-        # An empty list is the normal setting: it means the languages follow
-        # the aeroplane rather than being pinned. A non-empty one always keeps
-        # English, which is worked everywhere.
-        codes = [str(c).lower()[:2] for c in (value or []) if str(c).strip()]
-        if codes and "en" not in codes:
-            codes.insert(0, "en")
-        return codes
-    return str(value).strip()
+            accepted[path] = cfg.check(path, value)
+        except cfg.SettingRefused as why:
+            refused[path] = {"key": why.key, "params": why.params,
+                             "text": str(why)}
+    if refused:
+        raise SettingsRefused(refused)
+    return accepted
+
+
+def _switch_clone_model(engine: Engine) -> None:
+    """The performance profile changed: load the other cloning model now.
+
+    Only where the controllers are clones and that model is on disk; where it
+    is not, the panel starts its download and the engine switches over when
+    it arrives (the setup's own pick-up), so neither waits for a restart.
+    Off the request's thread: a Chatterbox model takes seconds to load.
+    """
+    from ..install import _chatterbox_present
+
+    if engine.config.voice.engine != "chatterbox":
+        return
+    if not _chatterbox_present(engine.config):
+        return
+
+    def switch() -> None:
+        try:
+            engine.use_cloned_voices()
+        except Exception:                           # pragma: no cover
+            log.warning("could not switch the cloning model", exc_info=True)
+
+    threading.Thread(target=switch, name="wilcoatc-clone-model",
+                     daemon=True).start()
 
 
 def _apply_settings(engine: Engine, payload: dict) -> set[str]:
-    """Write the named settings onto the live config. Returns what changed."""
+    """Write the named settings onto the live config. Returns what changed.
+
+    All or nothing: one value refused and nothing is written, because a
+    section half saved is a screen showing something that is not so.
+    """
+    accepted = _check_all(payload)
     changed: set[str] = set()
-    for path, value in (payload or {}).items():
-        kind = _SETTING_TYPES.get(path)
-        if kind is None:
+    for path, value in accepted.items():
+        if cfg.get_path(engine.config, path) == value:
             continue
-        # Walk the whole path rather than splitting once. Most settings are
-        # "section.field", but the delivery layers are a section of sections
-        # -- "delivery.imperfections.enabled" -- and a single partition put
-        # the rest of the path in the field name and silently dropped it.
-        *sections, field_name = path.split(".")
-        target = engine.config
-        for step in sections:
-            target = getattr(target, step, None)
-            if target is None:
-                break
-        if target is None or not hasattr(target, field_name):
-            continue
-        try:
-            coerced = _coerce(kind, value)
-        except (TypeError, ValueError):
-            continue
-        if getattr(target, field_name) == coerced:
-            continue
-        setattr(target, field_name, coerced)
+        cfg.set_path(engine.config, path, value)
+        # Chosen on the screen, so saved, even over a command-line option.
+        release = getattr(engine.config, "release", None)
+        if release is not None:
+            release(path)
         changed.add(path)
 
     # A few take effect immediately, and it is worth the special case: nobody
     # should have to restart to turn the radio effects off or the volume down.
     if "audio.volume" in changed:
         engine.player.volume = engine.config.audio.volume
+    if "voice.hq_model" in changed:
+        _switch_clone_model(engine)
+    if "traffic.handling.gsx_vehicles" in changed:
+        engine.use_gsx_vehicles(engine.config.traffic.handling.gsx_vehicles)
     if changed & {"logging.level", "logging.console_level",
                   "logging.structured", "logging.radio"}:
         from ..logs import configure
@@ -1169,8 +1211,13 @@ def _apply_settings(engine: Engine, payload: dict) -> set[str]:
         configure(engine.config, force=True)
     if changed & {"flight.callsign", "flight.aircraft_type",
                   "flight.departure", "flight.destination",
-                  "flight.cruise_altitude_ft", "flight.ifr"}:
+                  "flight.cruise_altitude_ft", "flight.ifr",
+                  "flight.profile"}:
         engine.begin_session()
+    elif "flight.region" in changed:
+        # Only the words change: the session, its clearance and the crew
+        # are left as they are.
+        engine.use_region()
 
     # The crew are switched on and off while the flight is running, so both
     # directions have to do something now rather than at the next restart.
@@ -1238,6 +1285,107 @@ def _announcements(engine: Engine) -> dict[str, Any]:
     }
 
 
+def _controllers(rescan: bool | str = "auto") -> dict[str, Any]:
+    """The game controllers for the push-to-talk list.
+
+    Asked every two seconds while Settings is open, so a yoke plugged in
+    then appears without the page being reloaded; a rescan restarts SDL's
+    joystick subsystem on its own thread, which no longer disturbs a
+    button push-to-talk is reading (audio/controllers.py).
+    """
+    from ..audio.io import JoystickPushToTalk
+
+    found, reason = JoystickPushToTalk.scan(rescan=rescan)
+    here = {c.name for c in found}
+    return {
+        "joysticks": [{"id": c.id, "index": c.index, "name": c.name,
+                       "buttons": c.buttons} for c in found],
+        "reason": reason,
+        "known": [n for n in JoystickPushToTalk.remembered() if n not in here],
+    }
+
+
+def _controller_routes(app: FastAPI) -> None:
+    """The two controller routes both apps have: the list, refreshed while
+    Settings is open, and the report a user attaches to an issue."""
+
+    @app.get("/api/controllers")
+    async def controllers() -> dict:
+        # Asked every two seconds: a full restart only when one is due.
+        return await asyncio.to_thread(_controllers, "auto")
+
+    @app.post("/api/controllers/report")
+    async def controller_report() -> dict:
+        from ..audio.controllers import write_report
+
+        try:
+            path = await asyncio.to_thread(write_report, 10.0)
+        except Exception as exc:
+            log.warning("controller report failed: %s", exc)
+            return {"ok": False, "reason": str(exc)}
+        return {"ok": True, "path": str(path)}
+
+
+#: What a first officer says when the pilot asks to hear them: their name,
+#: then a line they would really say. In the voice's own language, because
+#: that is the language a pinned voice speaks in -- a Supertonic speaker
+#: follows the crew into any of theirs, anything else stays in its own.
+PREVIEW_LINES: dict[str, str] = {
+    "en": "Hello captain, {name} here, in the right seat today. Before start checklist complete, ready when you are.",
+    "de": "Hallo Kapitän, hier ist {name}, heute auf dem rechten Sitz. Checkliste vor dem Anlassen erledigt, bereit, wenn Sie es sind.",
+    "fr": "Bonjour commandant, ici {name}, en place droite aujourd'hui. Check-list avant mise en route terminée, quand vous voulez.",
+    "es": "Hola comandante, soy {name}, hoy en el asiento derecho. Lista de antes de arrancar completada, cuando quiera.",
+    "it": "Buongiorno comandante, sono {name}, oggi al posto di destra. Checklist prima dell'avviamento completata, quando vuole.",
+    "nl": "Hallo gezagvoerder, met {name}, vandaag op de rechterstoel. Checklist voor het starten compleet, wanneer u wilt.",
+    "pt": "Olá comandante, aqui é {name}, hoje no assento da direita. Checklist antes da partida completo, quando quiser.",
+    "pl": "Dzień dobry, kapitanie, tu {name} na prawym fotelu. Lista kontrolna przed uruchomieniem zakończona, kiedy pan zechce.",
+    "cs": "Dobrý den, kapitáne, tady {name} na pravém sedadle. Kontrolní seznam před spouštěním dokončen, až budete chtít.",
+    "ru": "Здравствуйте, командир, это {name}, сегодня в правом кресле. Карта перед запуском выполнена, по готовности.",
+    "bg": "Здравейте, капитане, тук е {name} на дясната седалка. Проверката преди стартиране е завършена, когато сте готов.",
+    "ro": "Bună ziua, comandante, sunt {name}, azi pe scaunul din dreapta. Lista de verificare înainte de pornire completă, când doriți.",
+    "lv": "Labdien, kapteini, šeit {name} labajā sēdeklī. Kontrolsaraksts pirms palaišanas pabeigts, kad esat gatavs.",
+    "is": "Góðan daginn, flugstjóri, þetta er {name} í hægra sætinu. Gátlisti fyrir gangsetningu búinn, þegar þú ert tilbúinn.",
+    "id": "Halo kapten, saya {name}, hari ini di kursi kanan. Daftar periksa sebelum menyalakan mesin selesai, silakan kapan saja.",
+    "hi": "नमस्ते कैप्टन, मैं {name}, आज दाईं सीट पर। स्टार्ट से पहले की चेकलिस्ट पूरी, जब आप तैयार हों।",
+    "ur": "السلام علیکم کیپٹن، میں {name} ہوں، آج دائیں نشست پر۔ اسٹارٹ سے پہلے کی چیک لسٹ مکمل، جب آپ تیار ہوں۔",
+}
+
+
+def _first_officer_preview(synth, config, voice: str):
+    """Render the first officer saying hello, in one voice or one cast.
+
+    ``voice`` is what the picker holds: a voice key, or "auto", "m" or "f",
+    which are cast the way the crew cast them, from the aeroplane's callsign,
+    so what is heard is who would be in the seat. Returns the transmission,
+    the name it gave and the words.
+    """
+    from ..atc.crew_lines import FIRST_OFFICER
+    from ..audio import aboard
+    from ..audio.radio_fx import PROFILE_INTERCOM
+    from ..audio.voices import language_of, person_name
+
+    voice = (voice or "").strip()
+    if voice in ("", "auto", "m", "f"):
+        callsign = (config.flight.callsign or "").strip() or "crew"
+        key = synth.cast(callsign, FIRST_OFFICER, callsign, language="en",
+                         gender=voice if voice in ("m", "f") else "")
+    else:
+        key = voice
+    # A cast comes back as an identity, "key#speaker" for a multi-speaker
+    # model; the key is what renders.
+    bare = key.split("#", 1)[0]
+    language = language_of(bare) or "en"
+    name = person_name(key) or person_name(bare) or "Alex"
+    text = PREVIEW_LINES.get(language, PREVIEW_LINES["en"]).format(name=name)
+    profile = (aboard.CREW_INTERCOM if config.immersion.realism
+               else PROFILE_INTERCOM)
+    transmission = synth.speak(
+        text, facility="preview", position=FIRST_OFFICER, ident="preview",
+        language=language, profile=profile, radio=True, signal_quality=1.0,
+        voice_key=bare, shaped=False)
+    return transmission, name, text
+
+
 def _devices(engine_name: str = "auto") -> dict[str, Any]:
     """What the machine can record from and play to, for the settings screen."""
     inputs: list[dict] = []
@@ -1260,13 +1408,9 @@ def _devices(engine_name: str = "auto") -> dict[str, Any]:
     # not switched on", which is the thing the pilot actually needs told.
     known: list[str] = []
     try:
-        from ..audio.io import JoystickPushToTalk
-
-        found, reason = JoystickPushToTalk.scan()
-        joysticks = [{"index": i, "name": n, "buttons": b}
-                     for i, n, b in found]
-        here = {n for _i, n, _b in found}
-        known = [n for n in JoystickPushToTalk.remembered() if n not in here]
+        listed = _controllers()
+        joysticks, reason, known = (listed["joysticks"], listed["reason"],
+                                    listed["known"])
     except Exception as exc:
         reason = str(exc)
         log.debug("controllers unavailable: %s", exc)
@@ -1276,17 +1420,26 @@ def _devices(engine_name: str = "auto") -> dict[str, Any]:
     # it is a silence waiting to happen.
     voices: list[dict] = []
     try:
-        from ..audio.voices import VoiceRegistry
+        from ..audio.voices import VoiceRegistry, person_name
 
+        seen: set[str] = set()
         for spec in VoiceRegistry(engine=engine_name).available():
+            # A pin is a key, and a multi-speaker model is one key for
+            # several people: listing each of them offered choices that all
+            # saved as the same thing, and rendered as its first speaker.
+            if spec.key in seen:
+                continue
+            seen.add(spec.key)
             voices.append({
                 "key": spec.key,
                 "name": spec.speaker_name or spec.name.replace("_", " ").title(),
+                "person": person_name(spec),
                 "gender": spec.gender,
                 "accent": spec.accent,
                 "language": spec.language,
             })
-        voices.sort(key=lambda v: (v["language"], v["accent"], v["name"]))
+        voices.sort(key=lambda v: (v["language"], v["accent"], v["gender"],
+                                   v["person"] or v["name"]))
     except Exception as exc:
         log.debug("voices unavailable: %s", exc)
 
@@ -1305,7 +1458,7 @@ PHASE_LABELS = {
     "ready": "ready for departure", "waiting": "holding short",
     "lineup": "lining up", "takeoff": "departing", "departed": "climbing out",
     "inbound": "inbound", "joining": "joining", "final": "on final",
-    "landed": "landing roll", "taxi_in": "taxiing in",
+    "landed": "landing roll", "taxi_in": "taxiing in", "parked": "parked",
     # The circuit, and the aeroplane that has just been sent round it again.
     "upwind": "upwind", "crosswind": "crosswind", "downwind": "downwind",
     "base": "base leg", "go_around": "going around",
@@ -1435,7 +1588,9 @@ def _traffic_view(engine: Engine) -> list[dict[str, Any]]:
     shows, which the engine knows and the panel only puts into words.
     """
     traffic = []
-    for flight in engine.traffic.positions():
+    # The parked ones too: the map is about the window, and an FSLTL apron
+    # with forty aeroplanes on it is most of what is out of it.
+    for flight in engine.traffic.positions(parked=True):
         traffic.append({
             **flight,
             "lat": round(flight["lat"], 6),
@@ -1482,20 +1637,21 @@ def _within_reach(engine: Engine) -> list[dict[str, Any]]:
     db = engine.navdb
     tuned = engine.station
     out: list[dict[str, Any]] = []
-    seen: set[tuple[str, str, float]] = set()
+    seen: set[tuple[str, int]] = set()
     for station in db.all_stations_near(state.latitude, state.longitude,
                                         max_nm=STATION_REACH_NM):
         reach = STATION_RANGE_NM.get(station.position, 40.0)
         if station.distance_nm > reach:
             continue
-        key = (station.ident, station.position, round(station.mhz, 3))
+        # One a channel, as in the frequency list.
+        key = (station.ident, carrier_khz(station.mhz))
         if key in seen:
             continue
         seen.add(key)
         out.append({
             "ident": station.ident,
             "position": station.position,
-            "mhz": channel_name(station.mhz),
+            "mhz": shown(station.mhz, station.ident),
             "carrier": round(station.mhz, 3),
             "callsign": station.callsign,
             "distance_nm": round(station.distance_nm, 1),
@@ -1510,6 +1666,155 @@ def _within_reach(engine: Engine) -> list[dict[str, Any]]:
 # The widest coverage any position has, so the search for who can hear you
 # starts from a box big enough to contain all of them.
 STATION_REACH_NM = max(STATION_RANGE_NM.values()) if STATION_RANGE_NM else 200.0
+
+
+def _route_view(engine) -> dict | None:
+    """The filed route for the chart: its fixes and the leg being flown.
+
+    Drawn as a line under everything else, the active leg brighter, so a
+    controller who says "direct XIBIL" can be read against where XIBIL is.
+    """
+    route = getattr(engine, "route", None)
+    if not route:
+        return None
+    progress = getattr(engine, "route_progress", None)
+    return {
+        "fixes": [{"ident": f.ident, "lat": round(f.lat, 5),
+                   "lon": round(f.lon, 5), "marker": f.is_marker}
+                  for f in route.fixes],
+        "leg": progress.leg if progress is not None else None,
+        "source": route.source,
+    }
+
+
+def _areas_view(engine) -> list[dict]:
+    """The approach areas of the flight's two fields, for the chart, the one
+    the flight will be handed to next marked.
+
+    Labelled with this program's own approach station for the field, never
+    the area's name in the source file, so what the chart says is what the
+    controller will be called.
+    """
+    session = getattr(engine, "session", None)
+    if session is None:
+        return []
+    leaving = "handoff:centre" not in session.advisories \
+        and session.phase.outbound
+    out = []
+    for field, role in ((session.departure, "departure"),
+                        (session.destination, "arrival")):
+        area = engine._terminal_area(field) if field is not None else None
+        if area is None:
+            continue
+        station = (engine.brain.controller_at(field.ident, "APP")
+                   or engine.brain.controller_at(field.ident, "DEP"))
+        out.append({
+            "field": field.ident,
+            "label": station.callsign if station is not None else field.ident,
+            "role": role,
+            "next": (role == "departure") == leaving,
+            "rings": [[[round(lat, 4), round(lon, 4)] for lon, lat in ring]
+                      for ring in area.rings],
+        })
+    return out
+
+
+# The chart draws the arrival's final from this far out; further, the
+# pattern is a few pixels on a view that is showing the cruise.
+FINAL_VIEW_NM = 80.0
+# How far out the final cone is drawn: the furthest any clearance measures
+# an aeroplane in it (the STAR join's 30 miles).
+CONE_VIEW_NM = 30.0
+
+
+def _live_view(engine) -> dict[str, Any]:
+    """The live traffic, for the settings card and the chart: whose traffic
+    flies, the feed's state and source, how old its last answer is, and how
+    many aeroplanes are real and how many invented."""
+    from ..integrations.fsltl import traffic_source
+
+    source = traffic_source(engine.config.traffic)
+    feed = getattr(engine, "live_feed", None)
+    if source != "wilcoatc":
+        return {"status": "fsltl", "flies": source}
+    if feed is None:
+        return {"status": "off", "flies": source}
+    state = feed.state
+    traffic = engine.traffic
+    live = sum(1 for f in traffic.flights
+               if f.observed and f.source == "live" and not f.done)
+    live += sum(1 for one in traffic.parked_observed if one.live)
+    invented = sum(1 for f in traffic.flights if not f.observed and not f.done)
+    invented += len(traffic.statics)
+    return {"status": state.status, "flies": source, "source": state.source,
+            "age_s": state.age_s, "live": live, "invented": invented,
+            "resting": [list(r) for r in state.resting],
+            "dropped": list(state.dropped)}
+
+
+def _final_view(engine) -> dict[str, Any] | None:
+    """The final the arrival is being worked onto, for the chart: the
+    extended centreline, the cone every arrival clearance is measured in, and
+    the vector pattern's downwind, base and gate on the side in use.
+
+    The same geometry :mod:`atc.vectors` vectors with, at the speed the
+    aeroplane is doing, so the pattern on the chart is the one the next
+    heading comes from. The side is the one the controller chose, else the
+    side the aeroplane is on.
+    """
+    from ..atc import vectors as vec
+    from ..atc.final import CONE_DEG, final_for
+    from ..atc.procedures import frame
+    from ..navdata.build import haversine_nm, project
+
+    session = getattr(engine, "session", None)
+    state = engine.state
+    if session is None or session.phase.outbound \
+            or session.destination is None:
+        return None
+    field = session.destination
+    if state.has_position and haversine_nm(
+            state.latitude, state.longitude, field.lat, field.lon) \
+            > FINAL_VIEW_NM:
+        return None
+    choice = getattr(session, "approach_choice", None)
+    runway = (getattr(getattr(choice, "approach", None), "runway", "")
+              or session.arrival_runway)
+    final = final_for(engine.navdb, field.ident, runway)
+    if final is None:
+        return None
+
+    outbound = (final.course + 180.0) % 360.0
+    right = (final.course + 90.0) % 360.0
+
+    def at(out: float, side: float) -> list[float]:
+        lat, lon = project(final.lat, final.lon, outbound, out)
+        if side:
+            lat, lon = project(lat, lon, right, side)
+        return [round(lat, 5), round(lon, 5)]
+
+    side = session.vector_side or 0.0
+    if not side and state.has_position:
+        side = 1.0 if frame(final, state.latitude, state.longitude)[1] >= 0 \
+            else -1.0
+    side = side or 1.0
+    p = vec.pattern_for(float(getattr(state, "ground_speed_kt", 0.0) or 0.0))
+    abeam = p.offset_nm * side
+    cone = [[round(final.lat, 5), round(final.lon, 5)]]
+    for k in range(-6, 7):
+        lat, lon = project(final.lat, final.lon,
+                           outbound + CONE_DEG * k / 6.0, CONE_VIEW_NM)
+        cone.append([round(lat, 5), round(lon, 5)])
+    return {
+        "runway": final.runway,
+        "centreline": [at(0.0, 0.0), at(p.base_nm + 3.0, 0.0)],
+        "cone": cone,
+        "downwind": [at(0.0, abeam), at(p.base_nm, abeam)],
+        "base": [at(p.base_nm, abeam), at(p.base_nm, 0.0)],
+        "gate": at(p.gate_nm, 0.0),
+        "side": "right" if side > 0 else "left",
+        "leg": session.vector_leg or None,
+    }
 
 
 def _ownship(engine: Engine) -> dict[str, Any] | None:
@@ -1542,7 +1847,19 @@ def _ownship(engine: Engine) -> dict[str, Any] | None:
                             if session and session.destination else None),
         "origin": (session.departure.ident
                    if session and session.departure else ""),
+        # The taxi the controller gave, along the simulator's taxiways, while
+        # it is being taxied. An invented route has no line to draw.
+        "taxi_route": _taxi_route(session, state),
     }
+
+
+def _taxi_route(session, state) -> list[list[float]]:
+    from ..atc.session import Phase
+
+    if session is None or not state.on_ground or session.phase not in (
+            Phase.TAXI_OUT, Phase.HOLDING_SHORT, Phase.TAXI_IN):
+        return []
+    return [[round(lat, 6), round(lon, 6)] for lat, lon in session.taxi_path]
 
 
 def _runway_shapes(db, ident: str, offsets) -> list[dict[str, Any]]:
@@ -1606,6 +1923,73 @@ def _traffic_strips(engine: Engine) -> list[dict[str, Any]]:
     return strips[:12]
 
 
+def _profile_view(engine: Engine, session) -> dict[str, Any]:
+    """The profile and the region, and where an automatic region came from:
+    the field of the controller being worked, else the departure."""
+    from ..atc.profile import FlightProfile
+
+    profile = (session.profile if session is not None
+               else FlightProfile.of(engine.config.flight))
+    station = getattr(engine, "station", None)
+    departure = getattr(session, "departure", None)
+    ident = (getattr(station, "ident", "")
+             or getattr(departure, "ident", "")
+             or engine.config.flight.departure or "")
+    return {"profile": profile.kind,
+            "region": profile.region_for(ident),
+            "region_pinned": profile.pinned,
+            "region_from": "" if profile.pinned else ident}
+
+
+# The standby station, by position and frequency: asked twice a second by
+# the panel in the simulator, and the answer only changes when the standby
+# frequency does or the aeroplane has gone a few miles.
+_STANDBY_CACHE: dict[str, Any] = {"key": None, "name": ""}
+
+
+def _standby_station(engine: Engine) -> str:
+    """Who answers on COM1 standby, for "Next" on the toolbar panel."""
+    state = engine.state
+    mhz = state.com1_standby
+    if not mhz or not state.has_position:
+        return ""
+    key = (carrier_khz(mhz), round(state.latitude, 1), round(state.longitude, 1))
+    if _STANDBY_CACHE["key"] == key:
+        return _STANDBY_CACHE["name"]
+    name = ""
+    try:
+        near = engine.navdb.all_stations_near(state.latitude, state.longitude,
+                                              max_nm=STATION_RANGE_NM)
+        matching = [s for s in near if same_channel(s.mhz, mhz)]
+        if matching:
+            name = min(matching, key=lambda s: s.distance_nm).callsign
+    except Exception:
+        log.debug("standby station not found", exc_info=True)
+    _STANDBY_CACHE.update(key=key, name=name)
+    return name
+
+
+def _progress(engine: Engine, session) -> float | None:
+    """How far along the flight is, 0 to 1, by distance left to fly.
+
+    Great circle from the departure to the destination against what is left
+    from here: a straight-line answer, which is what a progress bar on a
+    route strip needs and not a flight plan's distance.
+    """
+    from ..navdata.build import haversine_nm
+
+    state = engine.state
+    if (not session or not session.departure or not session.destination
+            or not state.has_position):
+        return None
+    dep, dest = session.departure, session.destination
+    total = haversine_nm(dep.lat, dep.lon, dest.lat, dest.lon)
+    if total < 1:
+        return None
+    left = haversine_nm(state.latitude, state.longitude, dest.lat, dest.lon)
+    return round(max(0.0, min(1.0, 1 - left / total)), 3)
+
+
 def snapshot(engine: Engine) -> dict[str, Any]:
     """Everything the panel shows, in one object."""
     state = engine.state
@@ -1665,9 +2049,15 @@ def snapshot(engine: Engine) -> dict[str, Any]:
         "radio": {
             "com1": round(state.com1_active, 3),
             "com1_standby": round(state.com1_standby, 3),
+            # False in a cold and dark aeroplane: nothing heard, nothing sent.
+            "powered": engine.radio_powered,
+            "standby_station": _standby_station(engine),
             "station": station.callsign if station else "",
             "station_ident": station.ident if station else "",
             "station_short": station.callsign_short if station else "",
+            # A sector's frequency made up for want of a published one
+            # (atc/enroute.py), marked so the pilot can report the real one.
+            "invented": is_invented(station),
             "airport": airport.spoken if airport else "",
             "airport_name": airport.name if airport else "",
             "here": ident,
@@ -1684,6 +2074,12 @@ def snapshot(engine: Engine) -> dict[str, Any]:
             "destination": (
                 session.destination.ident if session and session.destination else ""
             ),
+            "departure_name": (session.departure.name
+                               if session and session.departure else ""),
+            "destination_name": (session.destination.name
+                                 if session and session.destination else ""),
+            "sid": getattr(session, "sid", "") if session else "",
+            "progress": _progress(engine, session),
             "phase": session.phase.value if session else "",
             "cruise_altitude_ft": engine.config.flight.cruise_altitude_ft,
             "assigned_altitude_ft": round(session.assigned_altitude_ft) if session else 0,
@@ -1695,6 +2091,12 @@ def snapshot(engine: Engine) -> dict[str, Any]:
             "cleared_landing": bool(session and session.cleared_landing),
             "cleared_runway": session.cleared_runway if session else "",
             "squawk": session.squawk if session else "",
+            # So the quick replies can be a circuit's, not an airway's.
+            # Before there is a session they are the setting's, not "VFR".
+            "rules": ("IFR" if (session.ifr if session
+                                else engine.config.flight.ifr) else "VFR"),
+            **_profile_view(engine, session),
+            "pattern_work": bool(session and session.pattern_work),
         },
         "languages": [
             {"code": code, "name": LANGUAGE_NAMES.get(code, code)}
@@ -1723,6 +2125,7 @@ def snapshot(engine: Engine) -> dict[str, Any]:
         # controller would care about them: the arrivals by how close they
         # are, then everybody on the ground.
         "traffic": _traffic_strips(engine),
+        "live": _live_view(engine),
         "stats": engine.understanding.stats.summary(),
         "ptt_key": engine.config.ptt.key,
         "ptt_mode": engine.config.ptt.mode,
@@ -1792,6 +2195,20 @@ class _ConfigOnly:
         self.config = config
 
 
+def _device_value(device: str) -> int | str | None:
+    """A device as the screen names it: blank is the system default."""
+    return cfg.check("audio.input_device", device)
+
+
+def _plan_view(plan) -> dict[str, Any]:
+    """The four things the setup screen shows from a loaded plan."""
+    if plan is None:
+        return {}
+    return {"callsign": plan.callsign, "aircraft_type": plan.aircraft_type,
+            "departure": plan.origin, "destination": plan.destination,
+            "cruise_altitude_ft": plan.cruise_altitude_ft}
+
+
 def create_setup_app(config, broadcaster: Broadcaster) -> FastAPI:
     """The panel on a machine where nothing has been downloaded yet.
 
@@ -1834,7 +2251,8 @@ def create_setup_app(config, broadcaster: Broadcaster) -> FastAPI:
         started = installer.start([str(key) for key in steps],
                                   force=bool(body.get("force")),
                                   all_voices=bool(body.get("all_voices")),
-                                  hq=bool(body.get("hq")))
+                                  hq=bool(body.get("hq")),
+                                  vatglasses=bool(body.get("vatglasses")))
         return {"started": started, "setup": installer.state()}
 
     @app.post("/api/setup/cancel")
@@ -1846,21 +2264,145 @@ def create_setup_app(config, broadcaster: Broadcaster) -> FastAPI:
     async def doctor_view() -> dict:
         return await asyncio.to_thread(health_report, config)
 
+    # Built on the first preview, not at start: on a first run the voices
+    # arrive while the setup is open, and a synthesiser made before them
+    # would know of none.
+    preview: dict[str, Any] = {}
+
+    def _preview(voice: str) -> dict:
+        from ..audio.io import RadioPlayer
+        from ..cli import _configured_synth
+
+        if "synth" not in preview:
+            preview["synth"] = _configured_synth(config)
+        else:
+            preview["synth"].refresh()
+        device = config.audio.output_device
+        if device == "":
+            device = None
+        if "player" not in preview or preview.get("device") != device:
+            if "player" in preview:
+                preview["player"].stop()
+            preview["player"] = RadioPlayer(device=device)
+            preview["device"] = device
+        transmission, name, text = _first_officer_preview(
+            preview["synth"], config, voice)
+        preview["player"].play(transmission.audio, transmission.sample_rate)
+        return {"ok": True, "name": name, "text": text}
+
+    @app.post("/api/voice-preview")
+    async def voice_preview(body: dict | None = None) -> dict:
+        try:
+            return await asyncio.to_thread(
+                _preview, str((body or {}).get("voice") or "auto"))
+        except Exception as exc:
+            log.warning("voice preview failed: %s", exc)
+            return {"ok": False, "error": str(exc)}
+
     @app.get("/api/settings")
     async def settings() -> dict:
-        """Read-only, so the page opens in the pilot's own language.
+        """The configuration and the machine's devices, for the first run.
 
-        There is nothing to save it to: the engine that would apply a change
-        does not exist yet. POST is simply not here, and the page reports a
-        failed save rather than pretending one worked.
+        There is no engine to apply a change to, so a change is only
+        written to the file, and the engine reads it when it first starts.
+        That is all the first run needs: the onboarding chooses the
+        microphone, the key and the SimBrief account while the downloads
+        run, and none of those can wait for the program to be restarted.
         """
+        # The voices are likely what is still downloading: the list is what
+        # is on disk now, and the setup asks again when it reaches them.
+        devices = await asyncio.to_thread(_devices, config.voice.engine)
         return {"config": _settings_view(_ConfigOnly(config)),
-                "devices": {"inputs": [], "outputs": [], "joysticks": [],
-                            "joystick_reason": "", "joystick_known": [],
-                            "voices": []},
+                "version": __version__,
+                "setup_only": True,
+                "devices": devices,
                 "announcements": {"folders": [], "count": 0,
                                   "airlines": [],
                                   "events": list(ANNOUNCEMENT_EVENTS)}}
+
+    def write(changes: dict) -> dict:
+        try:
+            accepted = _check_all(changes)
+        except SettingsRefused as refused:
+            first = next(iter(refused.errors.values()))
+            return {"ok": False, "errors": refused.errors,
+                    "error": first["text"],
+                    "config": _settings_view(_ConfigOnly(config))}
+        changed = set()
+        for path, value in accepted.items():
+            if cfg.get_path(config, path) != value:
+                cfg.set_path(config, path, value)
+                release = getattr(config, "release", None)
+                if release is not None:
+                    release(path)
+                changed.add(path)
+        if changed:
+            try:
+                config.save()
+            except Exception as exc:
+                log.warning("could not write config.yaml: %s", exc)
+                return {"ok": False, "error": f"could not save: {exc}",
+                        "config": _settings_view(_ConfigOnly(config))}
+        # Nothing is running yet, so nothing has to be restarted for it.
+        return {"ok": True, "changed": sorted(changed),
+                "restart_required": [],
+                "config": _settings_view(_ConfigOnly(config))}
+
+    @app.post("/api/settings")
+    async def update_settings(payload: dict) -> dict:
+        return await asyncio.to_thread(write, payload or {})
+
+    meter = InputMeter()
+
+    @app.get("/api/mic/level")
+    async def mic_level(device: str = "") -> dict:
+        return await asyncio.to_thread(meter.read, _device_value(device))
+
+    @app.post("/api/ptt/learn")
+    async def learn_ptt_button() -> dict:
+        from ..audio.io import JoystickPushToTalk
+
+        found = await asyncio.to_thread(JoystickPushToTalk.learn, 8.0)
+        if found is None:
+            devices, reason = await asyncio.to_thread(JoystickPushToTalk.scan)
+            return {"ok": False, "reason": reason or "nothing pressed",
+                    "devices": len(devices)}
+        controller, button = found
+        return {"ok": True, "id": controller.id, "index": controller.index,
+                "button": button, "name": controller.name}
+
+    _controller_routes(app)
+
+    @app.post("/api/simbrief")
+    async def simbrief(payload: dict) -> dict:
+        """Fetch the plan and keep it in the file, for the engine to start on.
+
+        The same fields :meth:`Engine.apply_flight_plan` fills, written to
+        ``flight`` so the first session begins with them.
+        """
+        from ..integrations.simbrief import SimBriefError, fetch
+
+        user = (payload.get("username") or "").strip()
+        try:
+            plan = await asyncio.to_thread(fetch, user
+                                           or config.simbrief.username)
+        except SimBriefError as why:
+            return {"ok": False, "error": str(why)}
+        except Exception as exc:                    # pragma: no cover
+            return {"ok": False, "error": str(exc)}
+        changes = {"flight.departure": plan.origin,
+                   "flight.destination": plan.destination}
+        if user:
+            changes["simbrief.username"] = user
+        if plan.callsign:
+            changes["flight.callsign"] = plan.callsign
+        if plan.aircraft_type:
+            changes["flight.aircraft_type"] = plan.aircraft_type
+        if plan.cruise_altitude_ft:
+            changes["flight.cruise_altitude_ft"] = plan.cruise_altitude_ft
+        saved = await asyncio.to_thread(write, changes)
+        return {"ok": True, "plan": plan.described, "flight": _plan_view(plan),
+                "settings": saved["config"]}
 
     @app.websocket("/ws")
     async def websocket(socket: WebSocket) -> None:

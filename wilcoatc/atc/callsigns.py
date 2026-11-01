@@ -88,7 +88,7 @@ def telephony_for(icao: str, language: str,
 
 def parse_callsign(raw: str, aircraft_type: str = "", language: str = "en",
                    airline_names: dict[str, str] | None = None,
-                   dialect: str = "faa") -> Callsign:
+                   dialect: str = "faa", airline: bool | None = None) -> Callsign:
     """Build the spoken form of a callsign in a given language.
 
     English and French have their own readings and their own modules; every
@@ -97,6 +97,9 @@ def parse_callsign(raw: str, aircraft_type: str = "", language: str = "en",
     ``dialect`` is where the aeroplane is rather than what it speaks, and only
     English uses it: the group form is a US rule, so English over Europe reads
     the number digit by digit like everybody else there.
+
+    ``airline`` is the pilot's profile saying whether this is an airline
+    flight; None (the traffic) asks the type.
     """
     language = (language or "en").lower()[:2]
 
@@ -106,18 +109,19 @@ def parse_callsign(raw: str, aircraft_type: str = "", language: str = "en",
         # Its third argument is the dialect, not the overrides: the FAA groups
         # a flight number into pairs and ICAO reads it digit by digit.
         return parse_en(raw, aircraft_type, dialect,
-                        airline_names=airline_names)
+                        airline_names=airline_names, airline=airline)
     if language == "fr":
         from .speech_fr import parse_callsign as parse_fr
 
-        return parse_fr(raw, aircraft_type, airline_names)
+        return parse_fr(raw, aircraft_type, airline_names, airline=airline)
 
     raw = (raw or "").strip().upper().replace("_", "")
     if not raw:
         return Callsign("UNKNOWN", "unknown aircraft", "unknown aircraft")
 
     match = _AIRLINE_RE.match(raw)
-    if match and flies_as_airline(aircraft_type):
+    if match and (flies_as_airline(aircraft_type) if airline is None
+                  else airline):
         name = telephony_for(match.group(1), language, airline_names)
         if name:
             flight = match.group(2)
@@ -136,6 +140,10 @@ def parse_callsign(raw: str, aircraft_type: str = "", language: str = "en",
             return Callsign(raw, spoken, spoken, telephony=name, is_airline=True)
 
     body = raw.replace("-", "")
+    if _AIRLINE_RE.match(raw):
+        # An airline's shape is never abbreviated (Doc 4444 12.3.1.9).
+        spoken = _spell(body, language)
+        return Callsign(raw, spoken, spoken)
     return Callsign(raw, _spell(body, language), _spell(body[-3:], language))
 
 
@@ -154,9 +162,57 @@ def _spell(text: str, language: str) -> str:
     return " ".join(out)
 
 
+# How far into a transmission a callsign may start: after the station's
+# name ("Kortrijk Information, Oscar Oscar ..."), not in the middle of a
+# taxi route ("via Alpha Bravo").
+_CALLSIGN_WITHIN_WORDS = 4
+
+
+def heard_registration(text: str) -> str:
+    """The registration a pilot said, written: "Oscar Oscar Alpha Bravo
+    Charlie" is OO-ABC, "November one seven two Sierra Papa" N172SP. Empty
+    where there is none.
+
+    Only a registration of a known national shape near the start of the
+    transmission counts: five letters spelled with the prefix of a state
+    the traffic table knows (OO-, F-, D-, G-, HB- ...), or an N-number. At
+    Kortrijk the pilot said OO-ABC on every call and was answered as the
+    ETD204 a SimBrief plan had left in the settings.
+    """
+    import re
+
+    from .operators import REGISTRATION_PREFIX
+    from .speech import _ALPHABET_REVERSE, _WORD_TO_DIGIT
+
+    # A comma ends a callsign: "..., Alpha Bravo Charlie, Alpha" is not a
+    # six-letter registration.
+    words = re.findall(r"[a-z]+(?:-[a-z]+)?|[,.;:!?]", (text or "").lower())
+    prefixes = sorted({p.split("-")[0] for _, p in REGISTRATION_PREFIX
+                       if p != "N"}, key=len, reverse=True)
+    for start in range(min(len(words), _CALLSIGN_WITHIN_WORDS + 1)):
+        run = ""
+        for word in words[start:]:
+            ch = _ALPHABET_REVERSE.get(word) or _WORD_TO_DIGIT.get(word)
+            if ch is None or (len(ch) != 1):
+                break
+            run += ch
+        if run.startswith("N") and len(run) >= 4 and run[1].isdigit() \
+                and run[1] != "0" and len(run) <= 6:
+            return run
+        if len(run) < 4 or not run.isalpha():
+            continue
+        for prefix in prefixes:
+            tail = run[len(prefix):]
+            if run.startswith(prefix) and len(prefix) + len(tail) in (5, 6) \
+                    and 3 <= len(tail) <= 4:
+                return f"{prefix}-{tail}"
+    return ""
+
+
 def every_language(raw: str, aircraft_type: str = "",
                    airline_names: dict[str, str] | None = None,
-                   dialect: str = "faa") -> dict[str, Callsign]:
+                   dialect: str = "faa",
+                   airline: bool | None = None) -> dict[str, Callsign]:
     """One spoken form per language this system can work in.
 
     Built once when a flight starts, so a controller anywhere can address the
@@ -167,9 +223,11 @@ def every_language(raw: str, aircraft_type: str = "",
     from .language import SUPPORTED_LANGUAGES
 
     return {
-        code: parse_callsign(raw, aircraft_type, code, airline_names, dialect)
+        code: parse_callsign(raw, aircraft_type, code, airline_names, dialect,
+                             airline)
         for code in SUPPORTED_LANGUAGES
     }
 
 
-__all__ = ["parse_callsign", "every_language", "telephony_for", "LOCAL_TELEPHONY"]
+__all__ = ["parse_callsign", "every_language", "telephony_for", "LOCAL_TELEPHONY",
+           "heard_registration"]

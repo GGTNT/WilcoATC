@@ -17,9 +17,16 @@
     the fix; see README, "Windows Defender says it is a virus", for what the
     other switches buy when there is no certificate to sign with.
 
+    -HQ builds WilcoATC-HQ instead: the same program plus torch and
+    Chatterbox, about a gigabyte more, for the cloned controller voices. It
+    builds from its own interpreter, .venv-hq, made beside .venv the first
+    time, so that the ordinary build's environment never carries torch.
+
 .EXAMPLE
     .\build.ps1
+    .\build.ps1 -HQ -Zip
     .\build.ps1 -Zip
+    .\build.ps1 -Zip -Setup
     .\build.ps1 -Zip -Sign 9A1B2C3D4E5F60718293A4B5C6D7E8F901234567
     .\build.ps1 -Zip -Sign certs\wilcoatc.pfx -RebuildBootloader
 #>
@@ -30,6 +37,11 @@ param(
     [switch]$Zip,
     # Skip regenerating the icons (needs Pillow).
     [switch]$SkipIcons,
+    # Build WilcoATC-HQ, with the cloned voices, from .venv-hq.
+    [switch]$HQ,
+    # Also produce dist\WilcoATC-Setup.exe (dist\WilcoATC-HQ-Setup.exe with
+    # -HQ): one file that installs the program (wilcoatc/installer).
+    [switch]$Setup,
     # The interpreter to package. Must be 64-bit Windows Python.
     [string]$Python = ".venv\Scripts\python.exe",
 
@@ -59,6 +71,23 @@ Set-Location $PSScriptRoot
 
 function Step($text) { Write-Host "`n=== $text" -ForegroundColor Cyan }
 
+$Name = if ($HQ) { "WilcoATC-HQ" } else { "WilcoATC" }
+
+if ($HQ -and -not $PSBoundParameters.ContainsKey("Python")) {
+    # Its own interpreter, made from the ordinary one: torch is a gigabyte
+    # the ordinary build must not pick up by accident.
+    $Python = ".venv-hq\Scripts\python.exe"
+    if (-not (Test-Path $Python)) {
+        if (-not (Test-Path ".venv\Scripts\python.exe")) {
+            throw "-HQ makes .venv-hq from .venv, and there is no .venv. " +
+                  "Create one first:`n  python -m venv .venv"
+        }
+        Step "Creating .venv-hq"
+        & ".venv\Scripts\python.exe" -m venv .venv-hq
+        if ($LASTEXITCODE -ne 0) { throw "could not create .venv-hq" }
+    }
+}
+
 if (-not (Test-Path $Python)) {
     throw "No interpreter at $Python. Create one first:`n" +
           "  python -m venv .venv`n" +
@@ -69,6 +98,16 @@ Step "Build dependencies"
 & $Python -m pip install --upgrade --quiet pip
 & $Python -m pip install --quiet -r requirements.txt
 & $Python -m pip install --quiet -r requirements-build.txt
+if ($HQ) {
+    # Two steps, because chatterbox-tts declares pins the rest of the program
+    # contradicts (numpy below 2, where Kokoro needs 2): what it needs at
+    # runtime is in requirements-hq.txt, and the package itself goes in
+    # without its own idea of its dependencies. See requirements-hq.txt.
+    & $Python -m pip install --quiet -r requirements-hq.txt
+    if ($LASTEXITCODE -ne 0) { throw "installing requirements-hq.txt failed" }
+    & $Python -m pip install --quiet --no-deps chatterbox-tts==0.1.7 chatterbox-flash==0.1.0
+    if ($LASTEXITCODE -ne 0) { throw "installing chatterbox-tts failed" }
+}
 
 if ($RebuildBootloader) {
     Step "Bootloader"
@@ -113,14 +152,17 @@ Remove-Item -Recurse -Force build, $staging -ErrorAction SilentlyContinue
 # thing here that actually says whether it worked, so ask that instead.
 $previous = $ErrorActionPreference
 $ErrorActionPreference = "Continue"
+# The spec reads this to decide which of the two builds it is.
+$env:WILCOATC_HQ = if ($HQ) { "1" } else { "" }
 try {
     & $Python -m PyInstaller --noconfirm --clean --distpath $staging wilcoatc.spec
 } finally {
     $ErrorActionPreference = $previous
+    Remove-Item Env:WILCOATC_HQ -ErrorAction SilentlyContinue
 }
 if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed with exit code $LASTEXITCODE" }
 
-$staged = Join-Path $staging "WilcoATC"
+$staged = Join-Path $staging $Name
 
 # What a complete bundle has. Checked by name rather than by counting files,
 # because the thing being guarded against is precisely a folder that has
@@ -143,22 +185,26 @@ if ($missing.Count -gt 0) {
            "been left alone; $staged holds the partial one.")
 }
 
-Remove-Item -Recurse -Force dist -ErrorAction SilentlyContinue
+# Only this build's own folder: the other one, if it was built, stays.
+Remove-Item -Recurse -Force "dist\$Name" -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path "dist" | Out-Null
-Move-Item $staged "dist\WilcoATC"
+Move-Item $staged "dist\$Name"
 Remove-Item -Recurse -Force $staging -ErrorAction SilentlyContinue
 
-$out = "dist\WilcoATC"
+$out = "dist\$Name"
 
 Step "Navigation data"
 # The database ships with the build but sits outside the bundle: setup rebuilds
 # it and overrides.csv is edited by hand, and neither works on a file sealed
-# inside a read-only executable.
+# inside a read-only executable. The VatGlasses sectors (CC BY-NC-SA) never
+# ship: their folder is left out and the copied database has them stripped,
+# whatever this machine has downloaded (wilcoatc/navdata/release.py).
 $navSrc = "data\navdata"
 $navDst = "$out\data\navdata"
 if (Test-Path "$navSrc\nav.sqlite") {
-    New-Item -ItemType Directory -Force -Path $navDst | Out-Null
-    Copy-Item "$navSrc\*" $navDst -Recurse -Force
+    if (Test-Path $navDst) { Remove-Item -Recurse -Force $navDst }
+    & $Python -m wilcoatc.navdata.release $navSrc $navDst
+    if ($LASTEXITCODE -ne 0) { throw "the navigation data could not be copied" }
     Write-Host ("copied {0:N0} MB of navigation data" -f ((Get-ChildItem $navDst -Recurse |
         Measure-Object Length -Sum).Sum / 1MB))
 } else {
@@ -183,12 +229,22 @@ signed. More info -> Run anyway.
 "@
 }
 
+$hqNote = if ($HQ) {
+@"
+
+This is WilcoATC-HQ. It can also clone the controllers' voices from
+recordings, which sounds the most natural: tick "Use cloned controller
+voices" on the setup screen (2 GB more). Without a graphics card a long
+clearance can take a minute to arrive.
+"@
+} else { "" }
+
 @"
 WilcoATC
 ========
 
 Double-click WilcoATC.exe.
-
+$hqNote
 The first start downloads the controller voices and the speech recogniser --
 a few hundred megabytes, once, in the languages you pick. Everything after
 that is local: no account, no subscription, nothing sent anywhere.
@@ -230,8 +286,12 @@ Unpacking with 7-Zip avoids the whole thing.
 "@ | Set-Content "$out\FIRST-RUN.txt" -Encoding UTF8
 
 Copy-Item README.md "$out\README.md" -Force -ErrorAction SilentlyContinue
-# The README is the overview; the full manual is what a pilot looks things up in.
-Copy-Item docs\MANUAL.md "$out\MANUAL.md" -Force -ErrorAction SilentlyContinue
+# The AGPL travels with every copy of the program it covers.
+Copy-Item LICENSE "$out\LICENSE.txt" -Force
+# The toolbar panel for the simulator, beside the program: the installer
+# copies it into each Community folder it finds (wilcoatc/msfs_panel.py).
+if (Test-Path "$out\msfs-panel") { Remove-Item -Recurse -Force "$out\msfs-panel" }
+Copy-Item -Recurse msfs\package "$out\msfs-panel"
 
 Step "Runtime configuration"
 
@@ -313,10 +373,43 @@ Write-Host ("`n{0} is {1:N0} MB" -f $out, $size) -ForegroundColor Green
 
 if ($Zip) {
     Step "Zipping"
-    $zipPath = "dist\WilcoATC-win64.zip"
+    $zipPath = "dist\$Name-win64.zip"
     Remove-Item $zipPath -ErrorAction SilentlyContinue
     Compress-Archive -Path $out -DestinationPath $zipPath -CompressionLevel Optimal
     Write-Host ("{0} is {1:N0} MB" -f $zipPath, ((Get-Item $zipPath).Length / 1MB)) -ForegroundColor Green
+}
+
+if ($Setup) {
+    Step "Installer"
+    # The payload is made from the folder just built, with only what a
+    # release ships in it (wilcoatc/installer/pack.py): a dist folder that
+    # has been run has a developer's logs and config in it.
+    $payloadDir = "build\setup-payload"
+    Remove-Item -Recurse -Force $payloadDir -ErrorAction SilentlyContinue
+    & $Python -m wilcoatc.installer.pack $out "$payloadDir\$Name.zip"
+    if ($LASTEXITCODE -ne 0) { throw "the installer's payload could not be made" }
+
+    $setupName = "$Name-Setup"
+    $env:WILCOATC_SETUP_PAYLOAD = (Resolve-Path "$payloadDir\$Name.zip").Path
+    $env:WILCOATC_SETUP_NAME = $setupName
+    # The same stderr trap as the program's own freeze, above.
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        & $Python -m PyInstaller --noconfirm --clean --distpath dist `
+            --workpath build\setup setup.spec
+    } finally {
+        $ErrorActionPreference = $previous
+        Remove-Item Env:WILCOATC_SETUP_PAYLOAD, Env:WILCOATC_SETUP_NAME -ErrorAction SilentlyContinue
+    }
+    if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed on setup.spec ($LASTEXITCODE)" }
+
+    $setupExe = "dist\$setupName.exe"
+    if ($Sign) {
+        & $signtool.FullName @signArgs (Resolve-Path $setupExe).Path
+        if ($LASTEXITCODE -ne 0) { throw "signing $setupName.exe failed" }
+    }
+    Write-Host ("{0} is {1:N0} MB" -f $setupExe, ((Get-Item $setupExe).Length / 1MB)) -ForegroundColor Green
 }
 
 Write-Host "`nTest it before shipping it:" -ForegroundColor Yellow

@@ -31,6 +31,7 @@ from dataclasses import dataclass, field
 from typing import Sequence
 
 from . import speech as sp
+from ..navdata.channels import spoken_channel
 
 Dialect = sp.Dialect
 
@@ -53,6 +54,16 @@ def language_of(phraseology) -> str:
     in each language.
     """
     return getattr(phraseology, "language", "") or "en"
+
+
+def _is_letters(name: str) -> bool:
+    """A point named by one to three capitals, like N, SE or NG."""
+    return 1 <= len(name) <= 3 and name.isalpha() and name.isupper()
+
+
+def _join_words(*words: str) -> str:
+    """Words into one clause, dropping the empty ones."""
+    return " ".join(w.strip() for w in words if w and w.strip())
 
 
 def _join(*parts: str) -> str:
@@ -173,12 +184,22 @@ class Aircraft:
     # Alternative spoken forms, keyed by language code.
     callsigns: dict[str, sp.Callsign] = field(default_factory=dict)
     language: str = "en"
+    #: Once a station has said the callsign short, it stays short: ICAO has
+    #: the ground station abbreviate first and both sides keep it. Each
+    #: phrase chose for itself, so Kortrijk said "Alpha Bravo Charlie" to a
+    #: takeoff and "Oscar Oscar Alpha Bravo Charlie" again to the next
+    #: report. Only where the short form differs: an airline's never does.
+    kept_short: bool = False
 
     def for_language(self, language: str) -> sp.Callsign:
         return self.callsigns.get((language or "en")[:2], self.callsign)
 
     def spoken(self, abbreviated: bool = False) -> str:
-        base = self.for_language(self.language).spoken(abbreviated)
+        callsign = self.for_language(self.language)
+        if abbreviated and callsign.spoken_short \
+                and callsign.spoken_short != callsign.spoken_full:
+            self.kept_short = True
+        base = callsign.spoken(abbreviated or self.kept_short)
         return f"{base} {self.wake}".strip() if self.wake else base
 
     def variants(self) -> list[str]:
@@ -212,6 +233,10 @@ class Weather:
     # Where the wind and pressure were read from, for the decision log:
     # "metar KBOS", "nearest KLGA", "sim+metar KBOS", "sim", "default".
     source: str = ""
+    # Where each part of the wind came from -- direction, speed, gust -- for
+    # the log. One report is one source: the simulator's calm wind once
+    # carried Lille's 45 kt gust.
+    wind_from: dict = field(default_factory=dict)
 
 
 def spoken_wind_direction(weather: Weather) -> float | str:
@@ -257,6 +282,10 @@ class Phraseology:
         still passes one.
         """
         self.dialect = dialect
+        # Which national VFR practice the words follow (navdata.db
+        # .vfr_region): faa, uk, icao or metric for English. Set from the
+        # field by language.phraseology_for; without one, the dialect's.
+        self.region = "faa" if dialect == "faa" else "icao"
         self.strict_icao_digits = strict_icao_digits
         self.transition = int(transition) or 18000
         # Only the digit table differs; everything else follows ``dialect``.
@@ -275,9 +304,29 @@ class Phraseology:
         return sp.altitude(feet, self.digit_dialect,
                            transition or self.transition, level_from)
 
+    def vfr_alt(self, feet: float, transition: int = 0) -> str:
+        """A VFR altitude: feet, or metres in the metric region.
+
+        UNVERIFIED: China gives VFR altitudes in metres; Mongolia and the
+        Russian regions are grouped with it on the same practice, not on a
+        manual read for this. Rounded to fifty metres, which is the step a
+        controller would use. QFE, which some of those fields use, is not
+        modelled.
+        """
+        if self.region != "metric":
+            return self.alt(feet, transition)
+        metres = int(round(float(feet) * 0.3048 / 50.0) * 50)
+        return f"{sp.altitude(metres, self.digit_dialect, 10 ** 6)} metres"
+
+    # The field or sector whose airspace decides how a frequency is said
+    # (channels.spoken_channel): set by language.phraseology_for. Empty, a
+    # frequency is read as it always was.
+    channels: str = ""
+
     def freq(self, mhz: float) -> str:
         # The separator word follows the region; the digits follow the style.
-        text = sp.frequency(mhz, self.digit_dialect)
+        mhz, named = spoken_channel(mhz, self.channels)
+        text = sp.frequency(mhz, self.digit_dialect, channel=named)
         if self.dialect == "icao":
             text = text.replace(" point ", " decimal ")
         return text
@@ -314,6 +363,7 @@ class Phraseology:
         departure_freq: float = 0.0,
         squawk: str = "1200",
         transition_altitude: int = 0,
+        runway: str = "",
     ) -> str:
         """A full IFR clearance in CRAFT order.
 
@@ -323,7 +373,7 @@ class Phraseology:
         """
         # --- clearance limit and route ---
         if departure_procedure:
-            via = f"via the {departure_procedure} departure"
+            via = f"via the {self.procedure(departure_procedure)} departure"
             if transition:
                 via += f", {transition} transition"
             via += f", then {route}"
@@ -350,7 +400,16 @@ class Phraseology:
                     f"{self.d(expect_minutes)} minutes after departure"
                 )
 
-        parts = [self.addressed(aircraft, station), cleared_to, climb]
+        parts = [self.addressed(aircraft, station), cleared_to]
+        if runway:
+            # FAA: "expect runway three four left" after the route (as the
+            # IFR plan has it). UNVERIFIED: the ICAO form; CAP 413's example
+            # clearances leave the runway to the ATIS, and a European
+            # delivery that says it says "departure runway".
+            parts.append(f"expect runway {self.rwy(runway)}"
+                         if self.dialect == "faa"
+                         else f"departure runway {self.rwy(runway)}")
+        parts.append(climb)
 
         if departure_freq:
             label = "departure frequency" if self.dialect == "faa" else "departure frequency"
@@ -368,28 +427,38 @@ class Phraseology:
         squawk: str = "1200",
         altitude_restriction: float = 0.0,
         direction: str = "",
+        pressure: float = 0.0,
+        exit_point: str = "",
     ) -> str:
         """VFR release out of controlled airspace.
 
         A VFR flight is not cleared anywhere. It is released in a direction,
-        held at or below a level where something is above it, given a code and
-        sent on its way -- so this says "departure approved" and "maintain
-        VFR", never "cleared to" and never a level to maintain.
+        held below what is above it, given the pressure and a code. In the
+        US that is "north departure approved, maintain VFR at or below"
+        (FAA JO 7110.65 chapter 3 section 10); FAA towers do not say "cleared
+        out of the Class Delta", which this used to. In the UK and the ICAO
+        states it is "leave the zone via (point), not above (altitude)" (CAP
+        413; ICAO Doc 4444 chapter 12 for the plain form). The pressure is in
+        every one: a release without it is a departure on the wrong
+        altimeter setting.
         """
         parts = [self.addressed(aircraft, station)]
-        if airspace:
-            body = f"cleared out of the {airspace}"
-            if direction:
-                body += f", {direction} departure approved"
-            parts.append(body)
-        elif direction:
-            parts.append(f"{direction} departure approved")
+        if self.region == "faa":
+            parts.append(f"{direction} departure approved" if direction
+                         else "VFR departure approved")
+            if altitude_restriction:
+                parts.append("maintain VFR at or below "
+                             f"{self.vfr_alt(altitude_restriction)}")
+            else:
+                parts.append("maintain VFR")
         else:
-            parts.append("VFR departure approved")
-        if altitude_restriction:
-            parts.append(f"maintain VFR at or below {self.alt(altitude_restriction)}")
-        else:
-            parts.append("maintain VFR")
+            where = (f"via {exit_point}" if exit_point
+                     else f"to the {direction}" if direction else "")
+            parts.append(_join_words("leave the", airspace or "zone", where))
+            if altitude_restriction:
+                parts.append(f"not above {self.vfr_alt(altitude_restriction)}")
+        if pressure:
+            parts.append(self.pressure(pressure))
         if departure_freq:
             parts.append(f"departure frequency {self.freq(departure_freq)}")
         parts.append(f"squawk {sp.squawk(squawk, self.digit_dialect)}")
@@ -464,13 +533,15 @@ class Phraseology:
         hold_short: str = "",
         altimeter: float = 0.0,
         abbreviated: bool = True,
+        hold_short_taxiway: str = "",
     ) -> str:
         """Taxi instruction.
 
         FAA JO 7110.65 10-3-1 requires the departure runway to be stated first,
         then the route, and a hold-short instruction for every runway crossed
         that is not explicitly cleared. The runway assignment is not a takeoff
-        clearance and never implies one.
+        clearance and never implies one. ``hold_short_taxiway`` cuts a long
+        taxi in two (atc.taxi.split_route): the rest comes once there.
         """
         parts = [self.addressed(aircraft, station, abbreviated)]
         parts.append(f"runway {self.rwy(runway)}")
@@ -478,6 +549,8 @@ class Phraseology:
             parts.append(f"taxi via {sp.taxi_route(route)}")
         else:
             parts.append("taxi to the runway")
+        if hold_short_taxiway:
+            parts.append(f"hold short of {sp.taxiway(hold_short_taxiway)}")
         if hold_short:
             parts.append(f"hold short of runway {self.rwy(hold_short)}")
         if altimeter:
@@ -487,13 +560,15 @@ class Phraseology:
     def taxi_to_parking(
         self, aircraft: Aircraft, station: str, route: Sequence[str],
         destination: str = "the ramp", *, hold_short: str = "",
-        abbreviated: bool = True,
+        abbreviated: bool = True, hold_short_taxiway: str = "",
     ) -> str:
         parts = [self.addressed(aircraft, station, abbreviated)]
         if route:
             parts.append(f"taxi to {destination} via {sp.taxi_route(route)}")
         else:
             parts.append(f"taxi to {destination}")
+        if hold_short_taxiway:
+            parts.append(f"hold short of {sp.taxiway(hold_short_taxiway)}")
         if hold_short:
             parts.append(f"hold short of runway {self.rwy(hold_short)}")
         return _join(*parts) + "."
@@ -549,16 +624,23 @@ class Phraseology:
         after_departure: str = "",
         abbreviated: bool = True,
         traffic: str = "",
+        caution: str = "",
+        immediate: bool = False,
     ) -> str:
         parts = [self.addressed(aircraft, station, abbreviated)]
         if traffic:
             parts.append(traffic)
         if weather is not None:
             parts.append(self.wind(weather))
+        if caution:
+            parts.append(caution)
         parts.append(f"runway {self.rwy(runway)}")
         if after_departure:
             parts.append(after_departure)
-        parts.append("cleared for takeoff")
+        # ICAO Doc 4444 chapter 12: "cleared for immediate take-off".
+        # UNVERIFIED: the FAA's use of the same words.
+        parts.append("cleared for immediate takeoff" if immediate
+                     else "cleared for takeoff")
         return _join(*parts) + "."
 
     def cleared_to_land(
@@ -570,12 +652,15 @@ class Phraseology:
         station: str = "",
         sequence: str = "",
         abbreviated: bool = True,
+        caution: str = "",
     ) -> str:
         parts = [self.addressed(aircraft, station, abbreviated)]
         if sequence:
             parts.append(sequence)
         if weather is not None:
             parts.append(self.wind(weather))
+        if caution:
+            parts.append(caution)
         parts.append(f"runway {self.rwy(runway)}")
         parts.append("cleared to land")
         return _join(*parts) + "."
@@ -583,7 +668,8 @@ class Phraseology:
     def cleared_touch_and_go(self, aircraft: Aircraft, runway: str,
                              weather: Weather | None = None, *,
                              sequence: str = "", station: str = "",
-                             abbreviated: bool = True) -> str:
+                             abbreviated: bool = True,
+                             caution: str = "") -> str:
         """"Cleared for the option" leaves the choice to the pilot.
 
         FAA JO 7110.65 3-10-6: it authorises a touch-and-go, a low approach, a
@@ -596,7 +682,13 @@ class Phraseology:
             parts.append(sequence)
         if weather is not None:
             parts.append(self.wind(weather))
-        parts += [f"runway {self.rwy(runway)}", "cleared for the option"]
+        if caution:
+            parts.append(caution)
+        # "The option" is American. CAP 413 and ICAO clear the touch and go
+        # itself.
+        cleared = ("cleared for the option" if self.region == "faa"
+                   else "cleared touch and go")
+        parts += [f"runway {self.rwy(runway)}", cleared]
         return _join(*parts) + "."
 
     def closed_traffic_approved(
@@ -608,8 +700,12 @@ class Phraseology:
         parts = [self.addressed(aircraft, station, abbreviated)]
         if weather is not None:
             parts.append(self.wind(weather))
-        parts += [f"runway {self.rwy(runway)}", "cleared for takeoff",
-                  f"{direction} closed traffic approved"]
+        # FAA: "make left closed traffic" (JO 7110.65 chapter 3 section 10).
+        # ICAO/UK: the circuit by its hand. UNVERIFIED: the UK form after a
+        # take-off clearance.
+        circuit = (f"make {direction} closed traffic" if self.region == "faa"
+                   else f"{direction}-hand circuit")
+        parts += [f"runway {self.rwy(runway)}", "cleared for takeoff", circuit]
         return _join(*parts) + "."
 
     def make_short_approach(self, aircraft: Aircraft, reason: str = "") -> str:
@@ -625,6 +721,82 @@ class Phraseology:
                          f"{direction} turn out approved") + "."
         return _join(aircraft.spoken(True), "on course approved") + "."
 
+    # --- the runway, occupied ---------------------------------------------
+
+    def traffic_on_final(self, traffic: str, miles: float) -> str:
+        """"traffic a Cessna, three mile final": why a departure waits or
+        goes now."""
+        return f"traffic {traffic}, {self.d(max(1, int(round(miles))))} mile final"
+
+    def land_after(self, aircraft: Aircraft, runway: str,
+                   weather: Weather | None = None, *, traffic: str,
+                   station: str = "", abbreviated: bool = True,
+                   caution: str = "") -> str:
+        """A landing clearance behind an aeroplane still on the runway.
+
+        CAP 413: "land after the (type)". UNVERIFIED: the order of the items,
+        and its use in the plain ICAO region, which follows CAP 413.
+        """
+        parts = [self.addressed(aircraft, station, abbreviated),
+                 f"runway {self.rwy(runway)}", f"land after {traffic}"]
+        if weather is not None:
+            parts.append(self.wind(weather))
+        if caution:
+            parts.append(caution)
+        return _join(*parts) + "."
+
+    def departing_prior(self) -> str:
+        """The FAA's anticipated separation, said with the landing clearance.
+        UNVERIFIED: the plan's wording, not checked against JO 7110.65."""
+        return "traffic will be departing prior to your arrival"
+
+    def line_up_behind(self, aircraft: Aircraft, runway: str, traffic: str, *,
+                       station: str = "", abbreviated: bool = True) -> str:
+        """A conditional line-up: ICAO Doc 4444 chapter 12 and CAP 413,
+        "behind the landing (type), line up runway (number), behind". The
+        condition is said first and repeated last. Not used in the US, where
+        conditional clearances are not given."""
+        return _join(self.addressed(aircraft, station, abbreviated),
+                     f"behind {traffic}",
+                     f"line up runway {self.rwy(runway)}", "behind") + "."
+
+    def landing_traffic_named(self, traffic: str) -> str:
+        """"the landing Cessna" from "the Cessna"."""
+        return (traffic.replace("the ", "the landing ", 1)
+                if traffic.startswith("the ") else f"the landing {traffic}")
+
+    # --- delays -------------------------------------------------------------
+
+    def orbit(self, aircraft: Aircraft, side: str, sequence: str = "") -> str:
+        """An orbit for spacing. CAP 413: "orbit (left/right)"; the FAA's
+        "make (left/right) three-sixty" (JO 7110.65 chapter 3, section 10;
+        UNVERIFIED: the paragraph). UNVERIFIED: "for spacing" and the
+        report asked for after it."""
+        if self.region == "faa":
+            turn = f"make {side} three-sixty for spacing"
+        else:
+            turn = f"orbit {side} for spacing"
+        return _join(aircraft.spoken(True), sequence, turn,
+                     "report complete" if self.region != "faa"
+                     else "report rolling out") + "."
+
+    def hold_at(self, aircraft: Aircraft, station: str, point: str,
+                runway: str) -> str:
+        """Held at a reporting point while the circuit is full.
+        UNVERIFIED: the words."""
+        return _join(self.addressed(aircraft, station),
+                     f"hold at {point}", "circuit busy",
+                     f"runway {self.rwy(runway)}", "I will call you") + "."
+
+    def leave_hold(self, aircraft: Aircraft, point: str) -> str:
+        """The end of the hold, said in front of the join. UNVERIFIED."""
+        return f"leave {point}"
+
+    def expedite(self, aircraft: Aircraft, reason: str = "") -> str:
+        """"Expedite" with the reason (FAA JO 7110.65 and CAP 413 both use
+        the word; UNVERIFIED: the sentence)."""
+        return _join(aircraft.spoken(True), "expedite", reason) + "."
+
     def go_around(self, aircraft: Aircraft, reason: str = "",
                   instruction: str = "") -> str:
         parts = [aircraft.spoken(True), "go around"]
@@ -634,6 +806,19 @@ class Phraseology:
             parts.append(instruction)
         return _join(*parts) + "."
 
+    def tower_continue(self, aircraft: Aircraft, runway: str,
+                       station: str = "", sequence: str = "") -> str:
+        """A tower's answer to an arrival checking in on the final before
+        it can be cleared, with its place in the sequence when somebody is
+        ahead ("number two"). UNVERIFIED: the IFR plan's "runway NN,
+        continue, I'll call your clearance" (FAA); ICAO "continue approach"."""
+        if self.dialect == "faa":
+            body = f"runway {self.rwy(runway)}, continue, I'll call your clearance"
+        else:
+            body = f"continue approach, runway {self.rwy(runway)}"
+        return _join(self.addressed(aircraft, station, not station),
+                     sequence, body) + "."
+
     def continue_approach(self, aircraft: Aircraft, reason: str = "") -> str:
         parts = [aircraft.spoken(True), "continue approach"]
         if reason:
@@ -642,9 +827,7 @@ class Phraseology:
 
     def sequence_number(self, position: int, traffic: str = "") -> str:
         """``"number two, follow the Boeing seven three seven on short final"``."""
-        words = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five",
-                 6: "six", 7: "seven", 8: "eight"}
-        text = f"number {words.get(position, self.d(position))}"
+        text = f"number {sp.cardinal(position)}"
         if traffic:
             text += f", follow {traffic}"
         return text
@@ -665,12 +848,23 @@ class Phraseology:
         parts = [self.addressed(aircraft, station)]
         if sequence:
             parts.append(sequence)
-        if straight_in:
-            parts.append(f"make straight-in runway {self.rwy(runway)}")
+        rwy = self.rwy(runway)
+        if self.region == "faa":
+            if straight_in:
+                parts.append(f"make straight-in runway {rwy}")
+            elif leg:
+                parts.append(f"enter {direction} {leg} runway {rwy}")
+            else:
+                parts.append(f"make {direction} traffic runway {rwy}")
+        # ICAO Doc 4444 chapter 12: "JOIN (position in circuit)", "MAKE
+        # STRAIGHT-IN APPROACH"; CAP 413 the same, with the hand of the
+        # circuit. UNVERIFIED: "join left-hand circuit" with no leg.
+        elif straight_in:
+            parts.append(f"make straight-in approach runway {rwy}")
         elif leg:
-            parts.append(f"enter {direction} {leg} runway {self.rwy(runway)}")
+            parts.append(f"join {direction}-hand {leg} runway {rwy}")
         else:
-            parts.append(f"make {direction} traffic runway {self.rwy(runway)}")
+            parts.append(f"join {direction}-hand circuit runway {rwy}")
         if report:
             parts.append(f"report {report}")
         if weather is not None:
@@ -680,14 +874,160 @@ class Phraseology:
             ))
         return _join(*parts) + "."
 
-    def report_position(self, aircraft: Aircraft, point: str) -> str:
+    def vrp(self, name: str, altitude_ft: float = 0.0) -> str:
+        """A reporting point as it is said: a point named by letters in the
+        phonetic alphabet ("SE" is "Sierra Echo"), a named one as it is
+        named; and the altitude published for it, where there is one
+        ("November, one thousand five hundred feet")."""
+        said = sp.letters(name) if _is_letters(name) else name
+        if altitude_ft:
+            said = f"{said}, {self.vfr_alt(altitude_ft)} feet"
+        return said
+
+    # --- Special VFR ------------------------------------------------------
+
+    def vfr_below_minima(self, aircraft: Aircraft, station: str = "", *,
+                         offer: bool = True, airspace: str = "") -> str:
+        """A VFR flight told the zone is below VFR minima: kept out of it
+        (``airspace``) when it is outside, and told Special VFR can be asked
+        for when it can (``offer``).
+
+        UNVERIFIED: the words. FAA controllers ask for intentions; the UK and
+        ICAO forms here say Special VFR can be asked for.
+        """
+        faa = self.region == "faa"
+        parts = [self.addressed(aircraft, station),
+                 "weather is below VFR minimums" if faa else "weather below VFR minima"]
+        if airspace:
+            parts.append(f"remain clear of the {airspace}")
+        parts.append("Special VFR available on request" if offer and not faa
+                     else "say intentions" if faa else "report intentions")
+        return _join(*parts) + "."
+
+    def _svfr_terms(self, altitude_ft: float, pressure: float) -> list[str]:
+        parts = []
+        if self.region == "faa":
+            # FAA JO 7110.65 7-5-3: "maintain special VFR conditions", with
+            # an altitude where one is needed.
+            parts.append("maintain special VFR conditions"
+                         + (f" at or below {self.vfr_alt(altitude_ft)}"
+                            if altitude_ft else ""))
+        elif altitude_ft:
+            parts.append(f"not above {self.vfr_alt(altitude_ft)}")
+        if pressure:
+            parts.append(self.pressure(pressure))
+        return parts
+
+    def special_vfr_leave(self, aircraft: Aircraft, station: str = "", *,
+                          zone: str = "", airspace: str = "", exit_point: str = "",
+                          direction: str = "", altitude_ft: float = 0.0,
+                          pressure: float = 0.0, squawk: str = "",
+                          departure_freq: float = 0.0) -> str:
+        """A Special VFR departure.
+
+        FAA JO 7110.65 7-5-3: "cleared out of (name) surface area". CAP 413:
+        "cleared to leave the control zone Special VFR, via ..., not above
+        altitude ...". UNVERIFIED: the order of the items and the plain ICAO
+        form, which follows CAP 413.
+        """
+        where = (f"via {exit_point}" if exit_point
+                 else f"to the {direction}" if direction else "")
+        if self.region == "faa":
+            head = _join_words("cleared out of the", zone, "surface area", where)
+        else:
+            head = _join_words("cleared to leave the", airspace or "control zone",
+                               "Special VFR", where)
+        parts = [self.addressed(aircraft, station), head,
+                 *self._svfr_terms(altitude_ft, pressure)]
+        if departure_freq:
+            parts.append(f"departure frequency {self.freq(departure_freq)}")
+        if squawk:
+            parts.append(f"squawk {sp.squawk(squawk, self.digit_dialect)}")
+        return _join(*parts) + "."
+
+    def special_vfr_enter(self, aircraft: Aircraft, station: str = "", *,
+                          zone: str = "", airspace: str = "", entry_point: str = "",
+                          altitude_ft: float = 0.0, pressure: float = 0.0,
+                          report: str = "") -> str:
+        """A Special VFR arrival into the zone. Sources as for the departure."""
+        where = f"via {entry_point}" if entry_point else ""
+        if self.region == "faa":
+            head = _join_words("cleared into the", zone, "surface area", where)
+        else:
+            head = _join_words("cleared to enter the", airspace or "control zone",
+                               "Special VFR", where)
+        parts = [self.addressed(aircraft, station), head,
+                 *self._svfr_terms(altitude_ft, pressure)]
+        if report:
+            parts.append(f"report {report}")
+        return _join(*parts) + "."
+
+    def special_vfr_unable(self, aircraft: Aircraft, reason: str,
+                           station: str = "") -> str:
+        """Special VFR refused, and why. UNVERIFIED: the words."""
+        why = {"visibility": "visibility below minimums" if self.region == "faa"
+               else "visibility below minima",
+               "ceiling": "ceiling below minima",
+               "night": "not available at night"}.get(reason, "")
+        return _join(self.addressed(aircraft, station), "unable special VFR",
+                     why, "say intentions" if self.region == "faa"
+                     else "report intentions") + "."
+
+    def infringement(self, aircraft: Aircraft, station: str, airspace: str,
+                     turn: str, heading: float) -> str:
+        """An aeroplane about to enter a zone it may not enter yet. Firm,
+        not angry: what is happening, the way out, and the instruction.
+        UNVERIFIED: the plan's wording; neither JO 7110.65 nor CAP 413 was
+        found to give one form for it."""
+        return _join(self.addressed(aircraft, station),
+                     f"you are entering the {airspace} without clearance",
+                     f"turn {turn} heading {self.hdg(heading)}",
+                     "remain outside controlled airspace") + "."
+
+    def enter_zone(self, aircraft: Aircraft, airspace: str, via: str = "") -> str:
+        """Letting an aeroplane that is on frequency into the zone, by its
+        published point where there is one. UNVERIFIED: the plan's
+        wording."""
+        return _join(aircraft.spoken(True),
+                     _join_words("enter the", airspace, f"via {via}" if via else "")
+                     ) + "."
+
+    def join_report(self) -> str:
+        """The report asked for with a join: the FAA's midfield downwind,
+        ICAO's and CAP 413's plain downwind."""
+        return (self.REPORT_MIDFIELD_DOWNWIND if self.region == "faa"
+                else self.leg("downwind"))
+
+    def report_after_downwind(self) -> tuple[str, str]:
+        """What a downwind report is answered with: the words, and which
+        report that is ("base" or "final"). The FAA asks for the base;
+        CAP 413 and ICAO for the final."""
+        if self.region == "faa":
+            return self.REPORT_TURNING_BASE, "base"
+        return self.REPORT_FINAL, "final"
+
+    def join_overhead(self, aircraft: Aircraft, station: str, runway: str,
+                      altitude_ft: float, pressure: float,
+                      direction: str = "left") -> str:
+        """The overhead join, where it is the standard way in (the UK's
+        Standard Overhead Join; CAP 413). UNVERIFIED: the order of the
+        items; the altitude is two thousand feet above the field, given on
+        the QNH."""
+        return _join(self.addressed(aircraft, station),
+                     f"join overhead runway {self.rwy(runway)}",
+                     self.vfr_alt(altitude_ft), self.pressure(pressure),
+                     f"{direction}-hand circuit") + "."
+
+    def report_position(self, aircraft: Aircraft, point: str,
+                        sequence: str = "") -> str:
         """``"report midfield downwind"``, ``"report a two mile final"``.
 
         The reporting point is what a tower uses instead of radar to sequence
         a circuit, so it is an instruction in its own right rather than a
-        clause hanging off another one.
+        clause hanging off another one. A sequence goes in front of it:
+        "number two, follow the Cessna on base, report base".
         """
-        return _join(aircraft.spoken(True), f"report {point}") + "."
+        return _join(aircraft.spoken(True), sequence, f"report {point}") + "."
 
     def extend_downwind(self, aircraft: Aircraft, reason: str = "") -> str:
         parts = [aircraft.spoken(True), "extend downwind"]
@@ -695,6 +1035,38 @@ class Phraseology:
             parts.append(reason)
         parts.append("I'll call your base")
         return _join(*parts) + "."
+
+    def traffic_on_leg(self, traffic: str, leg: str) -> str:
+        """``"the Cessna on base"``: who to follow, and where it is."""
+        return f"{traffic} on {leg}" if traffic and leg else traffic
+
+    def turn_base(self, aircraft: Aircraft, sequence: str = "") -> str:
+        """The base the tower said it would call, called."""
+        # UNVERIFIED: "turn base" is what US and UK towers are heard to say
+        # after "extend downwind, I'll call your base"; neither JO 7110.65
+        # nor CAP 413 was found to give the words for the call itself.
+        parts = [aircraft.spoken(True), "turn base"]
+        if sequence:
+            parts.append(sequence)
+        return _join(*parts) + "."
+
+    def say_position(self, aircraft: Aircraft) -> str:
+        """A report that should have come and has not."""
+        # "Say" is the American verb for a question (JO 7110.65 uses "say
+        # altitude", "say heading"); ICAO and CAP 413 ask with "report".
+        body = "say position" if self.dialect == "faa" else "report position"
+        return _join(aircraft.spoken(True), body) + "."
+
+    def confirm_leg(self, aircraft: Aircraft, seen: str) -> str:
+        """A reported leg that is not where the tower can see the aeroplane."""
+        # UNVERIFIED: "verify" (FAA) and "confirm" (ICAO) are each side's
+        # word for checking an item; the clause after it is what a
+        # controller says, not text from either manual.
+        if self.dialect == "faa":
+            body = f"verify position, I show you on {seen}"
+        else:
+            body = f"confirm position, I have you on {seen}"
+        return _join(aircraft.spoken(True), body) + "."
 
     def cleared_low_approach(self, aircraft: Aircraft, runway: str) -> str:
         return _join(aircraft.spoken(True), f"runway {self.rwy(runway)}",
@@ -765,7 +1137,10 @@ class Phraseology:
         """
         level = self.alt(feet, transition_altitude, transition_level)
         if pilots_discretion:
-            verb = "descend at pilot's discretion, maintain"
+            # The FAA's words (7110.65 4-5-7); Doc 4444 12.3.1.2 says the
+            # same thing as "when ready descend to".
+            verb = ("descend at pilot's discretion, maintain"
+                    if self.dialect == "faa" else "when ready, descend to")
         else:
             verb = "descend and maintain" if self.dialect == "faa" else "descend to"
         parts = [self.addressed(aircraft, station, abbreviated), f"{verb} {level}"]
@@ -780,6 +1155,26 @@ class Phraseology:
                           transition_altitude: int = 0) -> str:
         return _join(aircraft.spoken(True),
                      f"maintain {self.alt(feet, transition_altitude)}") + "."
+
+    def descend_crossing(self, aircraft: Aircraft, fix: str, feet: float, *,
+                         station: str = "", abbreviated: bool = True,
+                         transition_altitude: int = 0,
+                         transition_level: int = 0, pressure: float = 0.0,
+                         fix_spoken: str = "") -> str:
+        """The first descent as a crossing restriction at a fix of the route.
+
+        FAA JO 7110.65 4-5-7: "cross (fix) at and maintain (altitude)".
+        Doc 4444 12.3.1.2: "descend to reach (level) by (point)".
+        """
+        level = self.alt(feet, transition_altitude, transition_level)
+        where = fix_name(fix, fix_spoken)
+        body = (f"cross {where} at and maintain {level}" if self.dialect == "faa"
+                else f"descend to reach {level} by {where}")
+        parts = [self.addressed(aircraft, station, abbreviated), body]
+        if pressure and not sp.is_flight_level(
+                feet, transition_altitude or self.transition, transition_level):
+            parts.append(self.pressure(pressure))
+        return _join(*parts) + "."
 
     def cross_at(self, fix: str, feet: float, *, at_or_above: bool = False,
                  at_or_below: bool = False, transition_altitude: int = 0,
@@ -814,6 +1209,170 @@ class Phraseology:
     def resume_own_navigation(self, aircraft: Aircraft) -> str:
         return _join(aircraft.spoken(True), "resume own navigation") + "."
 
+    # Holding an arrival (the IFR plan, Phase 6, atc/holds.py).
+
+    def _legs(self, minutes: float) -> str:
+        if minutes == 1.5:
+            return "one and a half minute legs" if self.dialect == "faa" \
+                else "one and a half minutes"
+        return f"{self.d(int(minutes))} minute legs" if self.dialect == "faa" \
+            else f"{self.d(int(minutes))} minute"
+
+    def hold_clearance(self, aircraft: Aircraft, fix: str, side: str,
+                       inbound: float, altitude_ft: float, leg_minutes: float,
+                       efc_hhmm: str, *, station: str = "",
+                       abbreviated: bool = True, transition_altitude: int = 0,
+                       transition_level: int = 0, fix_spoken: str = "") -> str:
+        """FAA JO 7110.65 4-6-4: "hold (direction) of (fix) on the (course)
+        inbound, (n) minute legs, expect further clearance (time)", right
+        turns unsaid. Doc 4444 12.3.4: "hold at (fix) (level) inbound track
+        (course) right hand pattern outbound time (n) minutes, expect
+        further clearance at (time)"."""
+        where = fix_name(fix, fix_spoken)
+        level = self.alt(altitude_ft, transition_altitude, transition_level)
+        time_said = self.d(efc_hhmm)
+        if self.dialect == "faa":
+            body = [f"hold {side} of {where} on the {self.hdg(inbound)} course inbound",
+                    self._legs(leg_minutes), f"maintain {level}",
+                    f"expect further clearance {time_said}"]
+        else:
+            body = [f"hold at {where}", f"maintain {level}",
+                    f"inbound track {self.hdg(inbound)} degrees",
+                    "right hand pattern",
+                    f"outbound time {self._legs(leg_minutes)}",
+                    f"expect further clearance at {time_said}"]
+        return _join(self.addressed(aircraft, station, abbreviated), *body) + "."
+
+    def hold_sequence(self, aircraft: Aircraft, number: int, efc_hhmm: str) -> str:
+        """The place in the sequence and the new time, when they change.
+        UNVERIFIED: the sentence."""
+        at = "" if self.dialect == "faa" else "at "
+        return _join(aircraft.spoken(True), f"number {sp.cardinal(number)}",
+                     f"expect further clearance {at}{self.d(efc_hhmm)}") + "."
+
+    def leave_the_hold(self, aircraft: Aircraft, fix: str,
+                       fix_spoken: str = "") -> str:
+        """The reason gone: "cleared to leave the hold, proceed direct ..."
+        (the IFR plan). UNVERIFIED: the ICAO form, the same words."""
+        return _join(aircraft.spoken(True), "cleared to leave the hold",
+                     f"proceed direct {fix_name(fix, fix_spoken)}") + "."
+
+    def verify_holding(self, aircraft: Aircraft, fix: str,
+                       fix_spoken: str = "") -> str:
+        verb = "verify you are holding at" if self.dialect == "faa" \
+            else "confirm you are holding at"
+        return _join(aircraft.spoken(True),
+                     f"{verb} {fix_name(fix, fix_spoken)}") + "."
+
+    # Radar vectors onto the final (the IFR plan, Phase 5, atc/vectors.py).
+
+    def vectors_for(self, approach: str, runway: str) -> str:
+        """Why the heading: FAA JO 7110.65 5-9-3 "vectors (approach) final
+        approach course"; Doc 4444 12.3.4 "vectoring for (approach)
+        approach runway (number)"."""
+        if self.dialect == "faa":
+            return f"vectors {approach} runway {self.rwy(runway)} final approach course"
+        return f"vectoring for {approach} approach runway {self.rwy(runway)}"
+
+    def fly_present_heading(self, aircraft: Aircraft, reason: str = "") -> str:
+        return _join(aircraft.spoken(True), "fly present heading", reason) + "."
+
+    def intercept_clearance(self, aircraft: Aircraft, heading: float,
+                            direction: str, approach: str, runway: str, *,
+                            maintain_ft: float = 0.0, localizer: bool = True,
+                            visual: bool = False, transition_altitude: int = 0,
+                            transition_level: int = 0) -> str:
+        """The last vector, carrying the clearance. FAA JO 7110.65 4-8-1:
+        "turn left heading 190, maintain 4000 until established on the
+        localizer, cleared ILS runway 16L approach"; CAP 413: "turn left
+        heading 190 degrees, cleared ILS approach runway 16L, report
+        established". A visual's: the heading and "cleared visual approach
+        runway ..."."""
+        turn = (f"turn {direction} heading {self.hdg(heading)}" if direction
+                else f"fly heading {self.hdg(heading)}")
+        if visual:
+            return _join(aircraft.spoken(True), turn,
+                         f"cleared visual approach runway {self.rwy(runway)}") + "."
+        if self.dialect == "faa":
+            parts = [aircraft.spoken(True), turn]
+            if maintain_ft:
+                course = "the localizer" if localizer else "the final approach course"
+                parts.append(f"maintain {self.alt(maintain_ft, transition_altitude, transition_level)} "
+                             f"until established on {course}")
+            parts.append(f"cleared {approach} runway {self.rwy(runway)} approach")
+            return _join(*parts) + "."
+        return _join(aircraft.spoken(True), turn,
+                     f"cleared {approach} approach runway {self.rwy(runway)}",
+                     "report established") + "."
+
+    # The en route (the IFR plan, Phase 2, atc/routing.py).
+
+    def verify_direct(self, aircraft: Aircraft, fix: str,
+                      fix_spoken: str = "") -> str:
+        """Off the route for a minute. UNVERIFIED: the IFR plan's line;
+        "verify" is the FAA's word for a doubt, "confirm" ICAO's."""
+        verb = "verify" if self.dialect == "faa" else "confirm"
+        return _join(aircraft.spoken(True),
+                     f"{verb} you are proceeding direct "
+                     f"{fix_name(fix, fix_spoken)}") + "."
+
+    def deviation_approved(self, aircraft: Aircraft, degrees: int = 0,
+                           side: str = "", fix: str = "",
+                           fix_spoken: str = "") -> str:
+        """A weather deviation, and where to rejoin. 7110.65 2-6-4:
+        "deviation (restrictions) approved"; "when able, proceed direct"
+        after LocalTC. UNVERIFIED: the ICAO form, the same words."""
+        if degrees and side:
+            what = f"deviation {int(degrees)} degrees {side} approved"
+        elif side:
+            what = f"deviation {side} of course approved"
+        else:
+            what = "deviation approved"
+        parts = [aircraft.spoken(True), what]
+        if fix:
+            parts.append(f"when able, proceed direct {fix_name(fix, fix_spoken)}")
+        return _join(*parts) + "."
+
+    # The IFR departure (the IFR plan, Phase 1): fragments the decision
+    # layer puts into a clearance or a check-in, and the SID watch's line.
+
+    def procedure(self, name: str) -> str:
+        """A SID or STAR as it is said: "ROUSY 1L" is "Rousy one Lima"."""
+        from .procedures import spoken
+
+        return spoken(name, self.d, fix_name, sp._ALPHABET)
+
+    def rnav_to(self, fix: str) -> str:
+        """The takeoff clearance's first fix of an RNAV SID, US only
+        (7110.65 4-3-2: "RNAV to MERIT, runway one three right, cleared for
+        takeoff"). Elsewhere the SID is the route and nothing is added."""
+        return f"RNAV to {fix_name(fix)}" if self.dialect == "faa" else ""
+
+    def climb_clause(self, feet: float, transition_altitude: int = 0) -> str:
+        verb = "climb and maintain" if self.dialect == "faa" else "climb to"
+        return f"{verb} {self.alt(feet, transition_altitude)}"
+
+    def direct_clause(self, fix: str, fix_spoken: str = "") -> str:
+        return f"proceed direct {fix_name(fix, fix_spoken)}"
+
+    def verify_on_departure(self, aircraft: Aircraft, procedure: str) -> str:
+        """Off the SID's path. UNVERIFIED: the wording is the IFR plan's;
+        7110.65 has "verify" for an assigned altitude and nothing verbatim
+        for a SID."""
+        return _join(aircraft.spoken(True),
+                     f"verify you are on the {self.procedure(procedure)} "
+                     f"departure") + "."
+
+    def confirm_departure(self, aircraft: Aircraft, procedure: str) -> str:
+        """A SID read back as something like it, by a recogniser that was
+        unsure: asked about rather than refused, because "negative" tells a
+        pilot who said it right that they said it wrong. ICAO Doc 4444
+        12.3.1.1 has "CONFIRM (clearance, instruction ...)"; 7110.65 says
+        "verify". UNVERIFIED: either side's wording for a SID."""
+        verb = "verify" if self.dialect == "faa" else "confirm"
+        return _join(aircraft.spoken(True),
+                     f"{verb} the {self.procedure(procedure)} departure") + "."
+
     def speed_restriction(self, aircraft: Aircraft, knots: float, *,
                           maintain: bool = False, or_greater: bool = False,
                           or_less: bool = False) -> str:
@@ -829,6 +1388,22 @@ class Phraseology:
 
     def resume_normal_speed(self, aircraft: Aircraft) -> str:
         return _join(aircraft.spoken(True), "resume normal speed") + "."
+
+    def speed_until(self, aircraft: Aircraft, knots: float, miles: int) -> str:
+        """A speed held to a point on the final (the IFR plan, Phase 5).
+        7110.65 5-7-1 "maintain (speed) until (number) mile final"; ICAO
+        "until (number) DME" -- UNVERIFIED, the IFR plan's own wording."""
+        until = (f"until {sp.distance(miles, self.digit_dialect).replace('miles', 'mile')} final"
+                 if self.dialect == "faa" else f"until {self.d(int(miles))} DME")
+        return _join(aircraft.spoken(True),
+                     f"maintain {sp.speed(knots, self.digit_dialect)} knots {until}") + "."
+
+    def no_speed_restrictions(self, aircraft: Aircraft) -> str:
+        """The restriction lifted: the FAA's "resume normal speed" (7110.65
+        5-7-2), Doc 4444's "no ATC speed restrictions"."""
+        if self.dialect == "faa":
+            return self.resume_normal_speed(aircraft)
+        return _join(aircraft.spoken(True), "no speed restrictions") + "."
 
     def traffic_advisory(
         self, aircraft: Aircraft, oclock: int, distance_nm: float,
@@ -852,17 +1427,69 @@ class Phraseology:
             parts.append("altitude unknown")
         return _join(*parts) + "."
 
+    _BOUND = ("northbound", "northeastbound", "eastbound", "southeastbound",
+              "southbound", "southwestbound", "westbound", "northwestbound")
+
+    def traffic_call(self, aircraft: Aircraft, *, oclock: int,
+                     distance_nm: float, motion: str, heading: float,
+                     traffic: str = "", relative_ft: int = 0) -> str:
+        """A traffic call: where it is, which way it is going, what it is,
+        and how high relative to the pilot.
+
+        FAA JO 7110.65 2-1-21: clock position, distance, direction ("-bound"),
+        type, altitude. CAP 413 describes the movement across the windscreen
+        ("crossing left to right", "opposite direction") and the height as
+        "indicating ... above/below", because it is the other aeroplane's
+        own Mode C. UNVERIFIED: the relative height for the FAA ("one
+        thousand five hundred feet below") and the plain ICAO form, which
+        follows CAP 413 without "indicating".
+        """
+        words = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six",
+                 7: "seven", 8: "eight", 9: "niner", 10: "ten", 11: "eleven",
+                 12: "twelve"}
+        parts = [aircraft.spoken(True), "traffic",
+                 f"{words.get(oclock, self.d(oclock))} o'clock",
+                 sp.distance(distance_nm, self.digit_dialect)]
+        if self.region == "faa":
+            parts.append(self._BOUND[int(((heading % 360.0) + 22.5) // 45.0) % 8])
+        else:
+            parts.append({"same": "same direction", "opposite": "opposite direction",
+                          "left_to_right": "crossing left to right",
+                          "right_to_left": "crossing right to left"}[motion])
+        if traffic:
+            parts.append(traffic)
+        if abs(relative_ft) < 100:
+            parts.append("same altitude" if self.region == "faa" else "similar level")
+        else:
+            height = (f"{self.alt(abs(relative_ft))} feet "
+                      f"{'above' if relative_ft > 0 else 'below'}")
+            parts.append(f"indicating {height}" if self.region == "uk" else height)
+        return _join(*parts) + "."
+
+    def caution_wake(self) -> str:
+        # FAA JO 7110.65 2-1-20 and ICAO Doc 4444 chapter 12 both have
+        # "caution wake turbulence".
+        return "caution wake turbulence"
+
+    def runway_wet(self) -> str:
+        # UNVERIFIED: the words, and that rain at the field means it.
+        return "runway wet"
+
     def traffic_no_factor(self, aircraft: Aircraft) -> str:
         return _join(aircraft.spoken(True), "previously reported traffic no factor") + "."
 
     # --- approach ---
 
     def expect_approach(self, aircraft: Aircraft, approach: str, runway: str,
-                        airport: str = "") -> str:
-        body = f"expect the {approach} runway {self.rwy(runway)} approach"
+                        airport: str = "", circle: str = "") -> str:
+        if approach == "visual":
+            # 7110.65 7-4-2: "expect visual approach runway (number)".
+            body = f"expect visual approach runway {self.rwy(runway)}"
+        else:
+            body = f"expect the {approach} runway {self.rwy(runway)} approach"
         if airport:
             body += f" at {airport}"
-        return _join(aircraft.spoken(True), body) + "."
+        return _join(aircraft.spoken(True), body, circle) + "."
 
     def vector_to_final(
         self,
@@ -900,7 +1527,8 @@ class Phraseology:
     def cleared_approach(self, aircraft: Aircraft, approach: str, runway: str,
                          *, straight_in: bool = False, maintain_ft: float = 0.0,
                          descend_ft: float = 0.0, transition_altitude: int = 0,
-                         transition_level: int = 0, pressure: float = 0.0) -> str:
+                         transition_level: int = 0, pressure: float = 0.0,
+                         circle: str = "") -> str:
         """The approach clearance, with the altitude that goes with it.
 
         ``maintain_ft`` is the altitude to hold until established -- the
@@ -914,6 +1542,8 @@ class Phraseology:
         """
         prefix = "cleared straight-in" if straight_in else "cleared"
         clearance = f"{prefix} {approach} runway {self.rwy(runway)} approach"
+        if circle:
+            clearance = f"{clearance}, {circle}"
         parts = [aircraft.spoken(True)]
         if descend_ft:
             verb = "descend and maintain" if self.dialect == "faa" else "descend to"
@@ -925,7 +1555,10 @@ class Phraseology:
         if maintain_ft:
             held = self.alt(maintain_ft, transition_altitude, transition_level)
             if self.dialect == "faa":
-                course = ("the localizer" if approach.upper() in ("ILS", "LOC")
+                # The approach as said: "ILS Zulu", "localizer back course".
+                first = (approach.split() or [""])[0].upper()
+                course = ("the localizer"
+                          if first in ("ILS", "LOC", "LOCALIZER", "LDA", "SDF")
                           else "the final approach course")
                 parts += [f"maintain {held} until established on {course}",
                           clearance]
@@ -956,8 +1589,32 @@ class Phraseology:
         parts.append("report the field in sight")
         return _join(*parts) + "."
 
-    def descend_via(self, aircraft: Aircraft, arrival: str) -> str:
-        return _join(aircraft.spoken(True), f"descend via the {arrival} arrival") + "."
+    def descend_via(self, aircraft: Aircraft, arrival: str, *,
+                    station: str = "", abbreviated: bool = True,
+                    level_ft: float = 0.0, transition_altitude: int = 0,
+                    transition_level: int = 0, pressure: float = 0.0) -> str:
+        """The descent along a filed STAR, ``arrival`` as it is written
+        ("WYNDE 3").
+
+        FAA JO 7110.65 4-5-7: "descend via the (STAR) arrival", the STAR's
+        own altitudes down to its last, and the altimeter with it when that
+        is below the flight levels. Elsewhere the STAR is named and a level
+        given ("XIBIM three Alpha arrival, descend to flight level 110"):
+        Doc 4444 has "descend via STAR" but most European states do not use
+        it. UNVERIFIED: the ICAO form, from the IFR plan, not a manual.
+        """
+        name = self.procedure(arrival)
+        parts = [self.addressed(aircraft, station, abbreviated)]
+        if self.dialect == "faa":
+            parts.append(f"descend via the {name} arrival")
+        else:
+            parts.append(f"{name} arrival")
+            parts.append(f"descend to "
+                         f"{self.alt(level_ft, transition_altitude, transition_level)}")
+        if pressure and not sp.is_flight_level(
+                level_ft, transition_altitude or self.transition, transition_level):
+            parts.append(self.pressure(pressure))
+        return _join(*parts) + "."
 
     def climb_via_sid(self, aircraft: Aircraft, departure: str,
                       top_altitude: float = 0.0,
@@ -1004,11 +1661,16 @@ class Phraseology:
         """The conspicuity code, which is regional: 1200 in the US, 7000 in Europe."""
         return "1200" if self.dialect == "faa" else "7000"
 
-    def squawk_vfr(self, aircraft: Aircraft) -> str:
-        if self.dialect == "faa":
-            return _join(aircraft.spoken(True), "squawk VFR") + "."
-        return _join(aircraft.spoken(True),
-                     f"squawk {sp.squawk(self.vfr_squawk, self.digit_dialect)}") + "."
+    def squawk_vfr(self, aircraft: Aircraft, frequency_change: bool = False) -> str:
+        """The conspicuity code back: "squawk VFR" in the US (JO 7110.65
+        5-2-17), the code itself elsewhere; with the frequency change when
+        the flight is leaving."""
+        code = ("squawk VFR" if self.dialect == "faa"
+                else f"squawk {sp.squawk(self.vfr_squawk, self.digit_dialect)}")
+        parts = [aircraft.spoken(True), code]
+        if frequency_change:
+            parts.append("frequency change approved")
+        return _join(*parts) + "."
 
     def maintain_vfr_clause(self, altitude_ft: float = 0.0, *,
                             at_or_below: bool = True,
@@ -1022,7 +1684,7 @@ class Phraseology:
         if not altitude_ft:
             return "maintain VFR"
         limit = "at or below" if at_or_below else "at or above"
-        return f"maintain VFR {limit} {self.alt(altitude_ft, transition_altitude)}"
+        return f"maintain VFR {limit} {self.vfr_alt(altitude_ft, transition_altitude)}"
 
     def maintain_vfr(self, aircraft: Aircraft, altitude_ft: float = 0.0, *,
                      at_or_below: bool = True, transition_altitude: int = 0,
@@ -1037,6 +1699,27 @@ class Phraseology:
             altitude_ft, at_or_below=at_or_below,
             transition_altitude=transition_altitude)) + "."
 
+    def say_altitude(self, aircraft: Aircraft) -> str:
+        """Asked before anything is assumed: the readout may be wrong."""
+        return _join(aircraft.spoken(True), "say altitude") + "."
+
+    def descend_at_or_below(self, aircraft: Aircraft, altitude_ft: float, *,
+                            transition_altitude: int = 0,
+                            shown_ft: float = 0.0) -> str:
+        """Back under a VFR restriction it has climbed through. FAA:
+        "descend and maintain at or below (altitude)". UNVERIFIED: the ICAO
+        form, "descend to (altitude) or below", built from Doc 4444's
+        "climb to (level) or above". ``shown_ft`` is the Mode C, said first
+        when the pilot reported something else."""
+        limit = self.vfr_alt(altitude_ft, transition_altitude)
+        if self.region == "faa":
+            clause = f"descend and maintain at or below {limit}"
+        else:
+            clause = f"descend to {limit} or below"
+        shown = (f"I show you at {self.vfr_alt(shown_ft, transition_altitude)}"
+                 if shown_ft else "")
+        return _join(aircraft.spoken(True), shown, clause) + "."
+
     def vfr_altitude_discretion(self, aircraft: Aircraft) -> str:
         """What a radar controller says when a VFR pilot asks for a level."""
         return _join(aircraft.spoken(True), "maintain VFR",
@@ -1048,19 +1731,26 @@ class Phraseology:
     ) -> str:
         """A transit of somebody's airspace, on the way past.
 
-        FAA JO 7110.65 7-8-3 and 7-9-4: Class C and B need an explicit
-        clearance through, Class D needs two-way contact and an approval. All
-        three are the same shape -- through what, at what level, reporting what
-        -- so one template covers them.
+        FAA JO 7110.65 chapter 7: Class B needs an explicit "cleared through
+        the Class Bravo"; Class C and D need two-way contact, and the word is
+        "transition approved". CAP 413 and ICAO: "cleared to transit the zone
+        via (route), not above (altitude), report (point)".
         """
-        parts = [aircraft.spoken(True), f"cleared through the {airspace}"]
-        if route:
-            parts.append(route)
-        if altitude_ft:
-            parts.append(
-                f"maintain VFR at or below {self.alt(altitude_ft, transition_altitude)}")
+        limit = (self.vfr_alt(altitude_ft, transition_altitude)
+                 if altitude_ft else "")
+        if self.region == "faa":
+            parts = [aircraft.spoken(True),
+                     f"cleared through the {airspace}" if "Bravo" in airspace
+                     else "transition approved"]
+            if route:
+                parts.append(route)
+            parts.append(f"maintain VFR at or below {limit}" if limit
+                         else "maintain VFR")
         else:
-            parts.append("maintain VFR")
+            parts = [aircraft.spoken(True),
+                     _join_words("cleared to transit the", airspace, route)]
+            if limit:
+                parts.append(f"not above {limit}")
         if report:
             parts.append(f"report {report}")
         return _join(*parts) + "."
@@ -1104,6 +1794,12 @@ class Phraseology:
     # handoffs
     # ------------------------------------------------------------------
 
+    def called_elsewhere(self, aircraft: Aircraft, station: str,
+                         called: str, called_freq: float) -> str:
+        """The pilot called another position on this one's frequency."""
+        return _join(self.addressed(aircraft, station, True),
+                     f"{called} is on {self.freq(called_freq)}") + "."
+
     def handoff(
         self, aircraft: Aircraft, next_station: str, next_freq: float,
         *, when: str = "", farewell: bool = False, welcome: str = "",
@@ -1144,19 +1840,180 @@ class Phraseology:
     def remain_this_frequency(self, aircraft: Aircraft) -> str:
         return _join(aircraft.spoken(True), "remain this frequency") + "."
 
-    def frequency_change_approved(self, aircraft: Aircraft) -> str:
-        return _join(aircraft.spoken(True), "frequency change approved") + "."
+    def frequency_change_approved(self, aircraft: Aircraft,
+                                  squawk: str = "") -> str:
+        """Letting an aeroplane go, with the code to set when it is leaving
+        a service that gave it one (an information service's "squawk 7000,
+        frequency change approved")."""
+        parts = [aircraft.spoken(True)]
+        if squawk:
+            parts.append(f"squawk {sp.squawk(squawk, self.digit_dialect)}")
+        parts.append("frequency change approved")
+        return _join(*parts) + "."
+
+    # ------------------------------------------------------------------
+    # the information services: AFIS, FIS, flight service
+    # ------------------------------------------------------------------
+    #
+    # An AFISO gives information and never a clearance: the runway in use,
+    # the wind, the pressure, the traffic, and then "take off / land at your
+    # discretion" (ICAO Doc 4444 chapter 12 and CAP 413 chapter 2 for the
+    # UK's AFIS; the paragraph numbers were not checked). UNVERIFIED: the
+    # exact ordering and the "in use" / "no reported traffic" clauses are
+    # what UK and Belgian AFISOs are heard to say, not quoted text.
+
+    def afis_field(self, aircraft: Aircraft, station: str, runway: str,
+                   weather: Weather, *, direction: str = "", traffic: str = "",
+                   report: str = "") -> str:
+        """The aerodrome as it is: what an arrival or a departure is told."""
+        pressure = (weather.altimeter_inhg if self.dialect == "faa"
+                    else weather.qnh_hpa)
+        parts = [self.addressed(aircraft, station),
+                 f"runway {self.rwy(runway)} in use"]
+        if direction:
+            parts.append(f"{direction}-hand circuit")
+        parts += [self.wind(weather), self.pressure(pressure),
+                  f"traffic {traffic}" if traffic else "no reported traffic"]
+        if report:
+            parts.append(f"report {report}")
+        return _join(*parts) + "."
+
+    def afis_traffic_report(self, aircraft: Aircraft, traffic: str,
+                            report: str) -> str:
+        """What is new since the field was given: the traffic, and the report
+        asked for -- a roger in place of the traffic where there is none,
+        because the AFISO keeps the picture by asking for the next report
+        either way. UNVERIFIED: the words."""
+        return _join(aircraft.spoken(True),
+                     f"traffic {traffic}" if traffic else "roger",
+                     f"report {report}") + "."
+
+    def afis_takeoff(self, aircraft: Aircraft, weather: Weather) -> str:
+        return _join(aircraft.spoken(True), "runway free", self.wind(weather),
+                     "take off at your discretion") + "."
+
+    def afis_land(self, aircraft: Aircraft, weather: Weather) -> str:
+        return _join(aircraft.spoken(True), "runway free", self.wind(weather),
+                     "land at your discretion") + "."
+
+    def afis_runway_occupied(self, aircraft: Aircraft, traffic: str = "") -> str:
+        parts = [aircraft.spoken(True), "runway occupied"]
+        if traffic:
+            parts.append(f"traffic {traffic}")
+        return _join(*parts) + "."
+
+    def fis_service(self, aircraft: Aircraft, station: str, pressure: float,
+                    region: str = "icao") -> str:
+        """The first answer of an en-route information service.
+
+        The UK names the service it gives -- a Basic Service, CAP 774 and
+        CAP 413 -- and gives a regional pressure; elsewhere it is a flight
+        information service with the area's QNH. UNVERIFIED: the non-UK
+        wording.
+        """
+        service = "Basic Service" if region == "uk" else "flight information service"
+        return _join(self.addressed(aircraft, station), service,
+                     self.pressure(pressure)) + "."
+
+    def position_fix(self, aircraft: Aircraft, miles: int, direction: str,
+                     field: str) -> str:
+        """Where a lost aeroplane is, from the nearest field."""
+        return _join(aircraft.spoken(True),
+                     f"you are {sp.distance(miles, self.digit_dialect)} "
+                     f"{direction} of {field}") + "."
+
+    def bearing_fix(self, aircraft: Aircraft, kind: str, bearing: int) -> str:
+        """A QDM or a QDR, three figures (ICAO Doc 8400 Q-codes)."""
+        return _join(aircraft.spoken(True),
+                     f"{kind} {self.d(f'{int(bearing) % 360 or 360:03d}')}") + "."
+
+    def flight_plan_activated(self, aircraft: Aircraft, station: str = "") -> str:
+        # UNVERIFIED: what an FAA flight service specialist says when a VFR
+        # flight plan is opened; not taken from JO 7110.10.
+        return _join(self.addressed(aircraft, station),
+                     "VFR flight plan activated") + "."
+
+    def flight_plan_relayed(self, aircraft: Aircraft) -> str:
+        """A controller asked to close a VFR flight plan, which is flight
+        service's: passed on to it (FAA AIM 5-1-14 has towers relay a close
+        and never close one of their own accord). UNVERIFIED: the words."""
+        return _join(aircraft.spoken(True), "roger",
+                     "I'll close your flight plan with flight service") + "."
+
+    def flight_plan_closed(self, aircraft: Aircraft, station: str = "") -> str:
+        # UNVERIFIED, as above.
+        return _join(self.addressed(aircraft, station),
+                     "flight plan closed") + "."
+
+    def weather_report(self, aircraft: Aircraft, field: str,
+                       weather: Weather) -> str:
+        pressure = (weather.altimeter_inhg if self.dialect == "faa"
+                    else weather.qnh_hpa)
+        return _join(aircraft.spoken(True), f"{field} weather",
+                     self.wind(weather), self.pressure(pressure)) + "."
 
     def radar_service_terminated(self, aircraft: Aircraft, *,
                                  squawk_vfr: bool = True,
                                  next_station: str = "", next_freq: float = 0.0) -> str:
-        parts = [aircraft.spoken(True), "radar service terminated"]
+        # FAA: "radar service terminated, squawk VFR". CAP 413: the UK
+        # service a VFR flight has is a Basic Service, ended by name, with
+        # 7000 and a "freecall". ICAO: no "squawk VFR" outside the US, the
+        # code itself.
+        service = ("Basic Service terminated" if self.region == "uk"
+                   else "radar service terminated")
+        parts = [aircraft.spoken(True), service]
         if squawk_vfr:
-            parts.append("squawk VFR")
+            parts.append("squawk VFR" if self.region == "faa" else
+                         f"squawk {sp.squawk(self.vfr_squawk, self.digit_dialect)}")
         if next_station and next_freq:
-            parts.append(f"contact {next_station} {self.freq(next_freq)}")
+            verb = "freecall" if self.region == "uk" else "contact"
+            parts.append(f"{verb} {next_station} {self.freq(next_freq)}")
         else:
             parts.append("frequency change approved")
+        return _join(*parts) + "."
+
+    def handoff_reoffer(self, aircraft: Aircraft, next_station: str,
+                        next_freq: float) -> str:
+        """A handoff said again to a flight still on this frequency.
+
+        UNVERIFIED as a fixed form: it is what controllers say, not a phrase
+        either Doc 4444 or 7110.65 prints.
+        """
+        return (f"{aircraft.spoken(True)}, did you get the frequency? "
+                f"Contact {next_station} {self.freq(next_freq)}.")
+
+    def centre_check_in(self, aircraft: Aircraft, station: str,
+                        level_ft: float = 0.0, transition: int = 0) -> str:
+        """The answer to a flight checking in after a centre's handoff.
+
+        FAA: the flight is already on radar, so "Boston Center, roger".
+        ICAO: "identified", and the level it is to keep.
+        """
+        if self.dialect == "faa":
+            return _join(self.addressed(aircraft, station, False), "roger") + "."
+        parts = [self.addressed(aircraft, station, False), "identified"]
+        if level_ft:
+            parts.append(f"maintain {self.alt(level_ft, transition)}")
+        return _join(*parts) + "."
+
+    def oceanic_contact(self, aircraft: Aircraft, next_station: str,
+                        hf_khz: Sequence[int] = ()) -> str:
+        """The last radar controller before the ocean, sending a flight to HF.
+
+        UNVERIFIED: the shape follows ICAO Doc 4444's transfer of
+        communication with the HF family read out as the primary and the
+        secondary; the FAA's form drops "on HF" and reads the numbers alone.
+        Neither has been checked against a recording.
+        """
+        parts = [aircraft.spoken(True), "radar service terminated"]
+        body = f"contact {next_station}"
+        if hf_khz:
+            on = "" if self.region == "faa" else "on HF "
+            body += f" {on}primary {sp.digits(hf_khz[0], self.digit_dialect)}"
+            if len(hf_khz) > 1:
+                body += (", secondary "
+                         f"{sp.digits(hf_khz[1], self.digit_dialect)}")
+        parts.append(body)
         return _join(*parts) + "."
 
     # ------------------------------------------------------------------
@@ -1191,8 +2048,9 @@ class Phraseology:
             # knots"; the FAA form, "wind variable at five" (JO 7110.65
             # 2-6-4), is what sp.wind already says.
             text = f"wind variable {self.d(int(round(weather.wind_kt)))} knots"
-            if weather.gust_kt and weather.gust_kt > weather.wind_kt:
-                text += f" gusting {self.d(int(round(weather.gust_kt)))}"
+            gust = sp.reportable_gust(weather.wind_kt, weather.gust_kt)
+            if gust:
+                text += f" gusting {self.d(int(round(gust)))}"
             return text
         return sp.wind(direction, weather.wind_kt,
                        weather.gust_kt or None, self.digit_dialect)
@@ -1228,8 +2086,9 @@ class Phraseology:
         return _join(aircraft.spoken(True), body) + "."
 
     def roger(self, aircraft: Aircraft) -> str:
-        return _join(aircraft.spoken(True),
-                     _pick(("roger", "roger that"), aircraft.callsign.written)) + "."
+        # "Roger", only: "roger that" is not phraseology (CAP 413 2.4,
+        # Doc 9432), and was heard at Kortrijk.
+        return _join(aircraft.spoken(True), "roger") + "."
 
     def roger_runway(self, aircraft: Aircraft, runway: str) -> str:
         """Acknowledge a runway the pilot asked for, by naming it back.
@@ -1259,6 +2118,35 @@ class Phraseology:
     def radio_check(self, aircraft: Aircraft, readability: int = 5) -> str:
         return _join(aircraft.spoken(True),
                      f"read you {self.d(readability)} by {self.d(readability)}") + "."
+
+    def runway_change(self, station: str, runway: str) -> str:
+        """The tower telling everybody on frequency the runway has changed.
+
+        "Attention all aircraft" is the FAA's general broadcast (JO 7110.65
+        2-9-2, for a new ATIS) and "all stations" ICAO's (Doc 4444 chapter
+        12). UNVERIFIED: the rest of the sentence.
+        """
+        if self.dialect == "faa":
+            return _sentence(f"attention all aircraft, {station}, "
+                             f"runway {self.rwy(runway)} now in use")
+        return _sentence(f"all stations, {station}, runway in use now "
+                         f"{self.rwy(runway)}")
+
+    def information_current(self, letter: str, pressure: float) -> str:
+        """The current ATIS letter, for a pilot who reported an old one.
+
+        Said after the answer to the call, as its own sentence, with the
+        pressure setting, because the pressure is the item an old broadcast
+        is most likely to have wrong.
+        """
+        # UNVERIFIED: the exact words. FAA JO 7110.65 2-9-2 requires the
+        # current code to be issued when a pilot's is not, and CAP 413 has a
+        # controller advise the current letter; "is current" (US) and "now
+        # current" (UK/ICAO) are the forms heard on the frequency, not text
+        # copied from either manual.
+        body = "is current" if self.dialect == "faa" else "now current"
+        return _sentence(f"information {sp.letters(letter)} {body}, "
+                         f"{self.pressure(pressure)}")
 
     def no_reply(self, aircraft: Aircraft, station: str) -> str:
         """Controller calling an aircraft that has not answered."""
@@ -1297,7 +2185,10 @@ class Phraseology:
     # is the "possible pilot deviation" advisory of FAA JO 7110.65 2-1-27,
     # which is a formal notice, not a telling-off; the number to call is issued
     # by telephone afterwards, so this says which facility rather than
-    # inventing one.
+    # inventing one. It is American (the Brasher notification) and was said
+    # at Kortrijk: elsewhere the fact is stated and the occurrence report the
+    # unit files is mentioned, as the other books do. UNVERIFIED: the ICAO
+    # and UK wording; neither CAP 413 nor Doc 4444 gives one.
 
     def hold_position_incursion(self, aircraft: Aircraft, runway: str) -> str:
         return _join(aircraft.spoken(True), "hold position",
@@ -1307,8 +2198,11 @@ class Phraseology:
                                    station: str = "") -> str:
         where = f" runway {self.rwy(runway)}" if runway else ""
         parts = [aircraft.spoken(True),
-                 f"you departed{where} without a takeoff clearance",
-                 "possible pilot deviation"]
+                 f"you departed{where} without a takeoff clearance"]
+        if self.dialect != "faa":
+            parts.append("an occurrence report will be filed")
+            return _join(*parts) + "."
+        parts.append("possible pilot deviation")
         if station:
             parts.append(f"advise you contact {station} after landing")
         return _join(*parts) + "."
@@ -1317,8 +2211,11 @@ class Phraseology:
                                  station: str = "") -> str:
         where = f" runway {self.rwy(runway)}" if runway else ""
         parts = [aircraft.spoken(True),
-                 f"you landed{where} without a landing clearance",
-                 "possible pilot deviation"]
+                 f"you landed{where} without a landing clearance"]
+        if self.dialect != "faa":
+            parts.append("an occurrence report will be filed")
+            return _join(*parts) + "."
+        parts.append("possible pilot deviation")
         if station:
             parts.append(f"advise you contact {station} after you park")
         return _join(*parts) + "."
@@ -1349,9 +2246,42 @@ class Phraseology:
     UNKNOWN_DESTINATION = "your destination"
     DEFAULT_APPROACH = "ILS"
 
+    def stand(self, number: int, gate: bool = False) -> str:
+        """Where a taxi in ends, when the simulator says which stand.
+
+        ICAO regions say "stand", which is the UK CAP 413 wording ("taxi to
+        stand ..."). The FAA's JO 7110.65 has no phrase for it at all; US
+        ground names a gate when it knows one and otherwise sends the
+        aeroplane to the ramp, which is what this does. The number is read
+        digit by digit, as every other number on the ground is here --
+        neither document says how a stand number is spoken.
+        """
+        if self.dialect == "faa":
+            return f"gate {self.d(number)}" if gate else self.PARKING
+        return f"stand {self.d(number)}"
+
     def approach_name(self, kind: str) -> str:
-        """An approach type as it is said: "localizer", "visual", "ILS"."""
-        return {"LOC": "localizer", "VISUAL": "visual"}.get(kind, kind)
+        """An approach as it is said: "localizer", "visual", "ILS", and its
+        chart letter in the alphabet -- "ILS Z" is "ILS Zulu", "VOR-A" is
+        "VOR Alpha" (the IFR plan, Phase 4)."""
+        from .approaches import split_name
+
+        base, letter = split_name(kind)
+        word = {"LOC": "localizer", "LOC BC": "localizer back course",
+                "VISUAL": "visual", "VOR/DME": "VOR DME",
+                "NDB/DME": "NDB DME", "RNP": "RNAV RNP"}.get(base, base)
+        return f"{word} {sp._ALPHABET.get(letter, letter)}" if letter else word
+
+    def circle_clause(self, runway: str, side: str = "") -> str:
+        """A circle to land on another runway. FAA JO 7110.65 4-8-6:
+        "circle to runway (number)", and the side when it is restricted.
+        UNVERIFIED: the ICAO form ("circle to land runway"), and the side's
+        wording."""
+        body = (f"circle to runway {self.rwy(runway)}" if self.dialect == "faa"
+                else f"circle to land runway {self.rwy(runway)}")
+        if side:
+            body += f", {side} of the airport"
+        return body
 
     # Reporting points a tower uses to sequence a circuit. These are the whole
     # of how a non-radar tower keeps VFR aircraft apart, so they are stock
@@ -1359,6 +2289,10 @@ class Phraseology:
     REPORT_MIDFIELD_DOWNWIND = "midfield downwind"
     REPORT_TURNING_BASE = "turning base"
     REPORT_ENTERING_DOWNWIND = "entering the downwind"
+    REPORT_FINAL = "final"
+    REPORT_BASE = "base"
+    REPORT_LINED_UP = "lined up"
+    REPORT_LEAVING_ZONE = "leaving the zone"
 
     # --- how the decision layer names things a language spells differently ---
 
@@ -1369,6 +2303,9 @@ class Phraseology:
                      "D": "Class Delta"}
     _AIRSPACE_ICAO = {"B": "terminal control area", "C": "terminal area",
                       "D": "control zone"}
+    # CAP 413: "the zone" for a control zone, "controlled airspace" above it.
+    _AIRSPACE_UK = {"B": "controlled airspace", "C": "controlled airspace",
+                    "D": "zone"}
 
     def leg(self, name: str) -> str:
         """A circuit leg, named the way this language names it."""
@@ -1400,7 +2337,8 @@ class Phraseology:
         volume -- "the control zone", "the TMA" -- and a pilot in Europe is not
         asked to transit a Class Delta.
         """
-        table = self._AIRSPACE_FAA if self.dialect == "faa" else self._AIRSPACE_ICAO
+        table = {"faa": self._AIRSPACE_FAA, "uk": self._AIRSPACE_UK}.get(
+            self.region, self._AIRSPACE_ICAO)
         return table.get((kind or "D").upper(), table["D"])
 
     def clear_of(self, airspace: str) -> str:
@@ -1434,6 +2372,69 @@ class Phraseology:
     def unable_unknown_fix(self, aircraft: Aircraft) -> str:
         return self.unable(aircraft, "say again the fix")
 
+    def unable_climb_traffic(self, aircraft: Aircraft, asked_ft: float,
+                             level_ft: float, *,
+                             transition_altitude: int = 0) -> str:
+        """A step climb refused for traffic, and the level to keep.
+
+        UNVERIFIED as a fixed form: "unable ... due traffic" is what is
+        heard on centre frequencies; neither Doc 4444 nor 7110.65 prints it.
+        """
+        return _join(aircraft.spoken(True),
+                     f"unable {self.alt(asked_ft, transition_altitude)} "
+                     "due traffic",
+                     f"maintain {self.alt(level_ft, transition_altitude)}") + "."
+
+    def unable_direct(self, aircraft: Aircraft, fix: str) -> str:
+        # UNVERIFIED: no printed form for refusing a direct.
+        return _join(aircraft.spoken(True), f"unable direct {fix_name(fix)}",
+                     "maintain present routing") + "."
+
+    def expect_lower(self, aircraft: Aircraft, minutes: int) -> str:
+        """The descent coming, a few minutes before it does.
+
+        FAA: "expect lower in five minutes", as centres say it. ICAO has
+        "expect descent at (time)" (Doc 4444 12.3.1.2); in minutes it is
+        UNVERIFIED.
+        """
+        if self.dialect == "faa":
+            body = f"expect lower in {self.d(minutes)} minutes"
+        else:
+            body = f"expect descent in {self.d(minutes)} minutes"
+        return _join(aircraft.spoken(True), body) + "."
+
+    # The reasons a request is refused (the IFR plan, Phase 6). UNVERIFIED:
+    # no printed form for any of them; the facts are the sources'.
+    UNABLE_REASONS = {
+        # 14 CFR 91.117(a) and SERA.6001: 250 kt below 10,000 ft / FL100.
+        "speed_limit": "speed limit 250 knots below {level}",
+        "traffic_ahead": "traffic to follow",
+        "no_hold_fix": "no holding fix on your route, say the fix",
+        "no_alternate": "no alternate on file, say the airport",
+        "no_runway": "runway {runway} not available",
+        "no_approach": "{approach} runway {runway} not available, expect {other}",
+    }
+
+    def unable_because(self, aircraft: Aircraft, reason: str, **params) -> str:
+        """A request refused with the reason the controller gives."""
+        if reason == "speed_limit":
+            params.setdefault("level", "one zero thousand"
+                              if self.dialect == "faa" else "flight level one hundred")
+        if "runway" in params:
+            params["runway"] = self.rwy(params["runway"])
+        return self.unable(aircraft, self.UNABLE_REASONS[reason].format(**params))
+
+    def cleared_to_airport(self, aircraft: Aircraft, airport: str,
+                           altitude_ft: float, *, transition_altitude: int = 0,
+                           transition_level: int = 0) -> str:
+        """A diversion or a return: FAA JO 7110.65 4-2-5 "cleared to
+        (airport) via direct"; UNVERIFIED: the ICAO "cleared to (airport)
+        direct"."""
+        via = "via direct" if self.dialect == "faa" else "direct"
+        verb = "maintain"
+        return _join(aircraft.spoken(True), f"cleared to {airport} {via}",
+                     f"{verb} {self.alt(altitude_ft, transition_altitude, transition_level)}") + "."
+
     def unable_unknown_destination(self, aircraft: Aircraft) -> str:
         return self.unable(aircraft, "say your destination")
 
@@ -1452,8 +2453,18 @@ class Phraseology:
         values: dict,
         current_altitude_ft: float = 0.0,
         transition_altitude: int = 0,
+        confirm: bool = False,
     ) -> str:
-        """Correct the items a pilot read back wrongly, and only those."""
+        """Correct the items a pilot read back wrongly, and only those.
+
+        ``confirm`` asks instead of correcting, for items the recogniser
+        nearly caught: the same clauses after "confirm" (Doc 4444 12.3.1.1,
+        "CONFIRM (clearance, instruction ...)") or the FAA's "verify",
+        rather than "negative" to a pilot who may well have said it right.
+        UNVERIFIED: either side's wording for a readback in doubt.
+        """
+        if confirm and list(wrong) == ["sid"]:
+            return self.confirm_departure(aircraft, values["sid"])
         parts: list[str] = []
         for key in wrong:
             value = values[key]
@@ -1477,6 +2488,20 @@ class Phraseology:
                 parts.append(f"contact on {self.freq(value)}")
             elif key == "speed_kt":
                 parts.append(f"speed {self.d(int(value))} knots")
+            elif key == "vfr_ceiling_ft":
+                # The release's own words, not "climb to": it is a ceiling.
+                parts.append(f"maintain VFR at or below {self.vfr_alt(value)}"
+                             if self.region == "faa"
+                             else f"not above {self.vfr_alt(value)}")
+            elif key == "exit_point":
+                parts.append(f"via {self.vrp(value)}")
+            elif key == "sid":
+                # The clearance's own clause. Without it a SID left out of a
+                # readback was corrected with "negative, read back" and
+                # nothing to read.
+                parts.append(f"via the {self.procedure(value)} departure")
+            elif key == "star":
+                parts.append(f"descend via the {self.procedure(value)} arrival")
             elif key == "hold_short":
                 # Name the runway. "Hold short, read back" told a pilot who had
                 # just read back the wrong runway nothing about which one.
@@ -1484,6 +2509,9 @@ class Phraseology:
                     parts.append(f"hold short of runway {self.rwy(value)}")
                 else:
                     parts.append("hold short")
+        if confirm:
+            verb = "verify" if self.dialect == "faa" else "confirm"
+            return _join(aircraft.spoken(True), f"{verb} " + ", ".join(parts)) + "."
         return self.readback_incorrect(aircraft, ", ".join(parts) + ", read back")
 
     def emergency_acknowledged(

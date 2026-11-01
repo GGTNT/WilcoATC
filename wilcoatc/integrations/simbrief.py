@@ -60,10 +60,11 @@ class Ofp:
     arrival_runway: str = ""
     sid: str = ""
     star: str = ""
-    # Which rules the plan was filed under. SimBrief builds airways flight
-    # plans and says so in most payloads; one that says nothing is IFR,
-    # because that is what it was asked to build.
-    ifr: bool = True
+    # Which rules the plan was filed under, None where it does not say. It
+    # used to be IFR for want of an answer, and loading a plan silently made
+    # a VFR pilot's flight IFR; a plan that says nothing now leaves the
+    # pilot's own choice (flight.ifr) alone.
+    ifr: bool | None = None
     generated_at: str = ""
     # The schedule, as UTC epoch seconds, and zero where the plan does not
     # say. Out and in are the blocks, off and on are the wheels. Nothing on
@@ -77,6 +78,13 @@ class Ofp:
     # Planned time in the air, in seconds: the one comparison that means
     # something whatever the simulator's clock says.
     planned_air_s: int = 0
+    # The navigation log, every fix of it, in order. It used to be read out
+    # of ``raw`` in two places for two lists -- points for the en-route
+    # look-ahead, names for a direct -- and the altitudes, stages and times
+    # were dropped, which is what a top of descent is made of.
+    navlog: tuple["NavlogFix", ...] = ()
+    # (lat, lon, elevation ft) of the departure, which the log leaves out.
+    origin_position: tuple[float, float, float] | None = None
     raw: dict = field(default_factory=dict, repr=False)
 
     @property
@@ -89,6 +97,52 @@ class Ofp:
         if self.alternate:
             bits.append(f"alternate {self.alternate}")
         return ", ".join(b for b in bits if b)
+
+
+@dataclass(frozen=True)
+class NavlogFix:
+    """One fix of the navigation log, as the plan has it."""
+
+    ident: str
+    name: str
+    lat: float
+    lon: float
+    alt_ft: int = 0
+    stage: str = ""          # CLB, CRZ, DSC
+    via: str = ""            # the airway, SID or STAR; "DCT"
+    on_procedure: bool = False   # is_sid_star
+    time_s: int = 0          # time_total: seconds from takeoff
+    time_leg_s: int = 0
+    kind: str = ""           # wpt, vor, ndb, apt, ltlg
+    region: str = ""
+
+
+def _navlog(data: dict) -> tuple[NavlogFix, ...]:
+    """Every fix with a position; one without is not a point on a route."""
+    fixes = _section(data, "navlog").get("fix") or []
+    if isinstance(fixes, dict):
+        fixes = [fixes]
+    out = []
+    for fix in fixes:
+        if not isinstance(fix, dict):
+            continue
+        try:
+            lat, lon = float(fix["pos_lat"]), float(fix["pos_long"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        out.append(NavlogFix(
+            ident=str(fix.get("ident") or "").strip().upper(),
+            name=str(fix.get("name") or ""),
+            lat=lat, lon=lon,
+            alt_ft=_number(fix, "altitude_feet"),
+            stage=_text(fix, "stage").upper(),
+            via=_text(fix, "via_airway").upper(),
+            on_procedure=_text(fix, "is_sid_star") == "1",
+            time_s=_number(fix, "time_total"),
+            time_leg_s=_number(fix, "time_leg"),
+            kind=_text(fix, "type").lower(),
+            region=_text(fix, "icao_region").upper()))
+    return tuple(out)
 
 
 def fetch(user: str, timeout_s: float = TIMEOUT_S,
@@ -118,13 +172,12 @@ def fetch(user: str, timeout_s: float = TIMEOUT_S,
     return parse(body)
 
 
-def _ifr(general: dict) -> bool:
-    """Whether the plan was filed IFR.
+def _ifr(general: dict) -> bool | None:
+    """Whether the plan was filed IFR, or None where it does not say.
 
-    Read from whichever key this payload uses and defaulting to true: SimBrief
-    exists to build airways flight plans, so a plan that does not say is one.
-    ICAO writes the rules as a single letter -- I, V, Y, Z -- and the two mixed
-    ones both start under instrument rules.
+    Read from whichever key this payload uses. ICAO writes the rules as a
+    single letter -- I, V, Y, Z -- and the two mixed ones both start under
+    instrument rules.
     """
     said = ""
     for key in ("flight_rules", "flightrules", "rules"):
@@ -133,7 +186,7 @@ def _ifr(general: dict) -> bool:
             said = found.strip().lower()
             break
     if not said:
-        return True
+        return None
     return not said.startswith("v")
 
 
@@ -197,6 +250,8 @@ def parse(body: bytes | str | dict) -> Ofp:
         sched_on=_number(times, "sched_on"),
         sched_in=_number(times, "sched_in"),
         planned_air_s=_number(times, "est_time_enroute", "sched_time_enroute"),
+        navlog=_navlog(data),
+        origin_position=_position(origin),
         raw=data,
     )
     if not plan.origin or not plan.destination:
@@ -224,6 +279,50 @@ def _procedures(data: dict) -> tuple[str, str]:
     star = next((names[i] for i in range(len(fixes) - 1, last, -1)
                  if on_procedure[i] and names[i] not in ("", "DCT")), "")
     return sid, star
+
+
+def route_points(plan) -> list[tuple[float, float]]:
+    """The navigation log's fixes as (lat, lon), in order.
+
+    What the en-route controller looks ahead along (atc/enroute.py): an
+    airway does not run straight for ten minutes into a corner of a FIR the
+    flight never enters, and the track alone would hand it there.
+    """
+    return [(f.lat, f.lon) for f in _fixes_of(plan)]
+
+
+@dataclass(frozen=True)
+class PlanFix:
+    ident: str
+    name: str
+    lat: float
+    lon: float
+
+
+def route_fixes(plan) -> list[PlanFix]:
+    """The navigation log's fixes by name, in order.
+
+    What a centre grants a direct to: a point on the route the flight
+    filed, not any navaid that sounds like the word the recogniser heard.
+    """
+    return [PlanFix(f.ident, f.name, f.lat, f.lon)
+            for f in _fixes_of(plan) if f.ident]
+
+
+def _fixes_of(plan) -> tuple[NavlogFix, ...]:
+    """The parsed log, or the raw one for a plan built without it."""
+    found = getattr(plan, "navlog", None)
+    if found:
+        return tuple(found)
+    return _navlog(getattr(plan, "raw", None) or {})
+
+
+def _position(section: dict) -> tuple[float, float, float] | None:
+    try:
+        return (float(section["pos_lat"]), float(section["pos_long"]),
+                float(section.get("elevation") or 0))
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
 def _section(data: dict, name: str) -> dict:
@@ -268,4 +367,4 @@ def _altitude(general: dict) -> int:
     return value * 100 if value < 1000 else value
 
 
-__all__ = ["Ofp", "SimBriefError", "fetch", "parse", "ENDPOINT"]
+__all__ = ["Ofp", "NavlogFix", "SimBriefError", "fetch", "parse", "ENDPOINT"]

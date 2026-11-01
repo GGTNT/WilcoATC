@@ -598,6 +598,12 @@ const Airspace3D = (() => {
         }
       }
     }
+    // The taxi the controller gave, laid along the taxiways it named.
+    const taxi = (own && own.data && own.data.taxi_route) || [];
+    if (taxi.length >= 2) {
+      ribbon(taxi.map(([lat, lon]) => [lat, lon, null]), width * 1.3, INK,
+             0.9, false);
+    }
     if (own && own.data && own.data.destination_lat != null) {
       const from = [own.data.lat, own.data.lon, own.data.altitude_ft];
       const to = [own.data.destination_lat, own.data.destination_lon,

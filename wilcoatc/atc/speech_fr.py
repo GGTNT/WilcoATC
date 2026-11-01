@@ -214,7 +214,14 @@ def runway(ident: str) -> str:
 
 
 def taxiway(ident: str) -> str:
-    return letters((ident or "").strip().upper())
+    from .speech import taxiway_word
+
+    ident = (ident or "").strip().upper()
+    named = taxiway_word(ident)
+    if named:
+        word, number = named
+        return f"{word} {digits(number)}" if number else word
+    return letters(ident)
 
 
 def taxi_route(route) -> str:
@@ -226,16 +233,21 @@ def taxi_route(route) -> str:
 # --------------------------------------------------------------------------
 
 
-def frequency(mhz: float | str) -> str:
+def frequency(mhz: float | str, channel: bool = False) -> str:
     """``121.700`` -> ``cent vingt et un décimale sept``.
 
     The megahertz part is a whole number and the decimals are digits, which is
     what French controllers say and what a French pilot expects to hear.
+    ``channel`` is an 8.33 channel name, said in six digits as in English.
     """
+    from ..navdata.channels import channel_digits
+
     text = f"{float(mhz):.3f}" if not isinstance(mhz, str) else mhz
     whole, _, frac = text.partition(".")
     frac = (frac + "000")[:3]
-    if frac[2] != "0":
+    if channel:
+        spoken_frac = digits(channel_digits(float(f"{whole}.{frac}")))
+    elif frac[2] != "0":
         spoken_frac = digits(frac)          # true 8.33 kHz channel
     else:
         spoken_frac = digits(frac[:2].rstrip("0") or "0")
@@ -243,8 +255,14 @@ def frequency(mhz: float | str) -> str:
 
 
 def qnh(hectopascals: float) -> str:
-    """``QNH mille treize`` -- read as a whole number, not as digits."""
-    return f"QNH {cardinal(int(round(float(hectopascals))))}"
+    """``QNH un zéro un trois`` -- digit by digit.
+
+    It was read as a whole number ("mille treize"). UNVERIFIED: the VFR plan
+    gives French QNH as digit by digit, as ICAO does; the DGAC manual was
+    not available to confirm it. Three figures below a thousand, as in
+    English: "neuf neuf huit".
+    """
+    return f"QNH {digits(str(int(round(float(hectopascals)))))}"
 
 
 def squawk(code) -> str:
@@ -258,6 +276,9 @@ def wind(direction, knots: float, gust: float | None = None) -> str:
     The direction is digits and the speed is a whole number, which is the
     opposite convention within a single phrase and a common mistake.
     """
+    from .speech import reportable_gust
+
+    gust = reportable_gust(knots, gust)
     if int(round(float(knots))) == 0:
         return "vent calme"
     if isinstance(direction, str) and direction.upper().startswith("VRB"):
@@ -345,7 +366,8 @@ from .speech import _AIRLINE_RE, _NUMERIC_FLIGHT_RE, flies_as_airline  # noqa: E
 
 
 def parse_callsign(raw: str, aircraft_type: str = "",
-                   airline_names: dict[str, str] | None = None) -> Callsign:
+                   airline_names: dict[str, str] | None = None,
+                   airline: bool | None = None) -> Callsign:
     """French spoken form of a callsign.
 
     Air-carrier flight numbers are read as whole French numbers, so AFR1234 is
@@ -366,7 +388,8 @@ def parse_callsign(raw: str, aircraft_type: str = "",
         table.update({k.upper(): v for k, v in airline_names.items()})
 
     m = _AIRLINE_RE.match(raw)
-    if m and m.group(1) in table and flies_as_airline(aircraft_type):
+    as_airline = flies_as_airline(aircraft_type) if airline is None else airline
+    if m and m.group(1) in table and as_airline:
         icao, flight = m.group(1), m.group(2)
         name = table[icao]
         if not _NUMERIC_FLIGHT_RE.match(flight):
@@ -386,7 +409,8 @@ def parse_callsign(raw: str, aircraft_type: str = "",
     # two-way contact exists the last three characters are enough.
     body = raw.replace("-", "")
     full = letters(body)
-    short = letters(body[-3:])
+    # An airline's shape (ETD204) is never abbreviated, whatever flies it.
+    short = full if _AIRLINE_RE.match(raw) else letters(body[-3:])
     return Callsign(raw, full, short)
 
 

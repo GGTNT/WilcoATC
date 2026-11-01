@@ -494,6 +494,8 @@ SPANISH = Grammar(
 
         ("say_again", r"\b(repita|no (le )?(copie|copio|entendi)|"
                       r"no he entendido|repita por favor)\b"),
+        ("request_qdm", r"\bqdm\b"),
+        ("request_qdr", r"\bqdr\b"),
         ("radio_check", r"\b(prueba de radio|como me (copia|recibe)|"
                         r"control de radio)\b"),
 
@@ -501,6 +503,8 @@ SPANISH = Grammar(
                               r"autorizacion de salida|listo para copiar|"
                               r"solicito (la )?puesta en marcha|"
                               r"autorizacion ifr)\b"),
+        # UNVERIFIED: Special VFR as the pilot asks for it.
+        ("request_special_vfr", r"\b(vfr especial)\b"),
         ("request_vfr_departure", r"\b(salida vfr|solicito salida vfr)\b"),
         ("request_pushback", r"\b(retroceso|solicito (el )?retroceso|"
                              r"listo para (el )?retroceso|solicito push)\b"),
@@ -528,6 +532,10 @@ SPANISH = Grammar(
         ("cancel_ifr", r"\b(cancelo (el )?ifr|cancelacion ifr)\b"),
 
         ("report_field_in_sight", r"\b((campo|pista|aerodromo) a la vista)\b"),
+        # UNVERIFIED: the Spanish forms for still looking and not seeing it.
+        ("report_traffic_not_in_sight", r"\b(trafico no a la vista|no tengo el trafico|"
+                                        r"negativo (contacto|trafico))\b"),
+        ("report_traffic_looking", r"\b(buscando( el trafico)?|lo buscamos)\b"),
         ("report_traffic_in_sight", r"\b(trafico a la vista|tengo el trafico)\b"),
         ("report_established", r"\b(establecidos? en (el )?(localizador|loc|ils|"
                                r"eje))\b"),
@@ -538,6 +546,11 @@ SPANISH = Grammar(
                             r"guiado radar)\b"),
         ("request_landing", r"\b(para (el )?aterrizaje|solicito aterrizar|"
                             r"en final|completo)\b"),
+        ("request_diversion", r"\b(solicito (proceder al |el )?alternativo|solicito desviar al alternativo)\b"),
+        ("request_return", r"\b(solicito (el )?regreso|solicito regresar)\b"),
+        ("request_hold", r"\b(solicito (una )?espera|solicito esperar)\b"),
+        ("request_speed", r"\b(solicito velocidad|solicito \w+ nudos)\b"),
+        ("request_deviation", r"\b(solicito (un )?desvio|solicito desviar)\b"),
         ("request_direct", r"\b(solicito directo|directo a)\b"),
         ("request_descent", r"\b(solicito (el )?descenso|solicito descender|"
                             r"(?:nivel|flightlevel) inferior)\b"),
@@ -601,11 +614,19 @@ GERMAN = Grammar(
 
         ("say_again", r"\b(wiederholen sie|nicht verstanden|"
                       r"sagen sie (es )?noch einmal|unverstandlich)\b"),
-        ("radio_check", r"\b(funkprobe|funkcheck|wie horen sie mich)\b"),
+        ("request_qdm", r"\bqdm\b"),
+        ("request_qdr", r"\bqdr\b"),
+        # "Wie hören Sie" with or without the "mich", and the "Radiocheck"
+        # German pilots say as often as "Funkprobe": at Heubach a radio check
+        # was "unknown" in the frequency's own language.
+        ("radio_check", r"\b((sprech)?funk ?(probe|check)|wie horen sie( mich)?|"
+                        r"radio ?check)\b"),
 
         ("request_clearance", r"\b(erbitte (die )?freigabe|streckenfreigabe|"
                               r"bereit zum mitschreiben|erbitte anlassfreigabe|"
                               r"ifr freigabe)\b"),
+        # UNVERIFIED: Special VFR as the pilot asks for it.
+        ("request_special_vfr", r"\b(sonder[ -]?vfr)\b"),
         ("request_vfr_departure", r"\b(vfr abflug|erbitte vfr abflug)\b"),
         ("request_pushback", r"\b(pushback|erbitte push|zuruckstossen|"
                              r"erbitte rucksto\w*)\b"),
@@ -629,6 +650,11 @@ GERMAN = Grammar(
         ("cancel_ifr", r"\b(ifr annullieren|annulliere ifr)\b"),
 
         ("report_field_in_sight", r"\b((platz|piste|feld|bahn) in sicht)\b"),
+        # UNVERIFIED: the German forms.
+        ("report_traffic_not_in_sight", r"\b(verkehr nicht in sicht|kein kontakt|"
+                                        r"negativ kontakt)\b"),
+        ("report_traffic_looking", r"\b(halten ausschau|schauen (noch )?aus|"
+                                   r"suchen (den )?verkehr)\b"),
         ("report_traffic_in_sight", r"\b(verkehr in sicht)\b"),
         ("report_established", r"\b(etabliert auf (dem )?(localizer|loc|ils|"
                                r"landekurs))\b"),
@@ -638,6 +664,11 @@ GERMAN = Grammar(
         ("request_vectors", r"\b(erbitte radarfuhrung|radarfuhrung|vektoren)\b"),
         ("request_landing", r"\b(zur landung|erbitte (die )?landung|"
                             r"im endanflug|voll)\b"),
+        ("request_diversion", r"\b(erbitte (den )?ausweichflughafen|erbitte umleitung)\b"),
+        ("request_return", r"\b(erbitte (die )?ruckkehr|erbitte zuruck)\b"),
+        ("request_hold", r"\b(erbitte (ein )?warteverfahren|erbitte warten)\b"),
+        ("request_speed", r"\b(erbitte geschwindigkeit|erbitte \w+ knoten)\b"),
+        ("request_deviation", r"\b(erbitte (eine )?(abweichung|ausweichen)|erbitte auszuweichen)\b"),
         ("request_direct", r"\b(erbitte direkt|direkt nach)\b"),
         ("request_descent", r"\b(erbitte (den )?sinkflug|"
                             r"erbitte (eine )?tiefere (flugflache|flightlevel))\b"),
@@ -700,11 +731,15 @@ ITALIAN = Grammar(
 
         ("say_again", r"\b(ripeta|non ho capito|non copiato|ripetere|"
                       r"non ho ricevuto)\b"),
+        ("request_qdm", r"\bqdm\b"),
+        ("request_qdr", r"\bqdr\b"),
         ("radio_check", r"\b(prova radio|come mi ricev\w+|controllo radio)\b"),
 
         ("request_clearance", r"\b(chiedo (l )?autorizzazione|"
                               r"autorizzazione alla partenza|pronto a copiare|"
                               r"chiedo (la )?messa in moto|autorizzazione ifr)\b"),
+        # UNVERIFIED: Special VFR as the pilot asks for it.
+        ("request_special_vfr", r"\b(vfr speciale)\b"),
         ("request_vfr_departure", r"\b(partenza vfr|chiedo partenza vfr)\b"),
         ("request_pushback", r"\b(chiedo (il )?push|spinta indietro|"
                              r"pronto al push|pushback)\b"),
@@ -730,6 +765,10 @@ ITALIAN = Grammar(
         ("cancel_ifr", r"\b(cancello (l )?ifr|cancellazione ifr)\b"),
 
         ("report_field_in_sight", r"\b((campo|pista|aeroporto) in vista)\b"),
+        # UNVERIFIED: the Italian forms.
+        ("report_traffic_not_in_sight", r"\b(traffico non in vista|non ho il traffico|"
+                                        r"negativo contatto)\b"),
+        ("report_traffic_looking", r"\b(stiamo cercando|cerchiamo( il traffico)?)\b"),
         ("report_traffic_in_sight", r"\b(traffico in vista|ho il traffico)\b"),
         ("report_established", r"\b(stabilizzati? sul (localizzatore|loc|ils|"
                                r"sentiero))\b"),
@@ -739,6 +778,11 @@ ITALIAN = Grammar(
         ("request_vectors", r"\b(chiedo vettori|guida radar|vettoramento)\b"),
         ("request_landing", r"\b(per (l )?atterraggio|chiedo (l )?atterraggio|"
                             r"in finale|completo)\b"),
+        ("request_diversion", r"\b(chiedo (di )?dirottare|chiedo (l )?alternato)\b"),
+        ("request_return", r"\b(chiedo (il )?rientro|chiedo di rientrare)\b"),
+        ("request_hold", r"\b(chiedo (un )?attesa|chiedo di attendere)\b"),
+        ("request_speed", r"\b(chiedo velocita|chiedo \w+ nodi)\b"),
+        ("request_deviation", r"\b(chiedo (una )?deviazione|chiedo di deviare)\b"),
         ("request_direct", r"\b(chiedo diretto|diretto a)\b"),
         ("request_descent", r"\b(chiedo (la )?discesa|chiedo di scendere|"
                             r"(?:livello|flightlevel) inferiore)\b"),
@@ -799,11 +843,15 @@ PORTUGUESE = Grammar(
 
         ("say_again", r"\b(repita|nao percebi|nao copiei|repetir|"
                       r"nao entendi)\b"),
+        ("request_qdm", r"\bqdm\b"),
+        ("request_qdr", r"\bqdr\b"),
         ("radio_check", r"\b(teste de radio|como me recebe|controlo de radio)\b"),
 
         ("request_clearance", r"\b(peco (a )?autorizacao|autorizacao de partida|"
                               r"pronto para copiar|peco (o )?arranque|"
                               r"autorizacao ifr)\b"),
+        # UNVERIFIED: Special VFR as the pilot asks for it.
+        ("request_special_vfr", r"\b(vfr especial)\b"),
         ("request_vfr_departure", r"\b(partida vfr|peco partida vfr)\b"),
         ("request_pushback", r"\b(peco push|pushback|recuo|"
                              r"pronto para recuar)\b"),
@@ -829,6 +877,10 @@ PORTUGUESE = Grammar(
         ("cancel_ifr", r"\b(cancelo (o )?ifr|cancelamento ifr)\b"),
 
         ("report_field_in_sight", r"\b((campo|pista|aerodromo) a vista)\b"),
+        # UNVERIFIED: the Portuguese forms.
+        ("report_traffic_not_in_sight", r"\b(trafego nao a vista|nao tenho o trafego|"
+                                        r"negativo contacto)\b"),
+        ("report_traffic_looking", r"\b(a procurar( o trafego)?|procurando( o trafego)?)\b"),
         ("report_traffic_in_sight", r"\b(trafego a vista|tenho o trafego)\b"),
         ("report_established", r"\b(estabelecidos? no (localizador|loc|ils|"
                                r"eixo))\b"),
@@ -838,6 +890,11 @@ PORTUGUESE = Grammar(
         ("request_vectors", r"\b(peco vetores|peco vectores|guiamento radar)\b"),
         ("request_landing", r"\b(para aterrar|peco (a )?aterragem|"
                             r"peco (o )?pouso|em final|completo)\b"),
+        ("request_diversion", r"\b(peco (a )?alternativa|peco desvio para (a )?alternativa)\b"),
+        ("request_return", r"\b(peco (o )?retorno|peco para retornar)\b"),
+        ("request_hold", r"\b(peco espera|peco para aguardar)\b"),
+        ("request_speed", r"\b(peco velocidade|peco \w+ nos)\b"),
+        ("request_deviation", r"\b(peco (um )?desvio|peco para desviar)\b"),
         ("request_direct", r"\b(peco directo|peco direto|direct[oa] para)\b"),
         ("request_descent", r"\b(peco (a )?descida|peco para descer|"
                             r"(?:nivel|flightlevel) inferior)\b"),

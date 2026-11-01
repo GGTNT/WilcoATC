@@ -1,0 +1,157 @@
+{
+  "_comment": "Where ground vehicles go, see wilcoatc/atc/servicelayout.py. 'roles': which door each vehicle serves is chosen from the aeroplane's own interactive points; standoff_m is how far out from the door along the way it faces, along_m how far forward along the fuselage, facing 'door' (nose to the door), 'away' (backed up to it) or a heading relative to the aeroplane. 'vehicles': per simulator title, the model's own correction in its own frame (right_m, forward_m, heading_deg) -- written by scripts/place_vehicle.py. 'types': per ICAO type, [right, forward, heading] in metres for a role whose door the model does not report. Defaults derived from the hand-calibrated spots against the flyable A321's measured doors (stairs 3.6 m out of L1, caterer 3.1 m out of R1, loader 4.9 m out of the hold). 'sill_below_point_m': how far a door's sill is below its interactive point, by kind (zero: markers on the flyable A321 sat on the floor of each open door, Bilbao 17 October). 'loaders': per belt-loader title, the belt from the model's own cfg (GSX's Tug 660 [BaggageLoader]: pivot and flat end as up/forward from the origin, and the animation's MAX_ANGLE), which docks the loader by its belt: belt_gap_m is how far short of the hold point the raised belt's end stops. 'stairs_models': GSX's staircases, best first, from each one's own sim.cfg [Couatl]: the platform floor's height (= BOARDINGRAMP ELEVATION, its model's BASE_HEIGHT..MAX_HEIGHT) and how far ahead of the origin the platform's front edge is at that height ('extension'), and 'fits', the door sills GSX itself uses it for ('condition' on exitAlt). A passenger door gets the first listed one that fits its sill, else 'stairs_fallback'; stairs_gap_m is how far the platform's front edge stops from the door point.",
+  "sill_below_point_m": {
+    "passenger": 0.0,
+    "cargo": 0.0
+  },
+  "roles": {
+    "stairs": {
+      "standoff_m": 3.6,
+      "along_m": -0.8,
+      "facing": "door",
+      "stairs_gap_m": 0.15
+    },
+    "stairs_aft": {
+      "standoff_m": 3.6,
+      "along_m": 0.8,
+      "facing": "door",
+      "stairs_gap_m": 0.15
+    },
+    "catering": {
+      "standoff_m": 3.1,
+      "along_m": -0.8,
+      "facing": "away"
+    },
+    "baggage": {
+      "standoff_m": 4.9,
+      "along_m": 0.0,
+      "facing": "door",
+      "belt_gap_m": 0.5
+    },
+    "baggage_aft": {
+      "standoff_m": 4.9,
+      "along_m": 0.0,
+      "facing": "door",
+      "belt_gap_m": 0.5
+    },
+    "fuel": {
+      "standoff_m": 0.0,
+      "along_m": 5.5,
+      "facing": 0.0
+    },
+    "gpu": {
+      "standoff_m": 3.0,
+      "along_m": 0.0,
+      "facing": 45.0
+    },
+    "pushback": {
+      "standoff_m": 0.0,
+      "along_m": -0.3,
+      "facing": 180.0
+    }
+  },
+  "vehicles": {
+    "Aso_Baggage_Loader_01": {
+      "right_m": 0.0,
+      "forward_m": 2.0,
+      "heading_deg": 0.0
+    },
+    "ASO_Catering_Truck_01": {
+      "right_m": 0.0,
+      "forward_m": 0.0,
+      "heading_deg": 180.0
+    },
+    "FSDT_Staircase_CDS_2438": {
+      "right_m": -0.5,
+      "forward_m": 0.0,
+      "heading_deg": 0.0
+    },
+    "FSDT_Catering_01": {
+      "right_m": 0.0,
+      "forward_m": 0.0,
+      "heading_deg": 180.0
+    },
+    "Pushback 02": {
+      "right_m": 0.0,
+      "forward_m": -3.0,
+      "heading_deg": 180.0
+    }
+  },
+  "types": {},
+  "loaders": {
+    "FSDT_Tug_660_DEFAULT_FULL_YELLOW": {
+      "pivot_up_m": 1.027,
+      "pivot_forward_m": -2.229,
+      "end_up_m": 0.988,
+      "end_forward_m": 4.095,
+      "max_angle_deg": 33.827
+    }
+  },
+  "stairs_models": {
+    "FSDT_Staircase_CDS_2438": {
+      "heights": [
+        1.925,
+        2.965,
+        3.879
+      ],
+      "reach": [
+        3.806,
+        3.339,
+        2.657
+      ],
+      "fits": [
+        1.92,
+        3.6
+      ]
+    },
+    "FSDT_Staircase_CDS_2445": {
+      "heights": [
+        2.131,
+        3.301,
+        4.332
+      ],
+      "reach": [
+        4.438,
+        3.91,
+        3.141
+      ],
+      "fits": [
+        2.3,
+        4.33
+      ]
+    },
+    "FSDT_Staircase_FW2458PE": {
+      "heights": [
+        2.79,
+        3.87,
+        4.957
+      ],
+      "reach": [
+        4.071,
+        5.621,
+        7.17
+      ],
+      "fits": [
+        2.9,
+        5.05
+      ]
+    },
+    "FSDT_Staircase_TLD_ABS-1740": {
+      "heights": [
+        2.915,
+        4.378,
+        5.842
+      ],
+      "reach": [
+        4.06,
+        6.112,
+        8.163
+      ],
+      "fits": [
+        2.915,
+        5.842
+      ]
+    }
+  },
+  "stairs_fallback": "ASO_Boarding_Stairs"
+}

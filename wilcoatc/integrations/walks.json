@@ -1,0 +1,128 @@
+{
+ "walks": {
+  "FSDT_Passenger_BUSINESS_F_0008": {
+   "start": 169,
+   "stride": 31
+  },
+  "FSDT_Passenger_BUSINESS_F_0024": {
+   "start": 184,
+   "stride": 31
+  },
+  "FSDT_Passenger_BUSINESS_M_0004": {
+   "start": 172,
+   "stride": 31
+  },
+  "FSDT_Passenger_BUSINESS_M_0027": {
+   "start": 172,
+   "stride": 31
+  },
+  "FSDT_Passenger_CASUAL_F_0003": {
+   "start": 297,
+   "stride": 37
+  },
+  "FSDT_Passenger_CASUAL_F_0027": {
+   "start": 187,
+   "stride": 33
+  },
+  "FSDT_Passenger_CASUAL_F_0039": {
+   "start": 172,
+   "stride": 31
+  },
+  "FSDT_Passenger_CASUAL_M_0003": {
+   "start": 283,
+   "stride": 38
+  },
+  "FSDT_Passenger_CASUAL_M_0016": {
+   "start": 260,
+   "stride": 35
+  },
+  "FSDT_Passenger_CASUAL_M_0020": {
+   "start": 283,
+   "stride": 38
+  },
+  "FSDT_Passenger_CASUAL_M_0023": {
+   "start": 169,
+   "stride": 35
+  },
+  "FSDT_Passenger_CASUAL_M_0024": {
+   "start": 156,
+   "stride": 35
+  },
+  "FSDT_Passenger_CASUAL_M_0026": {
+   "start": 160,
+   "stride": 35
+  },
+  "FSDT_Passenger_CASUAL_M_0027": {
+   "start": 163,
+   "stride": 35
+  },
+  "FSDT_Passenger_CASUAL_M_0028": {
+   "start": 183,
+   "stride": 35
+  },
+  "FSDT_Passenger_CASUAL_M_0030": {
+   "start": 160,
+   "stride": 35
+  },
+  "FSDT_Passenger_CASUAL_M_0034": {
+   "start": 172,
+   "stride": 31
+  },
+  "FSDT_Passenger_Cboy0006": {
+   "start": 266,
+   "stride": 41
+  },
+  "FSDT_Passenger_Cboy0007": {
+   "start": 266,
+   "stride": 41
+  },
+  "FSDT_Passenger_Cboy0008": {
+   "start": 143,
+   "stride": 41
+  },
+  "FSDT_Passenger_LOADMASTER_01": {
+   "start": 961,
+   "stride": 41
+  },
+  "FSDT_Passenger_PILOT_01": {
+   "start": 320,
+   "stride": 41
+  },
+  "FSDT_Passenger_PILOT_02": {
+   "start": 240,
+   "stride": 41
+  },
+  "FSDT_Passenger_PILOT_03": {
+   "start": 241,
+   "stride": 41
+  },
+  "FSDT_Passenger_RP_102": {
+   "start": 185,
+   "stride": 37
+  },
+  "FSDT_Passenger_RP_114": {
+   "start": 721,
+   "stride": 40
+  },
+  "FSDT_Passenger_RP_26": {
+   "start": 145,
+   "stride": 41
+  },
+  "FSDT_Passenger_RP_27": {
+   "start": 201,
+   "stride": 41
+  },
+  "FSDT_Passenger_RP_39": {
+   "start": 66,
+   "stride": 37
+  },
+  "FSDT_Passenger_RP_40": {
+   "start": 721,
+   "stride": 40
+  },
+  "FSDT_Passenger_RP_95": {
+   "start": 166,
+   "stride": 41
+  }
+ }
+}

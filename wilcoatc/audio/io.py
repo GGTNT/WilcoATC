@@ -202,14 +202,25 @@ class PushToTalk:
         key: str = "grave",
         on_press: Callable[[], None] | None = None,
         on_release: Callable[[], None] | None = None,
+        scan_code: int = 0,
     ):
         self.key = key
+        # Where the key is on the keyboard, when it is known. Matched before
+        # the name: the name is whatever the layout prints, so "$" is a
+        # different key on an AZERTY keyboard and a US one, and the scan
+        # code is the same key on both.
+        self.scan_code = int(scan_code or 0)
         self.on_press = on_press
         self.on_release = on_release
         self._listener = None
         self._down = False
 
     def _matches(self, key) -> bool:
+        if self.scan_code:
+            # pynput's Windows hook carries the scan code on each key.
+            scan = getattr(key, "_scan", None)
+            if scan is not None:
+                return int(scan) == self.scan_code
         name = self.key.lower()
         special = {
             "grave": "`", "backquote": "`", "tilde": "`",
@@ -263,11 +274,17 @@ class PushToTalk:
 
 
 class JoystickPushToTalk:
-    """Polls a joystick or yoke button as the PTT.
+    """A joystick or yoke button as the PTT.
 
-    Optional: it needs pygame, which is not a hard dependency because plenty of
-    people are happy with a keyboard key.
+    A thin layer over :mod:`wilcoatc.audio.controllers`, which owns SDL on
+    one thread and is where the history is: the controller is named by
+    ``joystick_id`` (vendor:product) and ``joystick_name``, and the index is
+    only for a configuration written before those existed.
     """
+
+    #: Why no controller was found (see :mod:`wilcoatc.audio.controllers`).
+    MISSING = "missing"
+    NONE = "none"
 
     def __init__(
         self,
@@ -276,126 +293,55 @@ class JoystickPushToTalk:
         poll_hz: float = 60.0,
         on_press: Callable[[], None] | None = None,
         on_release: Callable[[], None] | None = None,
+        joystick_id: str = "",
+        joystick_name: str = "",
+        on_lost: Callable | None = None,
+        on_back: Callable | None = None,
     ):
         self.joystick_index = joystick_index
+        self.joystick_id = joystick_id
+        self.joystick_name = joystick_name
         self.button = button
-        self.poll_interval = 1.0 / max(1.0, poll_hz)
+        self.poll_hz = poll_hz
         self.on_press = on_press
         self.on_release = on_release
-        self._thread: threading.Thread | None = None
-        self._stop = threading.Event()
+        self.on_lost = on_lost
+        self.on_back = on_back
+        self._watch = None
 
-    # Whether a button is being polled right now. The device list is rebuilt
-    # by re-starting SDL's joystick subsystem, which invalidates every open
-    # handle -- including the one push-to-talk is holding -- so while one is
-    # held the list is read without disturbing it.
-    _in_use = 0
-
-    #: Why no controller was found. Reported rather than guessed at, because
-    #: the three reasons need three different things done about them.
-    MISSING = "missing"     # pygame is not installed
-    NONE = "none"           # pygame is fine; nothing is plugged in
+    @property
+    def controller(self):
+        """The controller being read, once started."""
+        return self._watch.controller if self._watch is not None else None
 
     @staticmethod
-    def _import():
-        """Import pygame without its banner.
+    def _hub():
+        from .controllers import shared
 
-        It prints its version and SDL build to stdout on import, which lands
-        in the middle of a table on the command line and in a log file that
-        is meant to hold this program's own account of itself.
-        """
-        import os
-
-        os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
-        # SDL refreshes button state only while its event queue is pumped, and
-        # it refuses to pump until the video subsystem is up -- even though
-        # nothing here ever draws. The dummy driver satisfies it without
-        # opening a window, which suits a program whose only interface is a
-        # web panel. An explicit setting is left alone.
-        os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
-        import pygame
-
-        return pygame
-
-    @classmethod
-    def _pump(cls, pygame) -> bool:
-        """Move SDL's event queue on, and say whether it moved.
-
-        Button state read without this is whatever was true when the device
-        was opened, frozen for ever: presses never arrive, releases never
-        arrive, and a switch that happened to be latched at startup reads as
-        held down until the program exits.
-        """
-        try:
-            if not pygame.display.get_init():
-                pygame.display.init()
-        except Exception:
-            # No video subsystem to start, or it will not start. Pumping may
-            # still work, so this is not the place to give up.
-            pass
-        try:
-            pygame.event.pump()
-            return True
-        except Exception:
-            return False
+        return shared()
 
     @classmethod
     def available(cls) -> bool:
-        try:
-            cls._import()
-            return True
-        except ImportError:
-            return False
+        return cls.scan()[1] != cls.MISSING
 
     @classmethod
-    def scan(cls) -> tuple[list[tuple[int, str, int]], str]:
-        """Connected controllers, and why there are none when there are none.
+    def scan(cls, rescan: bool | str = "auto"):
+        """``([Controller, ...], reason)``: the reason is empty when something
+        was found, :data:`MISSING` when pygame-ce is not in this
+        installation, :data:`NONE` when nothing is plugged in, and otherwise
+        SDL's own error. ``"auto"`` restarts SDL's joystick subsystem only
+        when no button is being learnt or read: a restart makes every held
+        button read as pressed afresh (audio/controllers.py)."""
+        return cls._hub().list(rescan=rescan)
 
-        Returns ``([(index, name, buttons), ...], reason)`` where the reason is
-        empty when something was found, :data:`MISSING` when the library is
-        not installed, :data:`NONE` when it is and nothing is plugged in, and
-        otherwise the error that stopped it.
+    @classmethod
+    def list_devices(cls):
+        return cls.scan()[0]
 
-        The list is rebuilt on every call. SDL reads the devices when its
-        joystick subsystem starts and does not look again, so a yoke plugged
-        in after this program started would otherwise never be found -- which
-        is most of the yokes, because people start the sim first.
-        """
-        try:
-            pygame = cls._import()
-        except ImportError:
-            return [], cls.MISSING
-
-        try:
-            if not cls._in_use:
-                # Restart the subsystem so the device list is read again.
-                pygame.joystick.quit()
-            found = cls._enumerate(pygame)
-        except Exception as exc:
-            # The rescan itself can fail: SDL's DirectInput backend wants a
-            # window handle it does not always have, and restarting the
-            # subsystem is when it asks for one. Look again without
-            # restarting anything, so a rescan is never worse than not
-            # rescanning.
-            try:
-                found = cls._enumerate(pygame)
-            except Exception:
-                return [], str(exc)
-        return found, "" if found else cls.NONE
-
-    @staticmethod
-    def _enumerate(pygame) -> list[tuple[int, str, int]]:
-        """Ask SDL what is connected, once."""
-        pygame.joystick.init()
-        # SDL learns about a device from its event queue, which only moves
-        # when it is pumped. Not worth failing the scan over: the devices that
-        # were present when the subsystem started are listed either way.
-        JoystickPushToTalk._pump(pygame)
-        found = []
-        for i in range(pygame.joystick.get_count()):
-            stick = pygame.joystick.Joystick(i)
-            found.append((i, stick.get_name(), stick.get_numbuttons()))
-        return found
+    @classmethod
+    def learn(cls, timeout_s: float = 8.0):
+        """Wait for a button: ``(Controller, button)``, or None in time."""
+        return cls._hub().learn(timeout_s)
 
     @staticmethod
     def remembered() -> list[str]:
@@ -441,127 +387,26 @@ class JoystickPushToTalk:
             return []
         return names
 
-    @classmethod
-    def list_devices(cls) -> list[tuple[int, str, int]]:
-        """``[(index, name, button_count), ...]`` for connected controllers."""
-        return cls.scan()[0]
-
-    @classmethod
-    def learn(cls, timeout_s: float = 8.0) -> tuple[int, int, str] | None:
-        """Wait for a button to be pressed and say which one it was.
-
-        Returns ``(device index, button, device name)``, or ``None`` if
-        nothing was pressed in time. Every connected controller is watched at
-        once, so the answer is whichever button the pilot actually pushed
-        rather than one they had to identify first.
-        """
-        try:
-            pygame = cls._import()
-        except ImportError:
-            return None
-
-        found, _reason = cls.scan()
-        if not found:
-            return None
-
-        sticks = []
-        for index, name, _buttons in found:
-            try:
-                stick = pygame.joystick.Joystick(index)
-            except Exception:
-                continue
-            sticks.append((index, name, stick))
-        if not sticks:
-            return None
-
-        def down(stick, button: int) -> bool:
-            try:
-                return bool(stick.get_button(button))
-            except Exception:
-                return False
-
-        # Read the devices before deciding what is held. Until the queue has
-        # been pumped every button reads as up, so a switch that is really
-        # latched on would look like it had just been pressed -- and it would
-        # win, because it is checked before the pilot can reach anything.
-        for _ in range(3):
-            if not cls._pump(pygame):
-                return None
-            time.sleep(0.05)
-
-        # Whatever is already held when this starts is not the answer. A yoke
-        # with a latching switch would otherwise answer instantly, and so
-        # would a trigger the pilot happens to be resting on.
-        held = {(index, button)
-                for index, _name, stick in sticks
-                for button in range(stick.get_numbuttons())
-                if down(stick, button)}
-
-        deadline = time.monotonic() + max(1.0, float(timeout_s))
-        while time.monotonic() < deadline:
-            cls._pump(pygame)
-            for index, name, stick in sticks:
-                for button in range(stick.get_numbuttons()):
-                    if not down(stick, button):
-                        held.discard((index, button))
-                        continue
-                    if (index, button) in held:
-                        continue
-                    return index, button, name
-            time.sleep(0.02)
-        return None
-
     def start(self) -> None:
-        pygame = self._import()
+        """Raises :class:`~wilcoatc.audio.controllers.ControllerMissing` or
+        :class:`~wilcoatc.audio.controllers.ControllersUnavailable`, which
+        the engine says in the pilot's language."""
+        from .controllers import ButtonWatch
 
-        found, reason = self.scan()
-        if reason == self.MISSING:
-            raise RuntimeError(
-                "joystick support needs pygame-ce: pip install pygame-ce")
-        if len(found) <= self.joystick_index:
-            raise RuntimeError(
-                f"joystick {self.joystick_index} not found "
-                f"({len(found)} connected)"
-                + (f": {reason}" if reason and reason != self.NONE else "")
-            )
-        pygame.joystick.init()
-        if not self._pump(pygame):
-            raise RuntimeError(
-                "this computer's SDL build will not report button presses; "
-                "use a keyboard key for push-to-talk")
-        stick = pygame.joystick.Joystick(self.joystick_index)
-        type(self)._in_use += 1
-
-        def loop():
-            down = False
-            while not self._stop.is_set():
-                # Unguarded, a failure here ends the thread and the button
-                # quietly stops working for the rest of the session.
-                self._pump(pygame)
-                try:
-                    pressed = bool(stick.get_button(self.button))
-                except Exception:
-                    pressed = False
-                if pressed and not down:
-                    down = True
-                    if self.on_press:
-                        self.on_press()
-                elif not pressed and down:
-                    down = False
-                    if self.on_release:
-                        self.on_release()
-                time.sleep(self.poll_interval)
-
-        self._thread = threading.Thread(target=loop, daemon=True)
-        self._thread.start()
+        index = None if (self.joystick_id or self.joystick_name) \
+            else self.joystick_index
+        watch = ButtonWatch(
+            self._hub(), controller_id=self.joystick_id,
+            name=self.joystick_name, index=index, button=self.button,
+            on_press=self.on_press, on_release=self.on_release,
+            on_lost=self.on_lost, on_back=self.on_back, poll_hz=self.poll_hz)
+        watch.start()
+        self._watch = watch
 
     def stop(self) -> None:
-        self._stop.set()
-        if self._thread:
-            self._thread.join(timeout=1.0)
-            self._thread = None
-            # The handle is released, so the device list may be rebuilt again.
-            type(self)._in_use = max(0, type(self)._in_use - 1)
+        if self._watch is not None:
+            self._watch.stop()
+            self._watch = None
 
 
 # --------------------------------------------------------------------------
@@ -1095,3 +940,93 @@ def list_audio_devices() -> tuple[list[tuple[int, str]], list[tuple[int, str]]]:
         if info.get("max_output_channels", 0) > 0:
             outputs.append((index, name))
     return inputs, outputs
+
+
+class InputMeter:
+    """How loud the microphone is, for the setup screen's level bar.
+
+    The capture above only runs while the transmit key is held, and the first
+    thing the setup screen asks is "is this the right microphone" -- before
+    any key has been chosen. So this opens its own stream on the device
+    being looked at, keeps only the loudest sample since it was last read,
+    and closes itself once nobody has asked for a while: a stream left open
+    is a microphone indicator lit in the taskbar for no reason.
+
+    Opened per device and reopened on a change, because the screen offers
+    the list and the pilot goes down it. A device that will not open is
+    reported, not raised: the bar sits still and says so.
+    """
+
+    IDLE_S = 3.0
+
+    def __init__(self, sample_rate: int = CAPTURE_RATE):
+        self.sample_rate = sample_rate
+        self._lock = threading.Lock()
+        self._stream = None
+        self._device: int | str | None = None
+        self._peak = 0.0
+        self._asked = 0.0
+        self._error = ""
+        self._watch: threading.Thread | None = None
+
+    def read(self, device: int | str | None = None) -> dict:
+        """The peak since the last read, 0 to 1, opening the device if needed."""
+        with self._lock:
+            self._asked = time.monotonic()
+            if self._stream is None or device != self._device:
+                self._open(device)
+            peak, self._peak = self._peak, 0.0
+            return {"ok": self._stream is not None, "peak": round(peak, 4),
+                    "error": self._error}
+
+    def close(self) -> None:
+        with self._lock:
+            self._shut()
+
+    def _open(self, device) -> None:
+        import sounddevice as sd
+
+        self._shut()
+        self._device = device
+        self._error = ""
+
+        def callback(indata, _frames, _time_info, _status):
+            loudest = float(np.max(np.abs(indata))) if indata.size else 0.0
+            if loudest > self._peak:
+                self._peak = loudest
+
+        try:
+            self._stream = sd.InputStream(
+                device=device, samplerate=self.sample_rate, channels=1,
+                dtype="float32", callback=callback,
+                blocksize=int(self.sample_rate * BLOCK_MS / 1000))
+            self._stream.start()
+        except Exception as exc:
+            self._stream = None
+            self._error = str(exc)
+            log.debug("level meter could not open %r: %s", device, exc)
+            return
+        if self._watch is None or not self._watch.is_alive():
+            self._watch = threading.Thread(target=self._idle, daemon=True,
+                                           name="wilcoatc-level")
+            self._watch.start()
+
+    def _shut(self) -> None:
+        stream, self._stream = self._stream, None
+        self._peak = 0.0
+        if stream is not None:
+            try:
+                stream.stop()
+                stream.close()
+            except Exception:                       # pragma: no cover
+                log.debug("level meter did not close", exc_info=True)
+
+    def _idle(self) -> None:
+        while True:
+            time.sleep(0.5)
+            with self._lock:
+                if self._stream is None:
+                    return
+                if time.monotonic() - self._asked > self.IDLE_S:
+                    self._shut()
+                    return

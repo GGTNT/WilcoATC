@@ -16,13 +16,16 @@ Three sources implement the same interface:
 
 from __future__ import annotations
 
+import ctypes
 import logging
+import math
 import threading
 import time
 from dataclasses import dataclass, replace
 from typing import Iterable, Protocol
 
 from .state import AircraftState, normalize_angle
+from .serial import serialize
 
 log = logging.getLogger(__name__)
 
@@ -100,7 +103,10 @@ def decode_frequency(raw) -> float:
             candidate = float(f"1{digits[0]}{digits[1]}.{digits[2]}{digits[3]}")
             if 118.0 <= candidate <= 136.999:
                 return round(candidate, 3)
-    # BCD32 used for 8.33 kHz channels.
+    # BCD32, used for 8.33 kHz channels: every digit, four of them after
+    # the point -- 0x01286050 is 128.6050, as a running 2024 gave for Centennial
+    # Delivery. The digits were read one place to the right, as 286.050, and
+    # the radio decoded as tuned to nothing.
     if 0 < packed <= 0xFFFFFFFF:
         digits = []
         for shift in (28, 24, 20, 16, 12, 8, 4, 0):
@@ -110,7 +116,7 @@ def decode_frequency(raw) -> float:
                 break
             digits.append(str(nibble))
         if len(digits) == 8:
-            candidate_text = f"{digits[2]}{digits[3]}{digits[4]}.{digits[5]}{digits[6]}{digits[7]}"
+            candidate_text = f"{digits[1]}{digits[2]}{digits[3]}.{digits[4]}{digits[5]}{digits[6]}"
             try:
                 candidate = float(candidate_text)
             except ValueError:
@@ -303,6 +309,52 @@ class SimConnectSource:
         # is what wilcoatc.atc.crew allows for.
         ("CABIN_SEATBELTS_ALERT_SWITCH", "seatbelt_sign", "bool", "slow"),
         ("LIGHT_BEACON", "beacon_light", "bool", "slow"),
+        # The model's class, for the first officer: it does not change in a
+        # flight, so it rides the slow rotation like the title.
+        ("ENGINE_TYPE", "engine_type", "int", "slow"),
+        ("NUMBER_OF_ENGINES", "engine_count", "int", "slow"),
+        ("CATEGORY", "category", "text", "slow"),
+        # What the first officer checks a checklist answer against. Slow:
+        # with these the rotation is about three seconds round, which is
+        # why a value is read again on its own (read_now) before the first
+        # officer says it disagrees.
+        ("LIGHT_LANDING", "landing_light", "bool", "slow"),
+        ("LIGHT_TAXI", "taxi_light", "bool", "slow"),
+        ("LIGHT_NAV", "nav_light", "bool", "slow"),
+        ("LIGHT_STROBE", "strobe_light", "bool", "slow"),
+        ("KOHLSMAN_SETTING_MB", "kohlsman_hpa", "raw", "slow"),      # Millibars
+        ("FUEL_TANK_SELECTOR:1", "fuel_selector", "int", "slow"),    # Enum
+        ("GENERAL_ENG_MIXTURE_LEVER_POSITION:1", "mixture_pct", "raw", "slow"),
+        ("AUTOPILOT_MASTER", "autopilot", "bool", "slow"),
+        ("GPS_DRIVES_NAV1", "gps_drives_nav1", "bool", "slow"),
+        ("PITOT_HEAT", "pitot_heat", "bool", "slow"),
+        ("FUEL_TOTAL_QUANTITY", "fuel_total_gal", "raw", "slow"),    # Gallons
+        ("SPOILERS_ARMED", "spoilers_armed", "bool", "slow"),
+        ("AVIONICS_MASTER_SWITCH", "avionics_master", "bool", "slow"),
+        ("ELECTRICAL_MASTER_BATTERY", "battery_master", "bool", "slow"),
+        # Whether the radio has power, for the controller rather than the
+        # crew (Engine.radio_powered): COM STATUS is 0 working, 1 not fitted,
+        # 2 no electricity, 3 failed; the main bus is the second opinion.
+        ("COM_STATUS:1", "com1_status", "int", "slow"),
+        ("ELECTRICAL_MAIN_BUS_VOLTAGE", "main_bus_volts", "raw", "slow"),
+        # Not in the wrapper's table: defined by define_our_variables.
+        ("TRANSPONDER_STATE:1", "transponder_state", "int", "slow"),
+        ("DESIGN_TAKEOFF_SPEED", "design_takeoff_kt", "raw", "slow"),
+        ("DESIGN_SPEED_MIN_ROTATION", "min_rotation_kt", "raw", "slow"),
+        # The callouts. The bank every read, because "bank" is about a
+        # moment; the needles and the selected speed in the rotation, a
+        # needle coming alive being worth a second or two of lag.
+        ("PLANE_BANK_DEGREES", "bank_deg", "signed_rad", "fast"),
+        ("NAV_HAS_LOCALIZER:1", "nav1_has_localizer", "bool", "slow"),
+        ("NAV_CDI:1", "nav1_cdi", "raw", "slow"),
+        ("NAV_HAS_GLIDE_SLOPE:1", "nav1_has_glideslope", "bool", "slow"),
+        ("NAV_GSI:1", "nav1_gsi", "raw", "slow"),
+        ("AUTOPILOT_AIRSPEED_HOLD_VAR", "ap_airspeed_kt", "raw", "slow"),
+        # The notices: power, and the fuel either side and by weight.
+        ("GENERAL_ENG_THROTTLE_LEVER_POSITION:1", "throttle_pct", "raw", "slow"),
+        ("FUEL_LEFT_QUANTITY", "fuel_left_gal", "raw", "slow"),     # Gallons
+        ("FUEL_RIGHT_QUANTITY", "fuel_right_gal", "raw", "slow"),   # Gallons
+        ("FUEL_TOTAL_QUANTITY_WEIGHT", "fuel_total_lb", "raw", "slow"),  # lb
         ("AMBIENT_WIND_DIRECTION", "ambient_wind_direction", "deg", "slow"),
         ("AMBIENT_WIND_VELOCITY", "ambient_wind_velocity", "raw", "slow"),  # Knots
         ("AMBIENT_TEMPERATURE", "ambient_temperature_c", "raw", "slow"),    # Celsius
@@ -310,13 +362,19 @@ class SimConnectSource:
         ("SEA_LEVEL_PRESSURE", "sea_level_pressure_hpa", "raw", "slow"),    # Millibars
     )
 
-    def __init__(self, poll_interval: float = 0.25, request_timeout_ms: int = 400):
+    def __init__(self, poll_interval: float = 0.25, request_timeout_ms: int = 400,
+                 dll_path: str = ""):
         self.poll_interval = poll_interval
         self.request_timeout_ms = request_timeout_ms
+        # A SimConnect library to prefer over the wrapper's bundled one
+        # (sim.simconnect_dll); the 2024 SDK's is found on its own.
+        self.dll_path = dll_path
         self._sim = None
         self._requests = None
         self._connected = False
         self._missing: set[str] = set()
+        # How often each variable that has never answered has been asked.
+        self._silent: dict[str, int] = {}
         self._state = AircraftState()
         self._lock = threading.Lock()
         # Events are mapped to the simulator once each and kept. Mapping is a
@@ -352,6 +410,41 @@ class SimConnectSource:
     def connected(self) -> bool:
         return self._connected
 
+    # The call the 2024 library has and the wrapper's bundled 2020 one does
+    # not: AI aircraft created in a livery (see integrations.ailiveries).
+    LIVERY_CALL = "SimConnect_AICreateNonATCAircraft_EX1"
+
+    def _open(self, SimConnect):
+        """The session, on the 2024 SDK's library where there is one.
+
+        The wrapper loads its own bundled SimConnect.dll, which is 2020's:
+        it talks to 2024 well enough, but it has no call to create an AI
+        aircraft in a livery, so every detailed aeroplane was drawn in the
+        model's house colours. The wrapper takes another library by path
+        and works unchanged on it (measured: position, radios, title read
+        the same). Anything that goes wrong with that library falls back
+        to the bundled one, which is what this always used.
+        """
+        library = None
+        try:
+            from ..integrations.facilities import find_simconnect
+
+            found = find_simconnect(self.dll_path)
+            if found is not None and hasattr(ctypes.WinDLL(str(found)),
+                                             self.LIVERY_CALL):
+                library = str(found)
+        except Exception:
+            library = None
+        if library is not None:
+            try:
+                session = SimConnect(library_path=library)
+                log.info("simulator session on %s", library)
+                return session
+            except Exception:
+                log.info("the SimConnect library at %s would not connect; "
+                         "using the bundled one", library, exc_info=True)
+        return SimConnect()
+
     def connect(self) -> bool:
         try:
             from SimConnect import AircraftRequests, SimConnect
@@ -359,8 +452,12 @@ class SimConnectSource:
             log.warning("SimConnect package not installed; sim link unavailable")
             return False
         try:
-            self._sim = SimConnect()
+            self._sim = self._open(SimConnect)
+            # One call at a time on this session, whichever thread makes it
+            # (see wilcoatc.sim.serial).
+            serialize(self._sim.dll)
             self._requests = AircraftRequests(self._sim, _time=self.request_timeout_ms)
+            self.define_our_variables(self._requests)
             self._connected = True
             # A reconnection is to a different simulator session: the event
             # handles from the last one are stale, and a variable that was
@@ -368,6 +465,7 @@ class SimConnectSource:
             self._events.clear()
             self._freq_event_style.clear()
             self._missing.clear()
+            self._silent.clear()
             self._values.clear()
             self._empty_reads = 0
             self._next_slow = 0
@@ -381,6 +479,51 @@ class SimConnectSource:
             self._requests = None
             self._connected = False
             return False
+
+    # The variables the wrapper's request table does not have, in its own
+    # format: description, SimConnect name, the unit asked for, settable.
+    # The speeds are asked for in knots, which SimConnect converts to
+    # whatever the variable's own unit is. UNVERIFIED on a running 2024:
+    # the names are the SDK's simulation variables reference.
+    OUR_VARIABLES: dict[str, list] = {
+        "TRANSPONDER_STATE:index": [
+            "Transponder mode: 0 off, 1 standby, 2 test, 3 on, 4 alt",
+            b"TRANSPONDER STATE:index", b"Enum", "N"],
+        "DESIGN_TAKEOFF_SPEED": [
+            "The model's design takeoff speed",
+            b"DESIGN TAKEOFF SPEED", b"Knots", "N"],
+        "DESIGN_SPEED_MIN_ROTATION": [
+            "The model's minimum rotation speed",
+            b"DESIGN SPEED MIN ROTATION", b"Knots", "N"],
+    }
+
+    @classmethod
+    def define_our_variables(cls, requests) -> None:
+        """Add :data:`OUR_VARIABLES` to one session's request table.
+
+        On that session's helper object, not on the wrapper's class, so
+        nothing outside this program sees the table change.
+        """
+        helper = getattr(requests, "MiscellaneousData", None)
+        if helper is None:
+            return
+        helper.list = {**type(helper).list, **cls.OUR_VARIABLES}
+
+    def read_now(self, attribute: str):
+        """One variable, read now rather than when the rotation reaches it.
+
+        For the first officer, who is about to say the aeroplane disagrees
+        with the pilot and must not say it off a value three seconds old.
+        None when the simulator has no answer, which is never an objection.
+        """
+        if not self._connected:
+            return None
+        for name, attr, kind, _tier in self.REQUESTS:
+            if attr == attribute:
+                if self._fetch(name, attr, kind):
+                    return self._values[attr]
+                return None
+        return None
 
     # ------------------------------------------------------------------
 
@@ -480,10 +623,26 @@ class SimConnectSource:
             return False
         return self._seen_running
 
+    # How many silences a variable that has never answered gets, while
+    # others do, before it is no longer asked. The wrapper waits out its
+    # whole timeout for a variable the simulator does not know, on every
+    # pass of the rotation; three of the checklist variables are defined
+    # here and not measured on a 2024 yet.
+    SILENT_BEFORE_MISSING = 5
+
     def _fetch(self, name: str, attribute: str, kind: str) -> bool:
         """Read one variable and keep it. True if a value came back."""
         raw = self._get(name)
         if raw is None:
+            # Only a variable that has never answered, and only while the
+            # simulator is answering others: one in its menus answers
+            # nothing, and that is not everything being missing.
+            if attribute not in self._values and self._values:
+                silent = self._silent.get(name, 0) + 1
+                self._silent[name] = silent
+                if silent >= self.SILENT_BEFORE_MISSING:
+                    self._missing.add(name)
+                    log.info("simvar %s never answered; no longer asked", name)
             return False
         try:
             self._values[attribute] = self._convert(raw, kind, attribute)
@@ -506,6 +665,12 @@ class SimConnectSource:
             return int(float(raw))
         if kind == "rad":
             return normalize_angle(float(raw), source_is_radians=True)
+        if kind == "signed_rad":
+            # A bank, either side of zero, and kept so (the 0-360 wrap
+            # above would make a slight left bank 359 degrees). Which side
+            # is positive is UNVERIFIED and not relied on: the bank call is
+            # about its size.
+            return math.degrees(float(raw))
         if kind == "deg":
             return normalize_angle(float(raw), source_is_radians=False)
         return float(raw)

@@ -5,21 +5,21 @@ audio:
   capture_rate: 16000
   max_transmission_s: 30.0
   radio_effects: true
-  sidetone: false
 ptt:
   mode: keyboard
   key: $
+  scan_code: 0
   joystick_index: 0
-  joystick_button: 16
+  joystick_button: 9
 speech:
   model: small.en
   device: cpu
   compute_type: int8
   beam_size: 5
-  language: en
   languages: []
   detection_threshold: 0.85
   min_confidence: 0.35
+  confirm_below: 0.6
 voice:
   voice_dir: data/voices
   seed: wilcoatc
@@ -27,7 +27,7 @@ voice:
   preload: false
   engine: auto
   gpu: false
-  hq_model: standard
+  hq_model: multilingual
   hq_takes: 2
 delivery:
   prosody:
@@ -51,6 +51,13 @@ delivery:
     clip_ms: 45.0
     hesitation_chance: 0.05
     mid_hesitation_chance: 0.06
+    stall_ms: 650.0
+    phrase_pitch_st: 1.3
+    address_lift_st: 3.5
+    phrase_rate: 0.07
+    instruction_pace: 1.04
+    breath_group_s: 5.5
+    catch_breath_db: -23.0
     breath_chance: 0.5
     breath_db: -26.0
     breath_max: 2
@@ -66,22 +73,24 @@ delivery:
     enabled: true
     tilt_db: -6.0
     presence_db: 0.0
-    speaker_db: 4.0
-    speaker_hz: 900.0
-    band_low: 330.0
+    speaker_db: 6.0
+    speaker_hz: 1900.0
+    band_low: 400.0
     band_high: 2700.0
-    noise_db: -8.0
+    noise_db: 0.0
     room_db: -10.0
+    click_db: -7.0
+    rush_db: -5.0
+    tail_burst_db: -11.0
+    tail_ms: 0.0
 atc:
-  dialect: auto
   strict_icao_digits: true
   spoken_numerals: true
   proactive_handoff: true
   handoff_grace_s: 25.0
-  abbreviate_callsigns: true
   answer_unpublished: true
   unpublished_radius_nm: 6.0
-  ground_control: false
+  ground_control: true
 ai:
   provider: none
   model: ''
@@ -93,6 +102,16 @@ ui:
   language: en
   numerals: true
   landing_report: true
+  theme: light
+  accent: '#f59e0b'
+  scene: accent
+  blur: 24
+  lights: true
+  grid: true
+  tour_done: true
+  onboarding_done: true
+  gradient: true
+  onboarding_version: 2
 toolbar:
   enabled: true
   port: 8787
@@ -111,11 +130,51 @@ traffic:
   from_simulator: true
   in_simulator: true
   in_simulator_limit: 12
+  smooth_motion: true
   parked: 12
+  lod:
+    enabled: true
+    detailed_m: 1500.0
+    light_m: 2500.0
+    limit: 6
+    swaps_per_s: 0.5
+    settle_s: 3.0
+    mode: distance
+    detail_radius_km: 3.0
+    livery: match
+    hide_m: 1200.0
+    boarding_lead_s: 120.0
+    boarding_s: 240.0
+    models:
+      A321:
+        detailed: A321
+  debug:
+    force_types: []
+    status: false
+    status_every_s: 30.0
+    triggers: false
+    time_scale: 1.0
+  debug_force_types: []
   fsltl_rules: ''
+  handling:
+    enabled: true
+    vehicles: true
+    gsx_vehicles: true
+    passengers: false
+    passengers_visible: 12
+    baggage: false
+  handling_observed: true
+  handling_doors: true
+  engines_and_lights: true
+  doors_table: ''
+  doors_force_after_s: 300.0
+  handling_limit: 24
   density: 1.0
   seed: 0
   callsigns: auto
+  source: wilcoatc
+  live:
+    enabled: true
 weather:
   online: true
   prefer_sim: true
@@ -130,14 +189,27 @@ sim:
 immersion:
   enabled: true
   copilot: true
-  copilot_voice: kokoro-gb_m_ovett
+  copilot_voice: supertonic-en-M4
   copilot_gender: auto
-  callouts: true
+  first_officer:
+    answer_wait_s: 8.0
+    resume_after_s: 1.5
+    offer_every_s: 120.0
+    offer_answer_s: 30.0
+    offer_after_talk_s: 30.0
+    offer_settle_s: 20.0
+    offer_floor_agl_ft: 500.0
+    callout_late_s: 3.0
+    deviation_every_s: 30.0
+    flare_callouts: false
+    notices: false
+    radio: false
+  callouts: false
   confirmations: false
   checklists: true
-  radio_readbacks: true
+  radio_readbacks: false
   cabin: true
-  cabin_voice: supertonic-es-F5
+  cabin_voice: supertonic-fr-F1
   cabin_gender: auto
   briefings: true
   announcements: true
@@ -148,20 +220,48 @@ immersion:
   realism: true
   bilingual: true
   recordings: false
-  recordings_dir: BEL
+  recordings_dir: ETD
   volume: 1.0
   language: auto
-  airline: Eurowings
+  airline: Brussels airlines
   captain_name: Theo
   interphone: true
   verbosity: normal
+  controller:
+    special_vfr: true
+    runway_change: true
+    delays: true
+    conditional_clearances: true
+    reporting_points: true
+    congestion: true
+    readback_items: true
+    atis_briefing: true
+    ifr_departure: true
+    climb_steps: true
+    sid_watch: true
+    ifr_descent: true
+    plan_steps: true
+    shortcuts: true
+    off_route_watch: true
+    deviations: true
+    approach_areas: true
+    approach_catalogue: true
+    star_final: true
+    vectors: true
+    speed_control: true
+    go_around_vectors: true
+    tower_continue: true
+    holds: true
+    pilot_requests: true
 flight:
-  callsign: EWG87HX
+  callsign: 'BEL8KA'
   aircraft_type: A320
-  departure: LEPA
-  destination: LOWI
-  cruise_altitude_ft: 30000
-  ifr: true
+  departure: ELLX
+  destination: 'LIRF'
+  cruise_altitude_ft: 37000
+  ifr: false
+  profile: airliner
+  region: auto
 network:
   provider: none
   refresh_s: 120.0
@@ -176,4 +276,4 @@ logging:
   radio: true
   crew: true
   keep_days: 14
-log_level: INFO
+  apron: true

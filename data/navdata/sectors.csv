@@ -1,0 +1,25 @@
+# Your own en-route sectors, ahead of every other source.
+#
+# WHY THIS FILE EXISTS
+#
+# The en-route controller is the sector the aeroplane is in
+# (wilcoatc/atc/enroute.py). The program ships the FIR outlines and a table of
+# FIR frequencies; where a sector is split differently in reality, or its
+# frequency is wrong, a row here wins over everything else for the airspace it
+# covers. Shipped empty.
+#
+# FORMAT
+#
+#   id          your own name for it, unique, e.g. WSJC-EAST; the first four
+#               letters are taken as the ICAO prefix for language and dialect
+#   callsign    as spoken, e.g. "Singapore Radar" or "Ho Chi Minh Control"
+#   mhz         one or more frequencies, space separated, the first given in
+#               a handoff: "134.400 133.250"
+#   floor_fl    lowest flight level, empty for the surface
+#   ceiling_fl  highest flight level (exclusive), empty for no limit
+#   kind        radar, oceanic or fis
+#   points      the outline, "lat lon; lat lon; ..." in decimal degrees, at
+#               least three points
+#   source      where you took it from (AIP page and AIRAC date)
+#
+id,callsign,mhz,floor_fl,ceiling_fl,kind,points,source

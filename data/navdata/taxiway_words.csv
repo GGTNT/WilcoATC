@@ -1,0 +1,11 @@
+# Taxiways whose names are words, said as words (atc/taxi.py say_words).
+# label is the taxiway's name in the simulator's scenery without its number
+# (OUT for OUT3); word is how it is said ("OUTER": "Outer three"), or "-" to
+# spell it whatever speech.taxiway_word would make of it. A taxiway not
+# listed falls back to the automatic rule: three letters or more with a
+# vowel in the first two are a word ("INN" is "Inn").
+# UNVERIFIED: Brussels' Outer and Inner, from the scenery's labels heard
+# spelled in a clearance on 30 Oct 2026; to check against EBBR AD 2.24.
+airport,label,word,source
+EBBR,OUT,OUTER,"MSFS 2024 scenery labels, 30 Oct 2026; EBBR AD 2.24 to check"
+EBBR,INN,INNER,"MSFS 2024 scenery labels, 30 Oct 2026; EBBR AD 2.24 to check"

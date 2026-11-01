@@ -38,25 +38,29 @@ SAMPLE_RATE = 16000
 # Seeding the decoder with real phraseology is the single most effective way to
 # stop aviation words being transcribed as ordinary English. Every term here is
 # one that Whisper gets wrong without help.
+#
+# faster-whisper keeps only the last 223 tokens of it. The prompt this one
+# replaced was 293, all IFR, so its first seventy tokens never reached the
+# decoder and a circuit's words were not in it at all ("airfield" came back
+# "RFI field" at Kortrijk). This one is 219 and has them. Measured with
+# scripts/stt_vocabulary_bench.py, sixty pilot calls from the rejected
+# transcripts: 20.3% word error -> 17.7% alone, 6.5% with the hotwords below.
+
 AVIATION_PROMPT_EN = (
     "Air traffic control radio, the pilot's side. "
-    "Request clearance, ready to copy, request pushback, request taxi, "
-    "ready to taxi, ready for departure, holding short runway two seven left, "
-    "request takeoff, going around, request the ILS approach, "
-    "established on the localizer, field in sight, traffic in sight, "
-    "request landing, full stop, request taxi to the gate, "
-    "request higher, request lower, request descent, request climb, "
-    "request direct, request vectors, request frequency change, cancel IFR, "
-    "with you passing five thousand for one two thousand, "
-    "roger, wilco, affirmative, negative, unable, standby, say again, "
-    "cleared for takeoff runway two seven left, cleared to land, "
-    "taxi via alpha bravo, hold short of runway three one right, "
-    "climb flight level three five zero, descend five thousand, "
-    "turn right heading zero four zero, squawk four five two one, "
-    "QNH one zero one three, altimeter two niner niner two, "
-    "contact departure one three five point niner, information bravo, "
-    "November one seven two sierra papa, Delta twelve thirty four, "
-    "Speedbird one seventeen heavy, mayday, pan-pan, minimum fuel."
+    "At the apron, request airfield information for circuits, request taxi, "
+    "taxiing to holding point runway two four, ready for departure, "
+    "for circuits, downwind, base, final, touch and go, full stop, "
+    "overhead, crosswind, runway vacated, VFR to, request Special VFR, "
+    "request clearance, ready to copy, request pushback, holding short, "
+    "line up and wait, cleared for takeoff, cleared to land, going around, "
+    "request the ILS approach, field in sight, traffic in sight, "
+    "request descent, request direct, "
+    "roger, wilco, affirm, negative, unable, standby, say again, "
+    "climb flight level three five zero, descend altitude five thousand feet, "
+    "heading zero four zero, squawk four five two one, QNH one zero one three, "
+    "one three five decimal niner, information Bravo, "
+    "mayday, pan-pan."
 )
 
 # The same idea in French. Whisper knows French, but not French radiotelephony:
@@ -182,6 +186,31 @@ PROMPTS: dict[str, str] = {
 # Kept for callers that imported the old name.
 AVIATION_PROMPT = AVIATION_PROMPT_EN
 
+# The words a letter or a figure is spelled in, handed to the decoder as
+# hotwords rather than in the prompt. faster-whisper keeps only the last 223
+# tokens of an initial prompt, which every prompt above already fills; the
+# hotwords have a budget of their own, in front of it. At Kortrijk "Charlie"
+# came back as "Shirley" and "Kortrijk" as "Cortich".
+ICAO_ALPHABET = ("Alpha Bravo Charlie Delta Echo Foxtrot Golf Hotel India "
+                 "Juliett Kilo Lima Mike November Oscar Papa Quebec Romeo "
+                 "Sierra Tango Uniform Victor Whiskey X-ray Yankee Zulu")
+# Figures as they are said on the radio, where a language has its own.
+RADIO_FIGURES = {"en": "zero one two tree four fife six seven eight niner "
+                       "hundred tousand decimal"}
+
+
+def hotwords_for(language: str, callsign: str = "",
+                 stations: "list[str] | tuple[str, ...]" = ()) -> str:
+    """The pilot's own callsign, the stations within reach, the alphabet and
+    the radio's figures, in the frequency's language."""
+    parts = [callsign.strip()] if callsign and callsign.strip() else []
+    parts += [s.strip() for s in stations if s and s.strip()]
+    parts.append(ICAO_ALPHABET)
+    figures = RADIO_FIGURES.get((language or "en")[:2])
+    if figures:
+        parts.append(figures)
+    return ", ".join(parts)
+
 
 @dataclass
 class Transcript:
@@ -208,8 +237,20 @@ class Transcript:
         return self
 
 
+class SpeechModelMissing(RuntimeError):
+    """The recogniser's model is not on disk, and this recogniser may not
+    fetch it: the setup screen does, with a bar, rather than the program
+    sitting on a half-gigabyte download before its window has opened."""
+
+
 class Recognizer:
     """Wraps faster-whisper with settings tuned for radio phraseology."""
+
+    #: Whether :meth:`load` may download the model. The setup's own step
+    #: does (install.py, with progress); the engine's recogniser does not --
+    #: on a fresh install it fetched 480 MB at startup, silently, before the
+    #: window existed, and the pilot double-clicked again and again.
+    allow_download: bool = True
 
     def __init__(
         self,
@@ -239,6 +280,11 @@ class Recognizer:
         self.languages = [l.lower()[:2] for l in (languages or ([language] if language else ["en"]))]
         self.language = self.languages[0] if len(self.languages) == 1 else None
         self.detection_threshold = detection_threshold
+        # What the decoder is told to expect on top of the prompt: who is
+        # flying and who can be called. Set by the engine as it learns them.
+        self.callsign = ""
+        self.stations: list[str] = []
+        self.hotwords = True
         self._model = None
         self._lock = threading.Lock()
 
@@ -262,6 +308,16 @@ class Recognizer:
         self.languages = wanted
         self.language = wanted[0] if len(wanted) == 1 else None
         return True
+
+    def set_context(self, callsign: str = "", stations=()) -> None:
+        """The pilot's callsign as it is spoken, and the stations in reach."""
+        self.callsign = callsign or ""
+        self.stations = list(dict.fromkeys(s for s in stations if s))
+
+    def hotwords_for(self, language: str) -> str | None:
+        if not self.hotwords:
+            return None
+        return hotwords_for(language, self.callsign, self.stations)
 
     def prompt_for(self, language: str) -> str:
         if self.prompt is not None:
@@ -303,12 +359,19 @@ class Recognizer:
 
             self.download_root.mkdir(parents=True, exist_ok=True)
             t0 = time.perf_counter()
-            self._model = WhisperModel(
-                self.model_size,
-                device=self.device,
-                compute_type=self.compute_type,
-                download_root=str(self.download_root),
-            )
+            try:
+                self._model = WhisperModel(
+                    self.model_size,
+                    device=self.device,
+                    compute_type=self.compute_type,
+                    download_root=str(self.download_root),
+                    local_files_only=not self.allow_download,
+                )
+            except Exception as exc:
+                if self.allow_download:
+                    raise
+                raise SpeechModelMissing(
+                    f"the speech model {self.model_size} is not downloaded") from exc
             log.info(
                 "loaded whisper %s (%s/%s) in %.1fs",
                 self.model_size, self.device, self.compute_type,
@@ -367,6 +430,7 @@ class Recognizer:
             language=chosen,
             beam_size=self.beam_size,
             initial_prompt=prompt if prompt is not None else self.prompt_for(chosen),
+            hotwords=self.hotwords_for(chosen),
             # Radio transmissions are short and complete; suppressing the
             # previous-text context stops one readback contaminating the next.
             condition_on_previous_text=False,
@@ -441,6 +505,7 @@ class Recognizer:
             language=language,
             beam_size=self.beam_size,
             initial_prompt=prompt if prompt is not None else self.prompt_for(language),
+            hotwords=self.hotwords_for(language),
             condition_on_previous_text=False,
             vad_filter=True,
             vad_parameters={"min_silence_duration_ms": 300},
@@ -514,6 +579,24 @@ MODEL_CHOICES = {
     "medium":    "better still, roughly 3x the cost of small",
     "large-v3":  "best accuracy, needs a GPU to stay interactive",
 }
+
+
+def engine_model(config) -> str:
+    """The recogniser model the engine loads -- the one setup must fetch.
+
+    One answer for both, because they used to work it out apart: the engine
+    from every language the radio may be worked in (it follows the
+    aeroplane), the setup screen from the pinned list alone. Unpinned, that
+    was "small" against "small.en"; the engine fetched its own at startup and
+    nobody noticed, until it stopped fetching anything and found nothing.
+    """
+    # Always the multilingual model, whatever is pinned: a pilot speaks
+    # French at Orly, English at Heathrow and Russian at Sheremetyevo, and
+    # the English-only (.en) models silently ignore all but English. A ".en"
+    # name in an older config is read as its multilingual twin.
+    from ..atc.language import SUPPORTED_LANGUAGES
+
+    return model_for(list(SUPPORTED_LANGUAGES), config.speech.model)
 
 
 def model_for(languages: list[str], preferred: str = "small.en") -> str:

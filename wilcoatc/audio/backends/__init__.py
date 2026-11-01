@@ -24,14 +24,16 @@ def default_registry(voice_registry=None, prefer: str = "auto",
                      hq_takes: int = 2) -> BackendRegistry:
     """The engines this build ships with, in the order they are preferred.
 
-    Supertonic first. Ten speakers of each sex in every language a controller
-    works in, on the same CPU budget as the others, against Kokoro's single
-    speaker per language outside English -- so wherever it can speak, it is
-    both the better voice and the deeper pool. Kokoro next, which still owns
-    British English, because Supertonic's ten English speakers are one accent
-    and it is the American one. Piper last, and not merely as a fallback: it
-    is the widest phoneme-driven catalogue, and phonemes are what
-    :mod:`wilcoatc.audio.accent` needs to put a German accent on English.
+    Supertonic first: ten speakers of each sex in every language a
+    controller works in, and the American English of the US and Canada.
+    Piper next, and not merely as a fallback: British English, the real
+    French voices, and every country's accent, because it is the widest
+    phoneme-driven catalogue and phonemes are what
+    :mod:`wilcoatc.audio.accent` needs to put a Russian accent on English.
+
+    Kokoro is not registered. Its module stays in the tree for one release;
+    nothing casts it, and a controller is never cast from an engine that is
+    not here.
 
     Registration order is the registry's last tie-break, so this order *is*
     the preference. It is the order the casting in
@@ -49,7 +51,6 @@ def default_registry(voice_registry=None, prefer: str = "auto",
     """
     from ..voices import SUPERTONIC_DIR
     from .chatterbox import ChatterboxTTS
-    from .kokoro import KokoroTTS
     from .piper import PiperTTS
     from .supertonic import SupertonicTTS
 
@@ -57,8 +58,6 @@ def default_registry(voice_registry=None, prefer: str = "auto",
     root = getattr(voice_registry, "root", None)
     registry.register(SupertonicTTS(root / SUPERTONIC_DIR) if root is not None
                       else SupertonicTTS())
-    registry.register(KokoroTTS(root / "kokoro") if root is not None
-                      else KokoroTTS())
     registry.register(PiperTTS(voice_registry))
     registry.register(ChatterboxTTS(root, variant=hq_model, takes=hq_takes))
     return registry

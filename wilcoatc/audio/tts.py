@@ -45,7 +45,7 @@ from pathlib import Path
 
 import numpy as np
 
-from . import accent, imperfections, prosody, tone
+from . import accent, imperfections, intonation, prosody, tone
 from .radio_fx import (
     PROFILE_ATIS,
     PROFILE_CLEAN,
@@ -171,6 +171,39 @@ class Synthesizer:
             forget = getattr(backend, "forget", None)
             if forget is not None:
                 forget()
+
+    def use_engine(self, engine: str, *, gpu: bool = False,
+                   hq_model: str = "standard", hq_takes: int = 2) -> None:
+        """Cast from another engine, in place, without a restart.
+
+        For the pilot who has just installed the cloned voices from the
+        window: they asked for them, they waited for two gigabytes, and the
+        engine that read ``auto`` at startup would otherwise go on casting
+        from the catalogue it started with. This object rather than a new
+        one, because the crew and the cabin were handed this one and would
+        keep speaking through the old casting.
+
+        The casting and the backends are rebuilt together, by the same rule
+        :meth:`__init__` uses, so a controller is never cast from a catalogue
+        the backends cannot render. A recogniser handed over with
+        :meth:`verify_with` has to be handed over again: the backends it was
+        given to are gone.
+        """
+        from .backends.hardware import gpu_available
+
+        hq = (engine or "auto").strip().lower() == "chatterbox" \
+            or (bool(gpu) and gpu_available())
+        registry = VoiceRegistry(self.registry.root, seed=self.registry.seed,
+                                 engine=engine, hq=hq, hq_model=hq_model)
+        backends = default_registry(
+            registry, prefer=registry.engine, allow_gpu=bool(gpu),
+            hq_model=hq_model, hq_takes=hq_takes)
+        with self._lock:
+            self.registry = registry
+            self.backends = backends
+            self._cache.clear()
+            self._cache_order.clear()
+            self._fell_back = False
 
     def _assign(self, facility: str, position: str, ident: str,
                 language: str, gender: str, voice_key: str,
@@ -483,8 +516,20 @@ class Synthesizer:
             # has to run after, so that the gap between the carrier and the
             # first word has weather in it rather than being the one silent
             # moment.
+            # The phrase's note and pace come first, on the voice as the
+            # engine left it, because they find the phrases by its pauses;
+            # then the stop for air, which lengthens one of those pauses;
+            # then the light breaths, which keep out of the one that has a
+            # breath in it already.
+            if imperfections._alive(profile):
+                raw = intonation.shape(raw, sample_rate, operator,
+                                       imperfections.rng_for(seed, salt=4),
+                                       text=text)
+            raw, caught = imperfections.catch_breath(
+                raw, sample_rate, profile, operator,
+                imperfections.rng_for(seed, salt=5))
             raw = imperfections.breathe(raw, sample_rate, profile, operator,
-                                        rng)
+                                        rng, avoid=caught)
             raw = imperfections.wander(raw, sample_rate, operator, rng)
             raw = imperfections.lead_in(raw, sample_rate, operator, rng)
             raw = imperfections.wind(raw, sample_rate, profile, operator, rng)
@@ -543,13 +588,29 @@ class Synthesizer:
 
         # The filler goes on last, so that it is not mistaken for the address
         # the prosody layer breaks after.
+        operator = self._operator(shaped)
         prepared = imperfections.hesitate(
-            prepared, assignment.language, self._operator(shaped),
+            prepared, assignment.language, operator,
             imperfections.rng_for(seed, salt=1))
 
         backend = self.backend_for(assignment.spec)
-        return backend.synthesize(prepared, assignment, assignment.language,
-                                  length_scale=length_scale)
+        # A stall is rendered as two takes with the voice stopped between,
+        # because no punctuation gets an engine to stop for as long as a
+        # person does after an "uh": see imperfections.join.
+        parts = imperfections.pieces(prepared)
+        if len(parts) == 1:
+            return backend.synthesize(parts[0], assignment,
+                                      assignment.language,
+                                      length_scale=length_scale)
+        rendered, sample_rate = [], 0
+        for part in parts:
+            audio, sample_rate = backend.synthesize(
+                part, assignment, assignment.language,
+                length_scale=length_scale)
+            rendered.append(audio)
+        return (imperfections.join(rendered, sample_rate, operator,
+                                   imperfections.rng_for(seed, salt=3)),
+                sample_rate)
 
     # ------------------------------------------------------------------
 

@@ -1,0 +1,594 @@
+{
+  "_comment": "The turnaround of each kind of aeroplane, read by wilcoatc/atc/handling.py. 'types' says which profile an ICAO type uses (anything else: 'airliner' or 'light'; a business jet is 'business', fuel only, because it boards by its own airstair and has no hold worked by a loader -- no stairs, loader, caterer or bags go to it, nor to a 'light' aircraft, which gets a fuel truck at most). A round is a list of steps: 'service' is the vehicle, 'after' the moment it waits for ('start': the round begins -- the aeroplane stopped, was found, or began boarding; 'deboarded': the last passenger is off, which is the stairs at the door plus deboard_s, or the bus's last walker if one came), 'delay_s' how long after that it sets off, 'serve_s' how long it stays once parked (null: until the departure closes up). Every time is jittered by 20% and divided by traffic.debug.time_scale. 'fuel_with_passengers': whether the fuel truck may work while passengers board; if not, boarding sends it away. 'footprints': the ground each parked vehicle covers, in its own frame (metres ahead of and behind its reference, half its width), which is what another vehicle must keep clear of. 'margin_m' is added all round. 'baggage': how many bags a flight has (wilcoatc/atc/baggage.py bags_for): seats (per ICAO type, else per profile) x a load factor drawn between the two given x bags a passenger -- 'low_cost' for the airlines listed there, 'long_haul' for a widebody, 'legacy' otherwise -- with 'spread' either way, 'forward_share' of them in the forward hold. GSX's handler moves them a cart of eleven at a time.",
+  "airliner": "narrowbody",
+  "light": "light",
+  "types": {
+    "A318": "narrowbody",
+    "A319": "narrowbody",
+    "A19N": "narrowbody",
+    "A320": "narrowbody",
+    "A20N": "narrowbody",
+    "A321": "narrowbody",
+    "A21N": "narrowbody",
+    "B712": "narrowbody",
+    "B733": "narrowbody",
+    "B734": "narrowbody",
+    "B735": "narrowbody",
+    "B736": "narrowbody",
+    "B737": "narrowbody",
+    "B738": "narrowbody",
+    "B739": "narrowbody",
+    "B37M": "narrowbody",
+    "B38M": "narrowbody",
+    "B39M": "narrowbody",
+    "B752": "narrowbody",
+    "B753": "narrowbody",
+    "MD82": "narrowbody",
+    "MD83": "narrowbody",
+    "MD88": "narrowbody",
+    "BCS1": "narrowbody",
+    "BCS3": "narrowbody",
+    "F100": "narrowbody",
+    "A306": "widebody",
+    "A332": "widebody",
+    "A333": "widebody",
+    "A339": "widebody",
+    "A343": "widebody",
+    "A346": "widebody",
+    "A359": "widebody",
+    "A35K": "widebody",
+    "A388": "widebody",
+    "B744": "widebody",
+    "B748": "widebody",
+    "B762": "widebody",
+    "B763": "widebody",
+    "B764": "widebody",
+    "B772": "widebody",
+    "B77L": "widebody",
+    "B773": "widebody",
+    "B77W": "widebody",
+    "B788": "widebody",
+    "B789": "widebody",
+    "B78X": "widebody",
+    "MD11": "widebody",
+    "E170": "regional",
+    "E175": "regional",
+    "E75L": "regional",
+    "E190": "regional",
+    "E195": "regional",
+    "E290": "regional",
+    "E295": "regional",
+    "CRJ2": "regional",
+    "CRJ7": "regional",
+    "CRJ9": "regional",
+    "CRJX": "regional",
+    "AT43": "regional",
+    "AT45": "regional",
+    "AT46": "regional",
+    "AT72": "regional",
+    "AT75": "regional",
+    "AT76": "regional",
+    "DH8A": "regional",
+    "DH8B": "regional",
+    "DH8C": "regional",
+    "DH8D": "regional",
+    "SF34": "regional",
+    "BE40": "business",
+    "C25A": "business",
+    "C25B": "business",
+    "C25C": "business",
+    "C510": "business",
+    "C525": "business",
+    "C550": "business",
+    "C560": "business",
+    "C56X": "business",
+    "C680": "business",
+    "C68A": "business",
+    "C700": "business",
+    "C750": "business",
+    "CL30": "business",
+    "CL35": "business",
+    "CL60": "business",
+    "E50P": "business",
+    "E55P": "business",
+    "F2TH": "business",
+    "FA50": "business",
+    "FA7X": "business",
+    "FA8X": "business",
+    "GL5T": "business",
+    "GLEX": "business",
+    "GLF4": "business",
+    "GLF5": "business",
+    "GLF6": "business",
+    "H25B": "business",
+    "HDJT": "business",
+    "LJ35": "business",
+    "LJ45": "business",
+    "LJ60": "business",
+    "LJ75": "business",
+    "PC24": "business",
+    "PRM1": "business"
+  },
+  "profiles": {
+    "narrowbody": {
+      "deboard_s": 480,
+      "fuel_with_passengers": false,
+      "turnaround": [
+        {
+          "service": "stairs",
+          "after": "start",
+          "delay_s": 0,
+          "serve_s": null
+        },
+        {
+          "service": "stairs_aft",
+          "after": "start",
+          "delay_s": 5,
+          "serve_s": null
+        },
+        {
+          "service": "gpu",
+          "after": "start",
+          "delay_s": 10,
+          "serve_s": 1500
+        },
+        {
+          "service": "baggage",
+          "after": "start",
+          "delay_s": 45,
+          "serve_s": 1200
+        },
+        {
+          "service": "baggage_aft",
+          "after": "start",
+          "delay_s": 70,
+          "serve_s": 1100
+        },
+        {
+          "service": "catering",
+          "after": "deboarded",
+          "delay_s": 30,
+          "serve_s": 900
+        },
+        {
+          "service": "fuel",
+          "after": "deboarded",
+          "delay_s": 60,
+          "serve_s": 700
+        }
+      ],
+      "arrival_stairs": {
+        "delay_s": 30,
+        "serve_s": 1250
+      },
+      "quiet": [
+        {
+          "service": "gpu",
+          "after": "start",
+          "delay_s": 10,
+          "serve_s": 1500
+        },
+        {
+          "service": "fuel",
+          "after": "start",
+          "delay_s": 200,
+          "serve_s": 700
+        }
+      ],
+      "boarding": [
+        {
+          "service": "catering",
+          "after": "start",
+          "delay_s": 0,
+          "serve_s": 480
+        },
+        {
+          "service": "stairs",
+          "after": "start",
+          "delay_s": 5,
+          "serve_s": null
+        },
+        {
+          "service": "stairs_aft",
+          "after": "start",
+          "delay_s": 10,
+          "serve_s": null
+        },
+        {
+          "service": "baggage",
+          "after": "start",
+          "delay_s": 20,
+          "serve_s": null
+        },
+        {
+          "service": "baggage_aft",
+          "after": "start",
+          "delay_s": 30,
+          "serve_s": null
+        }
+      ]
+    },
+    "widebody": {
+      "deboard_s": 900,
+      "fuel_with_passengers": false,
+      "turnaround": [
+        {
+          "service": "stairs",
+          "after": "start",
+          "delay_s": 0,
+          "serve_s": null
+        },
+        {
+          "service": "stairs_aft",
+          "after": "start",
+          "delay_s": 5,
+          "serve_s": null
+        },
+        {
+          "service": "gpu",
+          "after": "start",
+          "delay_s": 10,
+          "serve_s": 2700
+        },
+        {
+          "service": "baggage",
+          "after": "start",
+          "delay_s": 45,
+          "serve_s": 2100
+        },
+        {
+          "service": "baggage_aft",
+          "after": "start",
+          "delay_s": 70,
+          "serve_s": 2000
+        },
+        {
+          "service": "catering",
+          "after": "deboarded",
+          "delay_s": 30,
+          "serve_s": 1500
+        },
+        {
+          "service": "fuel",
+          "after": "deboarded",
+          "delay_s": 60,
+          "serve_s": 1500
+        }
+      ],
+      "arrival_stairs": {
+        "delay_s": 30,
+        "serve_s": 2200
+      },
+      "quiet": [
+        {
+          "service": "gpu",
+          "after": "start",
+          "delay_s": 10,
+          "serve_s": 2700
+        },
+        {
+          "service": "fuel",
+          "after": "start",
+          "delay_s": 200,
+          "serve_s": 1500
+        }
+      ],
+      "boarding": [
+        {
+          "service": "catering",
+          "after": "start",
+          "delay_s": 0,
+          "serve_s": 900
+        },
+        {
+          "service": "stairs",
+          "after": "start",
+          "delay_s": 5,
+          "serve_s": null
+        },
+        {
+          "service": "stairs_aft",
+          "after": "start",
+          "delay_s": 10,
+          "serve_s": null
+        },
+        {
+          "service": "baggage",
+          "after": "start",
+          "delay_s": 20,
+          "serve_s": null
+        },
+        {
+          "service": "baggage_aft",
+          "after": "start",
+          "delay_s": 30,
+          "serve_s": null
+        }
+      ]
+    },
+    "regional": {
+      "deboard_s": 300,
+      "fuel_with_passengers": false,
+      "turnaround": [
+        {
+          "service": "stairs",
+          "after": "start",
+          "delay_s": 0,
+          "serve_s": null
+        },
+        {
+          "service": "gpu",
+          "after": "start",
+          "delay_s": 10,
+          "serve_s": 1200
+        },
+        {
+          "service": "baggage",
+          "after": "start",
+          "delay_s": 45,
+          "serve_s": 900
+        },
+        {
+          "service": "catering",
+          "after": "deboarded",
+          "delay_s": 30,
+          "serve_s": 600
+        },
+        {
+          "service": "fuel",
+          "after": "deboarded",
+          "delay_s": 60,
+          "serve_s": 600
+        }
+      ],
+      "arrival_stairs": {
+        "delay_s": 30,
+        "serve_s": 950
+      },
+      "quiet": [
+        {
+          "service": "gpu",
+          "after": "start",
+          "delay_s": 10,
+          "serve_s": 1200
+        },
+        {
+          "service": "fuel",
+          "after": "start",
+          "delay_s": 200,
+          "serve_s": 600
+        }
+      ],
+      "boarding": [
+        {
+          "service": "catering",
+          "after": "start",
+          "delay_s": 0,
+          "serve_s": 360
+        },
+        {
+          "service": "stairs",
+          "after": "start",
+          "delay_s": 5,
+          "serve_s": null
+        },
+        {
+          "service": "baggage",
+          "after": "start",
+          "delay_s": 20,
+          "serve_s": null
+        }
+      ]
+    },
+    "light": {
+      "deboard_s": 0,
+      "fuel_with_passengers": true,
+      "refuel_chance": 0.5,
+      "turnaround": [
+        {
+          "service": "fuel",
+          "after": "start",
+          "delay_s": 60,
+          "serve_s": 240
+        }
+      ],
+      "quiet": [],
+      "boarding": []
+    },
+    "business": {
+      "deboard_s": 0,
+      "fuel_with_passengers": true,
+      "refuel_chance": 1.0,
+      "turnaround": [
+        {
+          "service": "fuel",
+          "after": "start",
+          "delay_s": 90,
+          "serve_s": 420
+        }
+      ],
+      "quiet": [],
+      "boarding": []
+    }
+  },
+  "margin_m": 0.3,
+  "footprints": {
+    "stairs": {
+      "ahead_m": 2.5,
+      "behind_m": 5.0,
+      "half_width_m": 1.5
+    },
+    "stairs_aft": {
+      "ahead_m": 2.5,
+      "behind_m": 5.0,
+      "half_width_m": 1.5
+    },
+    "catering": {
+      "ahead_m": 7.0,
+      "behind_m": 1.5,
+      "half_width_m": 1.4
+    },
+    "baggage": {
+      "ahead_m": 4.5,
+      "behind_m": 3.0,
+      "half_width_m": 1.2
+    },
+    "baggage_aft": {
+      "ahead_m": 4.5,
+      "behind_m": 3.0,
+      "half_width_m": 1.2
+    },
+    "gpu": {
+      "ahead_m": 1.3,
+      "behind_m": 1.3,
+      "half_width_m": 0.8
+    },
+    "fuel": {
+      "ahead_m": 5.0,
+      "behind_m": 5.0,
+      "half_width_m": 1.4
+    },
+    "pushback": {
+      "ahead_m": 3.0,
+      "behind_m": 3.0,
+      "half_width_m": 1.5
+    },
+    "bag_train": {
+      "ahead_m": 2.5,
+      "behind_m": 12.5,
+      "half_width_m": 1.2
+    }
+  },
+  "baggage": {
+    "load_factor": [
+      0.75,
+      0.95
+    ],
+    "bags_per_passenger": {
+      "low_cost": 0.5,
+      "legacy": 0.85,
+      "long_haul": 1.0
+    },
+    "spread": 0.15,
+    "forward_share": 0.6,
+    "low_cost": [
+      "EZY",
+      "EJU",
+      "EZS",
+      "RYR",
+      "RUK",
+      "MAY",
+      "LDA",
+      "WZZ",
+      "WMT",
+      "WUK",
+      "VLG",
+      "TRA",
+      "TVF",
+      "TVS",
+      "NAX",
+      "NOZ",
+      "NSZ",
+      "IBS",
+      "VOE",
+      "EWG",
+      "EWL",
+      "SXS",
+      "PGT",
+      "JST",
+      "JJP",
+      "SWG",
+      "AXB",
+      "IGO",
+      "AKJ",
+      "NKS",
+      "FFT",
+      "SWA",
+      "JBU",
+      "VOI",
+      "VIV",
+      "GLO",
+      "AAY",
+      "SJO",
+      "CEB",
+      "AIQ"
+    ],
+    "seats": {
+      "A318": 120,
+      "A319": 144,
+      "A19N": 150,
+      "A320": 174,
+      "A20N": 180,
+      "A321": 200,
+      "A21N": 210,
+      "B712": 117,
+      "B733": 140,
+      "B734": 160,
+      "B735": 122,
+      "B736": 115,
+      "B737": 140,
+      "B738": 176,
+      "B739": 189,
+      "B37M": 160,
+      "B38M": 180,
+      "B39M": 190,
+      "B752": 200,
+      "B753": 240,
+      "BCS1": 110,
+      "BCS3": 140,
+      "MD82": 155,
+      "MD83": 155,
+      "MD88": 150,
+      "F100": 100,
+      "E170": 72,
+      "E175": 80,
+      "E75L": 80,
+      "E190": 100,
+      "E195": 120,
+      "E290": 110,
+      "E295": 132,
+      "CRJ2": 50,
+      "CRJ7": 70,
+      "CRJ9": 90,
+      "CRJX": 100,
+      "AT43": 48,
+      "AT45": 48,
+      "AT46": 48,
+      "AT72": 70,
+      "AT75": 70,
+      "AT76": 72,
+      "DH8A": 37,
+      "DH8B": 37,
+      "DH8C": 50,
+      "DH8D": 78,
+      "SF34": 34,
+      "A306": 250,
+      "A332": 250,
+      "A333": 290,
+      "A339": 290,
+      "A343": 270,
+      "A346": 320,
+      "A359": 315,
+      "A35K": 360,
+      "A388": 500,
+      "B744": 400,
+      "B748": 410,
+      "B762": 210,
+      "B763": 250,
+      "B764": 270,
+      "B772": 300,
+      "B77L": 300,
+      "B773": 370,
+      "B77W": 360,
+      "B788": 245,
+      "B789": 290,
+      "B78X": 330,
+      "MD11": 290
+    },
+    "seats_default": {
+      "narrowbody": 170,
+      "widebody": 300,
+      "regional": 80
+    }
+  }
+}

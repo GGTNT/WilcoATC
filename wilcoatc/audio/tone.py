@@ -72,6 +72,48 @@ profile that is not a controller's radio -- the intercom, the cabin address --
 is left alone: those are not heard through an air-band receiver and were not
 measured against one. ``enabled: false`` gives the chain's own balance back
 exactly.
+
+**Then it was re-fitted, to a different target.** Everything above is kept
+as :data:`HEATHROW`. The default is now matched to the controllers in a
+reference flight video (MSFS 2024, an A350 from Melbourne to Toulouse), cut
+out of the soundtrack where nothing else was playing: four clean
+transmissions for the shape, the floor and the keying, two more under engine
+noise for the pace. Those controllers are brighter than Heathrow Director --
+-6 to -8 dB held from 1 to 2.5 kHz where Director falls to -20, a centroid
+between 800 and 1075 Hz against 620 -- with a steep cut under 400 Hz, a
+cliff past 2.5 kHz, a floor 20 dB under the voice, no key-up click to speak
+of and the floor running on for about 0.3 s after the last word.
+
+A coordinate search over these fields, scored against the clean cuts, put
+the speaker resonance at 1.9 kHz and 6 dB, the bottom of the band at 400 Hz
+and the floor offset at nothing. That takes the third-octave distance from
+6.8 dB to 4.7 -- under the 5 to 6.5 dB the four reference transmissions
+differ from *each other* by, which is as close as six words a clip can
+measure -- and the floor from -27.5 to -21.8 against -20.6. The search's own
+optimum had the bottom at 500 Hz and the floor 3 dB louder; that cost 1.6
+points of word error over 156 transmissions (26 lines, six casts) and 430 Hz
+still cost 0.6, where 400 costs 0.1, so 400 is where it stops. The keying
+fields cost nothing measurable (12.1% against 11.9%).
+
+The pace was measured too and left alone: the video articulates about 5.3
+syllables a second against 4.5 here, and the two cheap ways to close it --
+flattening ``measured``, or 0.88/0.96 for ``quick``/``measured`` -- moved the
+measured rate by three per cent for 0.4 and 3.6 points of word error, almost
+all of the latter on Kokoro. That is the same answer the Heathrow recordings
+gave; see the README. Supertonic alone was tried as well, through its own
+base speed: it already reads at 4.8 to 5.7 syllables a second against the
+video's 5.4 (both through the shipped recogniser), and 15% quicker costs its
+casts 2 to 7 points. The gap that is left is Kokoro's, and Kokoro is the
+engine that falls apart first.
+
+Two other things were measured and are not here. The +5 to +7 dB still
+showing at 315-400 Hz can be taken down with the transmitter's presence
+filter turned into a dip at 330 Hz, and that buys 0.18 dB of distance over
+the whole corpus -- far inside the 5 dB the reference clips disagree by --
+while pushing 3-4 kHz past the reference. And the remaining difference that
+anyone will hear is not the channel at all but the voice: the video's
+controllers come off a far larger synthesiser than anything that runs on a
+CPU beside the simulator. The cloning tier is what closes that.
 """
 
 from __future__ import annotations
@@ -122,8 +164,8 @@ class Tone:
     #: above the resonance, which at 1650 Hz sat at 3.5 kHz where nothing
     #: could hear it and at 900 Hz sits at 1.9 kHz, where it takes out most
     #: of the remaining excess above the peak. Both halves were measured.
-    speaker_db: float = 4.0
-    speaker_hz: float = 900.0
+    speaker_db: float = 6.0
+    speaker_hz: float = 1900.0
     #: The passband. The chain band-limits to 300-3400 Hz, the usual design
     #: figure; the recordings are an ICAO Annex 10 channel and have nothing
     #: above 3.4 kHz at all -- 0.0% of their energy, already 26 dB down at
@@ -137,7 +179,7 @@ class Tone:
     #: off a male controller: order 8 cost 4 points of word error for two
     #: tenths of a decibel, and 2500 Hz at the top cost nearly 2 points for
     #: the same. Neither is in here for that reason.
-    band_low: float = 330.0
+    band_low: float = 400.0
     band_high: float = 2700.0
     #: How far down the floor between the words sits, in dB, *added* to the
     #: profile's own the way ``tilt_db`` is. Added rather than replacing,
@@ -164,12 +206,36 @@ class Tone:
     #: transmission silent and this program spends 16.5%, so that percentile
     #: sits in a gap for one and on the decay of a word for the other. The
     #: remaining four decibels are the speaking rate, not the hiss.
-    noise_db: float = -8.0
+    noise_db: float = 0.0
     room_db: float = -10.0
+    #: The two ends of a transmission, as offsets on the profile's own
+    #: figures, added like ``noise_db`` so a station keeps its own keying.
+    #: ``click_db`` is the transmit relay and the carrier detect, ``rush_db``
+    #: the open-squelch hiss before the carrier captures the receiver,
+    #: ``tail_burst_db`` the AGC's parting blast, and ``tail_ms`` how much
+    #: longer the carrier's hiss runs on after the last word before the
+    #: squelch shuts.
+    #:
+    #: Measured against the reference video: its key-up peaks 15 to 20 dB
+    #: under the voice where the chain's was 8 to 12, the hiss before the
+    #: first word sits at the floor rather than 7 to 16 dB over it, and
+    #: after the last word the floor simply runs on for about 0.3 s, with
+    #: no burst, before the squelch shuts. None of the four cost a word.
+    click_db: float = -7.0
+    rush_db: float = -5.0
+    tail_burst_db: float = -11.0
+    tail_ms: float = 0.0
 
 
 #: The settings in force when nobody says otherwise.
 DEFAULT = Tone()
+
+#: The first fit, against Heathrow Director, before the reference video.
+#: Darker -- the speaker peak at 900 Hz -- with a quieter floor and the
+#: chain's own keying. Kept so the two can be rendered side by side.
+HEATHROW = Tone(speaker_db=4.0, speaker_hz=900.0, band_low=330.0,
+                band_high=2700.0, noise_db=-8.0, room_db=-10.0,
+                click_db=0.0, rush_db=0.0, tail_burst_db=0.0, tail_ms=0.0)
 
 #: The chain's own balance, for the comparison.
 OFF = Tone(enabled=False)
@@ -210,10 +276,21 @@ def apply(profile, settings: Tone = DEFAULT):
     if getattr(profile, "speaker_peak_hz", None) != settings.speaker_hz:
         changes["speaker_peak_hz"] = float(settings.speaker_hz)
     for field_name, offset in (("noise_db", settings.noise_db),
-                               ("room_db", settings.room_db)):
+                               ("room_db", settings.room_db),
+                               ("ptt_click_db", settings.click_db),
+                               ("key_thump_db", settings.click_db),
+                               ("open_noise_db", settings.rush_db),
+                               ("tail_burst_db", settings.tail_burst_db)):
         if offset:
             changes[field_name] = float(getattr(profile, field_name, 0.0)
                                         + offset)
+    if settings.tail_ms:
+        # The run-on is the burst segment held at the floor; the squelch
+        # tail is lengthened by the same amount so the gate still closes
+        # inside it.
+        for field_name in ("tail_burst_ms", "squelch_tail_ms"):
+            changes[field_name] = max(
+                0.0, float(getattr(profile, field_name, 0.0)) + settings.tail_ms)
     # Narrowed, never widened: a profile already duller than the receiver
     # stays exactly as dull as it was written.
     low = max(float(getattr(profile, "band_low", 0.0)), float(settings.band_low))
@@ -227,4 +304,4 @@ def apply(profile, settings: Tone = DEFAULT):
     return replace(profile, **changes)
 
 
-__all__ = ["DEFAULT", "OFF", "Tone", "apply", "from_config"]
+__all__ = ["DEFAULT", "HEATHROW", "OFF", "Tone", "apply", "from_config"]

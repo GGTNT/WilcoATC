@@ -5,3 +5,6 @@
 
 pyinstaller>=6.11
 pillow>=10.0        # scripts/make_icons.py, which writes the window icon
+# Shipped inside the build, for joystick push-to-talk: the spec collects
+# it, and without it here a build would carry no joystick support at all.
+pygame-ce>=2.4

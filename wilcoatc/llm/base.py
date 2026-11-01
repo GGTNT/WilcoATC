@@ -136,6 +136,11 @@ INTENT_HELP: dict[str, str] = {
     "request_descent": "asking for a lower level",
     "request_direct": "asking to route direct to a waypoint",
     "request_vectors": "asking for radar vectors",
+    "request_deviation": "asking to deviate off the route, usually for weather",
+    "request_speed": "asking for a speed, or for no speed restriction",
+    "request_hold": "asking to hold",
+    "request_return": "asking to return to the airport it left",
+    "request_diversion": "asking to divert to the alternate or another airport",
     "request_approach": "asking for a particular approach",
     "request_landing": "inbound to land",
     "report_field_in_sight": "has the airport or runway visually",
@@ -154,6 +159,8 @@ INTENT_HELP: dict[str, str] = {
     "request_frequency_change": "asking to leave the frequency",
     "cancel_ifr": "cancelling the IFR flight plan",
     "radio_check": "testing the radio",
+    "request_special_vfr": "asking for Special VFR into or out of a control zone",
+    "report_runway_vacated": "reporting the runway vacated after landing",
     "emergency": "mayday, a declared emergency",
     "urgency": "pan-pan, an urgent but not distress situation",
     "minimum_fuel": "declaring minimum fuel",
@@ -299,11 +306,20 @@ def _extract_json(raw: str) -> dict | None:
 
 
 def to_parsed_intent(result: LLMResult, text: str, language: str) -> ParsedIntent:
-    """Present an LLM result in the same shape the rule parser produces."""
+    """Present an LLM result in the same shape the rule parser produces.
+
+    The rules said in the sentence ("IFR to Boston") are read off the words
+    the way the rule parser reads them; the model's answer had no place for
+    them, and a clearance request it classified lost them.
+    """
+    from ..atc.intents import flight_rules
+
+    normalized = (text or "").lower().strip()
     return ParsedIntent(
         intent=result.intent,
         text=text,
-        normalized=(text or "").lower().strip(),
+        normalized=normalized,
+        rules=flight_rules(normalized),
         language=language,
         callsign_matched=True,
         confidence=result.confidence,

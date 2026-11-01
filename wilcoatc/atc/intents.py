@@ -38,11 +38,14 @@ class Intent(str, Enum):
     RADIO_CHECK = "radio_check"
     REQUEST_CLEARANCE = "request_clearance"       # IFR clearance
     REQUEST_VFR_DEPARTURE = "request_vfr_departure"
+    # Into or out of a control zone below VFR minima (atc.svfr).
+    REQUEST_SPECIAL_VFR = "request_special_vfr"
     # Circuits: touch-and-goes, the option, staying in the pattern.
     REQUEST_PATTERN_WORK = "request_pattern_work"
     REQUEST_PUSHBACK = "request_pushback"
     REQUEST_TAXI = "request_taxi"
     REQUEST_TAKEOFF = "request_takeoff"           # "ready for departure"
+    REPORT_RUNWAY_VACATED = "report_runway_vacated"  # "runway vacated"
 
     # --- airborne ---
     CHECK_IN = "check_in"                         # "with you at one two thousand"
@@ -50,6 +53,15 @@ class Intent(str, Enum):
     REQUEST_CLIMB = "request_climb"
     REQUEST_DESCENT = "request_descent"
     REQUEST_DIRECT = "request_direct"
+    # "Request deviation twenty degrees left for weather" (the IFR plan,
+    # Phase 2): approved by a radar position, with a fix to rejoin at.
+    REQUEST_DEVIATION = "request_deviation"
+    # The pilot's other requests (the IFR plan, Phase 6): a speed, a hold,
+    # back to the field left, on to another airport.
+    REQUEST_SPEED = "request_speed"
+    REQUEST_HOLD = "request_hold"
+    REQUEST_RETURN = "request_return"
+    REQUEST_DIVERSION = "request_diversion"
     REQUEST_VECTORS = "request_vectors"
     REQUEST_APPROACH = "request_approach"
     # VFR: crossing somebody's airspace, and asking for radar advisories.
@@ -58,6 +70,9 @@ class Intent(str, Enum):
     REQUEST_LANDING = "request_landing"
     REPORT_FIELD_IN_SIGHT = "report_field_in_sight"
     REPORT_TRAFFIC_IN_SIGHT = "report_traffic_in_sight"
+    # Still looking for called traffic, or not seeing it.
+    REPORT_TRAFFIC_LOOKING = "report_traffic_looking"
+    REPORT_TRAFFIC_NOT_IN_SIGHT = "report_traffic_not_in_sight"
     REPORT_ESTABLISHED = "report_established"
     GOING_AROUND = "going_around"
     MISSED_APPROACH = "missed_approach"
@@ -75,6 +90,21 @@ class Intent(str, Enum):
     UNABLE = "unable"
     REQUEST_FREQUENCY_CHANGE = "request_frequency_change"
     CANCEL_IFR = "cancel_ifr"
+
+    # --- the information services ---
+    # A bearing to steer to the field (QDM) or from it (QDR), and "where am
+    # I", which is what a lost pilot asks an information service.
+    REQUEST_QDM = "request_qdm"
+    REQUEST_QDR = "request_qdr"
+    REQUEST_POSITION = "request_position"
+    # At an AFIS field there is no takeoff clearance to ask for; the pilot
+    # says where they are, and is told the runway is free.
+    REPORT_LINED_UP = "report_lined_up"
+    REPORT_LEAVING = "report_leaving"
+    # Flight service: the VFR flight plan and the weather.
+    OPEN_FLIGHT_PLAN = "open_flight_plan"
+    CLOSE_FLIGHT_PLAN = "close_flight_plan"
+    REQUEST_WEATHER = "request_weather"
 
     # --- abnormal ---
     EMERGENCY = "emergency"
@@ -96,6 +126,12 @@ class ParsedIntent:
     callsign_matched: bool = False
     station_addressed: str = ""
     confidence: float = 0.0
+    # The recogniser's confidence in the words themselves, set by the engine
+    # (1.0 for typed text). ``confidence`` above is the parser's in the intent.
+    heard_confidence: float = 1.0
+    # Readback items the words nearly said, with a recogniser unsure of
+    # them: asked about ("confirm ..."), not refused.
+    nearly: set[str] = field(default_factory=set)
     values: dict[str, Any] = field(default_factory=dict)
     readback_items: dict[str, Any] = field(default_factory=dict)
     # Which rules the pilot said they are flying under: "ifr", "vfr", or
@@ -277,6 +313,53 @@ def _runway_from_hold_short(values: dict[str, Any]) -> None:
     held = values.get("hold_short")
     if isinstance(held, str) and held and "runway" not in values:
         values["runway"] = held
+
+
+# The circuit, in every language the parser reads. Matched against the
+# normalised text, which is lower case and unaccented in all of them.
+#
+# "Last circuit" is the last one, flown to a full stop -- not a request for
+# another. Each language's own rules read it as circuit work, because it has
+# the word for a circuit in it, so it is turned round here, once, for all of
+# them. The non-English forms are what a pilot says rather than anything a
+# manual prescribes; none of the national manuals consulted (CAP 413, the
+# DGAC Manuel de phraséologie) gives the pilot's words for it.
+_LAST_CIRCUIT = re.compile(
+    r"\b((last|final) (circuit|pattern|time around)|"
+    r"dernier tour( de piste)?|letzte platzrunde|"
+    r"ultimo (circuito|trafico|giro))\b")
+# What means the next landing is a landing. Not "on final" or "inbound": a
+# pilot in the circuit says "final" every time round, and only the words for
+# stopping end the circuits.
+_FULL_STOP = re.compile(
+    r"\b(full ?stop|request(ing)? (a |the )?landing|for (a )?landing|"
+    r"request(ing)? to land|complet|arret complet|atterrissage|"
+    r"zur landung|landung|completo|aterrizaje|aterrizar|atterraggio|"
+    r"atterrare|pouso|pousar)\b")
+# A leg named after one of these is the instruction being repeated, not the
+# aeroplane's position: "report base" read back is not "base".
+_REPORT_WORD = re.compile(
+    r"\b(report|rappelez|rappeler|melden|notifique|riporti|reporte|informe)\b")
+
+
+def _circuit_calls(result: "ParsedIntent") -> None:
+    """The circuit calls no rule table understood on its own.
+
+    A leg on its own -- "downwind", "vent arrière", "Gegenanflug" -- is the
+    commonest call there is at a VFR field, and every parser extracted the
+    leg and then answered "say again", because no rule names a bare leg as
+    an intent. And "last circuit" was read as a request for circuits.
+    """
+    norm = result.normalized
+    if _LAST_CIRCUIT.search(norm):
+        result.intent = Intent.REQUEST_LANDING
+        result.values["full_stop"] = True
+    elif _FULL_STOP.search(norm):
+        result.values["full_stop"] = True
+    if (result.intent is Intent.UNKNOWN and "pattern_leg" in result.values
+            and not _REPORT_WORD.search(norm)):
+        result.intent = Intent.POSITION_REPORT
+        result.confidence = 0.8 if result.callsign_matched else 0.6
 
 
 # Words a number follows. A callsign form straight after one of these is the
@@ -642,7 +725,28 @@ _RULES: list[tuple[Intent, str]] = [
 
     (Intent.SAY_AGAIN, r"\b(say again|repeat that|did ?n'?o?t (copy|catch)|"
                        r"unreadable|you'?re broken|garbled)\b"),
-    (Intent.RADIO_CHECK, r"\b(radio check|how do you (read|hear)|comm check)\b"),
+    # "Radiocheck" is how the recogniser writes it as often as not.
+    (Intent.RADIO_CHECK, r"\b(radio ?check|how do you (read|hear)|comm check)\b"),
+
+    # The information services. Ahead of the requests below, because "open
+    # my VFR flight plan" has a "VFR" in it and "request position" a request.
+    (Intent.REQUEST_QDM, r"\b(request(ing)? (a |the )?qdm|qdm)\b"),
+    (Intent.REQUEST_QDR, r"\b(request(ing)? (a |the )?qdr|qdr)\b"),
+    (Intent.REQUEST_POSITION,
+     r"\b(request(ing)? (my |our |a )?position( fix)?|say (my|our) position|"
+     r"(what is|where is) (my|our) position|we are lost|i am lost|"
+     r"uncertain of (my|our) position)\b"),
+    (Intent.OPEN_FLIGHT_PLAN,
+     r"\b(open|activate|opening|activating) (my |our |the )?(vfr )?"
+     r"flight ?plan\b"),
+    (Intent.CLOSE_FLIGHT_PLAN,
+     r"\b(close|cancel|closing|cancelling|canceling) (my |our |the )?(vfr )?"
+     r"flight ?plan\b"),
+    (Intent.REQUEST_WEATHER,
+     r"\b(request(ing)? (the )?(current |latest )?(weather|metar)|"
+     r"(current|latest) (weather|metar)|weather (brief|briefing|update))\b"),
+    # Past tense only: "line up and wait" read back is a readback.
+    (Intent.REPORT_LINED_UP, r"\b(lined up|on the runway ready)\b"),
 
     # Pilots ask for a clearance a dozen ways and rarely the textbook way:
     # "ready to copy", "IFR to Boston", "clearance on request".
@@ -657,6 +761,11 @@ _RULES: list[tuple[Intent, str]] = [
                                r"like (our|my) (ifr )?clearance|"
                                r"request(ing)? (our |my )?(engine )?start( ?-? ?up)?|"
                                r"ready for (our |my )?(engine )?start( ?-? ?up)?)\b"),
+    # Before the VFR departure: "special VFR departure" is not a plain one.
+    (Intent.REQUEST_SPECIAL_VFR, r"\b(special vfr|s ?vfr|special v f r)\b"),
+    # Said after landing, and a quick reply of the panel's in a circuit.
+    (Intent.REPORT_RUNWAY_VACATED, r"\b(runway vacated|vacated (the )?runway|"
+                                   r"clear of (the )?runway|runway clear)\b"),
     # "Request VFR" on its own is a departure; "request VFR advisories" is not,
     # and reading it as one sends an aircraft in the circuit out of the zone.
     (Intent.REQUEST_VFR_DEPARTURE,
@@ -682,29 +791,43 @@ _RULES: list[tuple[Intent, str]] = [
      r"touch.?and.?go|stop.?and.?go|pattern work|circuits?|"
      r"(request|ready for|for) the option|multiple approaches|"
      r"low approach)\b"),
+    (Intent.REQUEST_LANDING, r"\b(request(ing)? (a |to )?rejoin|rejoining)\b"),
     (Intent.REQUEST_TRANSITION,
      r"\b(request(ing)? (a )?transition|transition(ing)? (through|your|the)|"
-     r"transit (through|your|the)|"
+     r"transit (through|your|the|of)|request(ing)? (a )?transit|"
      r"through your (class )?(delta|charlie|bravo|airspace|zone)|"
      r"(request|like) to (cross|transit|overfly)|overfly (the )?(field|airport))\b"),
     (Intent.REQUEST_FLIGHT_FOLLOWING,
      r"\b(flight following|vfr (advisor(y|ies)|flight following)|"
      r"radar advisor(y|ies)|request(ing)? advisories|basic service|"
+     r"traffic service|flight information( service)?|"
      r"traffic advisories)\b"),
 
     (Intent.REQUEST_TAKEOFF, r"\b(ready for (departure|takeoff)|"
                              r"request (departure|takeoff)|holding short.*ready|"
                              r"ready to go)\b"),
+    # The field asked for on its own, after everything that asks for more
+    # ("... airfield information for circuits" is a request for circuits).
+    (Intent.REQUEST_WEATHER, r"\b(airfield|aerodrome) (information|info|details)\b"),
 
     (Intent.REQUEST_FREQUENCY_CHANGE,
      r"\b(request frequency change|frequency change (request|please)|"
      r"like to change frequency)\b"),
     (Intent.CANCEL_IFR, r"\b(cancel (my |our )?ifr)\b"),
+    (Intent.REPORT_LEAVING,
+     r"\b(leaving (the )?(zone|atz|ctr|circuit|pattern|traffic pattern|"
+     r"control zone|frequency|area)|"
+     r"clear of (the )?(zone|atz|ctr|circuit|pattern|area))\b"),
 
     (Intent.REPORT_FIELD_IN_SIGHT,
      r"\b((field|airport|runway) (is )?in sight|have the (field|airport|runway))\b"),
+    (Intent.REPORT_TRAFFIC_NOT_IN_SIGHT,
+     r"\b(negative contact|no joy|(traffic )?not in sight|negative (on the )?traffic|"
+     r"(unable to|can'?n?o?t) see (the )?traffic)\b"),
     (Intent.REPORT_TRAFFIC_IN_SIGHT,
      r"\b(traffic in sight|have the traffic|got the traffic)\b"),
+    (Intent.REPORT_TRAFFIC_LOOKING,
+     r"\b(looking( out)?( for (the |that )?traffic)?|searching for (the )?traffic)\b"),
     (Intent.REPORT_ESTABLISHED,
      r"\b(established (on )?(the )?(localizer|localiser|ils|approach)|"
      r"we'?re established)\b"),
@@ -719,10 +842,27 @@ _RULES: list[tuple[Intent, str]] = [
                              r"request (to )?land|"
                              r"full stop|on final|"
                              r"inbound (to|for) (the )?(field|airport))\b"),
+    (Intent.REQUEST_DIVERSION, r"\b(request(ing)? (a )?diversion|"
+                               r"(request|like) to divert|diverting to|"
+                               r"divert to)\b"),
+    (Intent.REQUEST_RETURN, r"\b(request(ing)? (to )?return|like to return|"
+                            r"returning to (the )?(field|departure))\b"),
+    (Intent.REQUEST_HOLD, r"\b(request(ing)? (to )?hold(?! short)|"
+                          r"request(ing)? (a )?holding|like to hold(?! short))\b"),
+    (Intent.REQUEST_SPEED, r"\b(request(ing)? (own|high|higher|normal) speed|"
+                           r"request(ing)? speed|request(ing)? \w+ (\w+ )?(\w+ )?knots|"
+                           r"request(ing)? (to )?(increase|reduce) speed)\b"),
+    (Intent.REQUEST_DEVIATION, r"\b(request(ing)? (a )?(weather )?deviation|"
+                               r"deviation \w+ degrees|"
+                               r"(request|like) to deviate|deviate (left|right))\b"),
     (Intent.REQUEST_DIRECT, r"\b(request direct|direct to)\b"),
     (Intent.REQUEST_DESCENT, r"\b(request (descent|lower|to descend)|"
                              r"like (to descend|lower))\b"),
     (Intent.REQUEST_CLIMB, r"\b(request (climb|higher|to climb)|like (to climb|higher))\b"),
+    # A level asked for by name, the way a step climb usually is. Filed as a
+    # climb; the controller makes it a descent when it is below the
+    # aeroplane, which the parser cannot see.
+    (Intent.REQUEST_CLIMB, r"\brequest(ing)? (flight ?level|level|f ?l)\b"),
 
     # Checking in on a new frequency. Pilots do this a dozen ways: "with you",
     # "checking in", or simply stating the level they are at or passing. The
@@ -743,7 +883,8 @@ _RULES: list[tuple[Intent, str]] = [
                              r"(entering|midfield|abeam|turning|joining|on) "
                              r"(the )?(downwind|base|crosswind|upwind)|"
                              r"turning final|short final|abeam the numbers|"
-                             r"on the (four five|45))\b"),
+                             r"on the (four five|45)|"
+                             r"(orbit|three sixty|360) complete(d)?)\b"),
 
     (Intent.UNABLE, r"\bunable\b"),
     (Intent.STANDBY, r"\bstand ?by\b"),
@@ -918,6 +1059,7 @@ class IntentParser:
             if _READBACK_MARKERS.search(norm):
                 result.intent = Intent.READBACK
 
+        _circuit_calls(result)
         _runway_from_hold_short(result.values)
         result.readback_items = dict(result.values)
         result.rules = flight_rules(norm)
@@ -959,6 +1101,7 @@ class IntentParser:
             if re.search(grammar.readback, norm):
                 result.intent = Intent.READBACK
 
+        _circuit_calls(result)
         _runway_from_hold_short(result.values)
         result.readback_items = dict(result.values)
         result.rules = flight_rules(norm)
@@ -995,6 +1138,7 @@ class IntentParser:
             if READBACK_MARKERS_FR.search(norm):
                 result.intent = Intent.READBACK
 
+        _circuit_calls(result)
         _runway_from_hold_short(result.values)
         result.readback_items = dict(result.values)
         result.rules = flight_rules(norm)
@@ -1096,6 +1240,13 @@ class IntentParser:
             if re.search(rf"\b{leg}\b", norm):
                 values["pattern_leg"] = leg
                 break
+        else:
+            # Where an overhead join is flown (the UK, France): the
+            # aeroplane over the field, or letting down on the dead side.
+            if re.search(r"\boverhead\b", norm):
+                values["pattern_leg"] = "overhead"
+            elif re.search(r"\bdead ?side\b", norm):
+                values["pattern_leg"] = "deadside"
         return values
 
 

@@ -1,31 +1,21 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-     Icone de la barre d'outils : une tour de controle.
+     The toolbar icon: the WilcoATC mark -- the aeroplane of logo-wilco.svg,
+     in a rounded square.
 
-     APLATS ET NON TRAITS, ET AUCUN ATTRIBUT fill. C'est la convention des icones de barre
-     d'outils du simulateur, relevee sur celles qui fonctionnent (FSLTL) : les formes sont
-     pleines et sans couleur declaree, et c'est le simulateur qui teinte l'icone selon l'etat
-     du bouton (repos, survol, panneau ouvert). Une icone dessinee au trait blanc ne suit pas
-     ces etats, et peut ne rien afficher du tout.
+     FLAT SHAPES, NOT STROKES, AND NO fill ATTRIBUTE. That is the convention of
+     the simulator's toolbar icons, read off the ones that work (FSLTL): the
+     shapes are solid with no declared colour, and the simulator tints the
+     icon for the button's state (resting, hovered, panel open). An icon drawn
+     in white strokes does not follow those states and may show nothing. The
+     square is therefore a ring cut out of a solid shape (evenodd), not a
+     stroke.
 
-     NI width NI height, seulement viewBox. Le bouton dimensionne l'icone lui-meme ; des
-     dimensions fixes l'empechent de le faire.
+     NO width OR height, only a viewBox: the button sizes the icon itself.
 -->
-<svg version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"
-     x="0px" y="0px" viewBox="0 0 64 64" style="enable-background:new 0 0 64 64;"
-     xml:space="preserve">
-
-  <!-- La vigie, evasee vers le haut comme toutes les tours de controle. -->
-  <polygon points="20,27 25,14 39,14 44,27"/>
-
-  <!-- Le fut, qui se resserre vers la base. -->
-  <polygon points="27.5,30 36.5,30 35,50 29,50"/>
-
-  <!-- L'assise. -->
-  <rect x="19" y="50" width="26" height="6"/>
-
-  <!-- Les ondes, de part et d'autre. C'est ce qui distingue une tour de controle d'un
-       batiment quelconque a la taille d'un bouton de barre d'outils. -->
-  <path d="M14.68 16 A20 20 0 0 0 14.68 36 L18.14 34 A16 16 0 0 1 18.14 18 Z"/>
-  <path d="M49.32 16 A20 20 0 0 1 49.32 36 L45.86 34 A16 16 0 0 0 45.86 18 Z"/>
+<svg version="1.1" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <path fill-rule="evenodd" d="M18 4h28a14 14 0 0 1 14 14v28a14 14 0 0 1-14 14H18A14 14 0 0 1 4 46V18A14 14 0 0 1 18 4zm0 4.5A9.5 9.5 0 0 0 8.5 18v28a9.5 9.5 0 0 0 9.5 9.5h28a9.5 9.5 0 0 0 9.5-9.5V18A9.5 9.5 0 0 0 46 8.5z"/>
+  <g transform="translate(32 32.6) rotate(-45) scale(0.082) translate(-256 -256)">
+    <path d="M256 16 C270 16 282 40 284 80 L286 190 L470 320 L470 352 L286 300 L282 410 L340 455 L340 478 L280 462 L272 490 C266 500 246 500 240 490 L232 462 L172 478 L172 455 L230 410 L226 300 L42 352 L42 320 L226 190 L228 80 C230 40 242 16 256 16 Z"/>
+  </g>
 </svg>

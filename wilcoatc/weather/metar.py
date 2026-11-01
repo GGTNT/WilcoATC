@@ -189,12 +189,16 @@ class WeatherProvider:
 
     def __init__(
         self,
-        cache_path: Path = CACHE_PATH,
+        cache_path: Path | None = None,
         refresh_s: float = 600.0,
         timeout_s: float = 8.0,
         online: bool = True,
     ):
-        self.cache_path = Path(cache_path)
+        # Looked up when the provider is made rather than when the module is
+        # read, so the test suite can put it somewhere other than the
+        # pilot's own cache (tests/conftest.py).
+        self.cache_path = Path(cache_path if cache_path is not None
+                               else CACHE_PATH)
         self.refresh_s = refresh_s
         self.timeout_s = timeout_s
         self.online = online
@@ -205,6 +209,10 @@ class WeatherProvider:
         # Stations being fetched on a worker, so a second caller does not
         # start a second fetch of the same one.
         self._inflight: set[str] = set()
+        # Stations the service has no report for at all (an HTTP 204: no
+        # METAR, TAF or station entry -- Kortrijk is one). Not asked again
+        # for the rest of the session, rather than every FAILURE_RETRY_S.
+        self._no_report: set[str] = set()
         self._load_cache()
 
     # -- cache ---------------------------------------------------------
@@ -257,7 +265,9 @@ class WeatherProvider:
 
         recently_failed = (failed_at is not None and not force
                            and (now - failed_at) < FAILURE_RETRY_S)
-        if self.online and not recently_failed:
+        with self._lock:
+            unknown = station in self._no_report
+        if self.online and not recently_failed and not unknown:
             if not wait:
                 self._fetch_in_background(station)
             else:
@@ -304,15 +314,27 @@ class WeatherProvider:
 
         threading.Thread(target=run, name=f"metar-{station}", daemon=True).start()
 
-    def _fetch(self, station: str) -> tuple[str, Weather] | None:
+    def _get(self, station: str):
+        return requests.get(
+            AWC_URL,
+            params={"ids": station, "format": "json"},
+            timeout=self.timeout_s,
+            headers={"User-Agent": "wilcoatc/1.0"},
+        )
+
+    def _fetch_from_service(self, station: str) -> tuple[str, Weather] | None:
         try:
-            response = requests.get(
-                AWC_URL,
-                params={"ids": station, "format": "json"},
-                timeout=self.timeout_s,
-                headers={"User-Agent": "wilcoatc/1.0"},
-            )
+            response = self._get(station)
             response.raise_for_status()
+            if response.status_code == 204:
+                # No content: the service has nothing for this station, which
+                # is an answer and not a failure. It used to be read as JSON
+                # and logged as "METAR fetch failed ... Expecting value".
+                with self._lock:
+                    self._no_report.add(station)
+                log.info("METAR: aviationweather.gov has no METAR for %s; "
+                         "not asked again this session", station)
+                return None
             rows = response.json()
         except Exception as exc:
             log.info("METAR fetch failed for %s: %s", station, exc)
@@ -333,6 +355,10 @@ class WeatherProvider:
         if row.get("dewp") is not None:
             wx.dewpoint_c = float(row["dewp"])
         return raw, wx
+
+    # Separate names so the test suite can switch the network off by
+    # replacing ``_fetch`` (tests/conftest.py) and still reach the real one.
+    _fetch = _fetch_from_service
 
     def nearest_metar(self, lat: float, lon: float, navdb, max_nm: float = 90.0,
                       wait: bool = True) -> WeatherSample:
@@ -411,6 +437,27 @@ def at_the_surface(state, airport) -> bool:
     return above <= SURFACE_WIND_AGL_FT
 
 
+# The circuit: where a field with no report of its own takes the
+# simulator's wind in the air as well. Kortrijk's AFIS read Lille's
+# 200/32G45 to the circuit while the simulator was calm.
+CIRCUIT_NM = 5.0
+CIRCUIT_AGL_FT = 3000.0
+
+
+def in_the_circuit(state, airport) -> bool:
+    """Within 5 nm of the field and 3,000 ft above it, or on it."""
+    if state is None or airport is None or not getattr(state, "has_position", False):
+        return False
+    if state.distance_to(airport.lat, airport.lon) > CIRCUIT_NM:
+        return False
+    if state.on_ground:
+        return True
+    elevation = float(getattr(airport, "elev_ft", 0.0) or 0.0)
+    above = (getattr(state, "altitude_agl_ft", 0.0)
+             or max(0.0, float(state.altitude_ft or 0.0) - elevation))
+    return above <= CIRCUIT_AGL_FT
+
+
 def near_the_field(state, airport) -> bool:
     """Whether the aeroplane is at a field or about to touch down on it."""
     if state is None or airport is None or not getattr(state, "has_position", False):
@@ -450,11 +497,14 @@ def merge_weather(sim: Weather | None, real: WeatherSample,
         temperature = real.weather.temperature_c
         dewpoint = real.weather.dewpoint_c
     use_sim_wind = wind or real.source == "default"
+    # The whole wind from one place. The gust used to fall back to the
+    # observation's when the simulator had none, which put Lille's 45 kt
+    # gust on Kortrijk's calm.
+    observed = f"{real.source} {real.station}".strip()
     merged = Weather(
         wind_dir=sim.wind_dir if use_sim_wind else real.weather.wind_dir,
         wind_kt=sim.wind_kt if use_sim_wind else real.weather.wind_kt,
-        gust_kt=(sim.gust_kt or real.weather.gust_kt) if use_sim_wind
-        else real.weather.gust_kt,
+        gust_kt=sim.gust_kt if use_sim_wind else real.weather.gust_kt,
         variable=False if use_sim_wind else real.weather.variable,
         visibility_sm=sim.visibility_sm,
         altimeter_inhg=sim.altimeter_inhg,
@@ -463,6 +513,8 @@ def merge_weather(sim: Weather | None, real: WeatherSample,
         dewpoint_c=dewpoint,
         clouds=real.weather.clouds,
         raw=real.weather.raw,
+        wind_from=dict.fromkeys(("direction", "speed", "gust"),
+                                "sim" if use_sim_wind else observed),
     )
     return WeatherSample(merged, "sim", real.station, real.observed_utc)
 

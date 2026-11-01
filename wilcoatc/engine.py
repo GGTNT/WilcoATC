@@ -17,6 +17,7 @@ The engine never composes controller speech itself; it asks
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import math
 import threading
@@ -29,34 +30,52 @@ from .atc.atis import AtisGenerator, AtisReport
 from .atc.controller import ControllerBrain, Reply
 from .atc import interphone
 from .atc.crew import CrewDirector
-from .atc.intents import Intent, IntentParser
+from .atc.intents import Intent, IntentParser, ParsedIntent
 from .atc.landing import LandingMonitor
 from .atc.phraseology import Aircraft, Phraseology, Weather, wake_suffix
-from .atc.callsigns import every_language
-from .atc.detect import language_of_text
+from .atc.profile import FlightProfile
+from .atc.callsigns import every_language, heard_registration
+from .atc import letters
+from .atc.detect import by_words, clearly_in, language_of_text
 from .atc.language import (LANGUAGE_NAMES, SUPPORTED_LANGUAGES, languages_for,
                            profile_for, reply_language)
 from .atc.session import FlightSession, Instruction, Phase, station_key
+from .atc.handling import Handling, fuselage_length
 from .atc.traffic import TrafficInjector, UserAircraft
+from .atc import lod as lod_windows
+from .atc.lod import Candidate, Lod
+from .atc.systems import wanted as systems_wanted
+from .atc.servicelayout import fittings_for, load_layout, spots_for
+from .atc import handling as handling_spots
 from .integrations.aitraffic import SimTraffic
+from .integrations.systems import SimSystems
+from .integrations.groundvehicles import gsx_installed
+from .integrations.servicepoints import SimServicePoints
+from .integrations.doors import DoorTable, SimDoors
+from .integrations.groundvehicles import SimVehicles
 from .integrations.facilities import SimFacilities
 from .integrations import gsx
 from .integrations.gsx import GsxLink
 from .integrations.simaircraft import SimAircraft
 from .integrations.network import OnlineNetwork
 from .atc.arrival import ArrivalWatch
-from .atc.departure import DepartureWatch
-from .atc.watch import SurfaceWatch
+from .atc.climb import leaving_departure
+from .atc.departure import ClimbWatch, DepartureWatch, SidWatch
+from .atc.routing import RouteWatch
+from .atc.watch import (AirspaceWatch, RadarServiceWatch,
+                        ReportingPointWatch, RestrictionWatch, RunwayWatch,
+                        SurfaceWatch)
 from .atc.written import as_written
 from .logs import decision, RADIO, timed
 from .audio.io import (CabinPlayer, MicrophoneCapture, PushToTalk,
                        JoystickPushToTalk, RadioPlayer)
+from .audio.controllers import ControllerMissing, ControllersUnavailable
 from .audio.imperfections import from_config as imperfections_for
 from .audio.prosody import from_config as prosody_for
 from .audio.tone import from_config as tone_for
 from .audio.radio_fx import PROFILE_ATIS
 from .audio.announcements import FOLDER as ANNOUNCEMENTS, AnnouncementLibrary
-from .audio.stt import Recognizer, model_for
+from .audio.stt import Recognizer, SpeechModelMissing, engine_model
 from .audio.tts import Synthesizer
 from .audio.voices import VoicesMissing
 from .paths import announcements_dir, command_hint, resolve as _resolve
@@ -70,9 +89,15 @@ from .sim.source import ManualSource, SimConnectSource, StateSource
 from .sim.state import AircraftState
 from .navdata.magvar import variation
 from .weather.metar import (WeatherProvider, at_the_surface, merge_weather,
-                            near_the_field, weather_from_sim)
+                            in_the_circuit, near_the_field, weather_from_sim)
 
 log = logging.getLogger(__name__)
+status_log = logging.getLogger("wilcoatc.traffic.debug")
+
+#: How long COM1 has to stay on a frequency nobody answers before that is
+#: said. A swap passes through the standby frequency, and a knob being
+#: turned through every one between.
+EMPTY_NOTICE_S = 2.5
 
 
 @dataclass
@@ -88,13 +113,15 @@ class Event:
     kind: str          # "pilot" / "atc" / "info" / "error" / "atis" / "traffic"
     text: str
     speaker: str = ""
-    at: float = field(default_factory=time.time)
+    at: float = field(default_factory=lambda: time.time())
     key: str = ""
     params: dict = field(default_factory=dict)
     #: What the panel can do about it, when there is something. Only
     #: ``"setup"`` so far, which means "put the download dialog up": a
     #: missing download is the one failure a pilot can fix from the window,
     #: and a line of red text in the transcript does not tell them that.
+    #: ``"spoken"`` on a pilot transmission that came through the
+    #: microphone: the panel empties its text box.
     action: str = ""
 
 
@@ -147,6 +174,10 @@ def announcements_missing(config) -> str:
     return named
 
 
+class NotAFlightPlan(ValueError):
+    """A file handed in as a ``.pln`` that the simulator did not write."""
+
+
 class Engine:
     """Runs the ATC simulation for one flight."""
 
@@ -194,14 +225,16 @@ class Engine:
             # Where the flight will go is not known at startup, so the model
             # has to be one that can hear anything. Pinning the languages to
             # English is what keeps the smaller English-only model.
-            model_size=model_for(self.pinned_languages or list(SUPPORTED_LANGUAGES),
-                                 self.config.speech.model),
+            model_size=engine_model(self.config),
             device=self.config.speech.device,
             compute_type=self.config.speech.compute_type,
             beam_size=self.config.speech.beam_size,
             languages=self.languages,
             detection_threshold=self.config.speech.detection_threshold,
         )
+        # Never a download from here: the setup screen fetches the model with
+        # its own bar. Missing, the recogniser says so (SpeechModelMissing).
+        self.recognizer.allow_download = False
         # The cloning tier reads its takes back through this recogniser.
         # Nothing happens here unless that tier is in the cast.
         self.synth.verify_with(self.recognizer)
@@ -239,7 +272,19 @@ class Engine:
             # this and the crew must not hold a reference to something that
             # can be replaced.
             ground=lambda: self.gsx.state,
+            # One variable read now, before the first officer says the
+            # aeroplane disagrees with a checklist answer. Read only.
+            fresh=self._read_now,
         )
+        # Where the circuit puts the aeroplane, for the first officer's
+        # circuit calls (crew.circuit; the brain is built below).
+        self.crew.circuit = self._where_in_the_circuit
+        # What the first officer answers questions from, and the radio call
+        # it makes when the pilot hands one over (Phase 4).
+        self.crew.frequency_for = self._frequency_for
+        self.crew.distance_to_field = self._distance_to_field
+        self.crew.radio_call = self.first_officer_call
+        self.crew.transmit = self.first_officer_transmits
         # Rules first; the AI layer only sees what they could not classify.
         self.parser = IntentParser()
         self.understanding = Understanding(
@@ -258,18 +303,42 @@ class Engine:
             strict_icao_digits=self.config.atc.strict_icao_digits,
             ground_control=self.config.atc.ground_control,
         )
+        self.brain.realism = self.config.immersion.controller
+        self.brain.hearing = self.config.speech
         # When the search for an enroute frequency last came up empty, so a
         # flight over a country that publishes none is not made to look for
         # one on every pass of the situation loop.
         self._centre_looked_at = 0.0
         # When a centre last looked at which sector the flight is in.
         self._centre_checked_at = 0.0
+        # The sector the flight was last seen in, for the row written as it
+        # enters the next; and the SimBrief route as points, per plan.
+        self._sector_noted = None
+        self._route_cache = None
         # The half of the controller that watches rather than listens: what
         # the aeroplane is doing on the ground, and what it is doing on the
         # way in. Both speak first; nothing in either waits to be asked.
         self.watch = SurfaceWatch(self.navdb, self.brain)
+        self.airspace_watch = AirspaceWatch(self.navdb, self.brain)
+        self.point_watch = ReportingPointWatch(self.navdb, self.brain)
+        # And the radar half of it for a VFR flight: where its service ends,
+        # and whether it is keeping under the altitude it was held at.
+        self.radar_service_watch = RadarServiceWatch(self.navdb, self.brain)
+        self.restriction_watch = RestrictionWatch(self.navdb, self.brain)
+        # Through lambdas, so a replaced weather_for or atis_for is the one
+        # asked.
+        self.runway_watch = RunwayWatch(
+            self.navdb, self.brain, lambda ident: self.weather_for(ident),
+            lambda ident, language: self.atis_for(ident, language))
         self.arrivals = ArrivalWatch(self.navdb, self.brain)
+        # The controller answers some requests with what the arrival watch
+        # would say unprompted: a hold, the first descent (Phase 6).
+        self.brain.arrivals = self.arrivals
         self.departures = DepartureWatch(self.navdb, self.brain)
+        # The IFR climb in steps and the SID watched (the IFR plan, Phase 1).
+        self.climbs = ClimbWatch(self.brain)
+        self.sid_watch = SidWatch(self.brain)
+        self.route_watch = RouteWatch(self.brain)
         # What the ground handling is doing, if anything is saying -- and
         # the tug, once a push has been approved. The tug is handed over as a
         # callable rather than as the source, so nothing in integrations has
@@ -320,8 +389,28 @@ class Engine:
         from .integrations.approaches import SimApproaches
 
         self.simapproaches = SimApproaches(self.config.sim.simconnect_dll)
+        # And each runway's pattern altitude, behind the circuit files.
+        from .integrations.runways import SimRunways
+
+        self.simrunways = SimRunways(self.config.sim.simconnect_dll)
+        # Where each field's runways have been said to come from (logs radio).
+        self._runways_said: dict[str, str] = {}
         self._approaches_asked: set[str] = set()
         self._ground_ready: dict[str, object] = {}
+        # The controller taxis the pilot on the same layouts the traffic
+        # drives on, and reaches them the way it reaches the traffic: handed
+        # a service, so nothing in atc/ imports the engine.
+        self.brain.ground_layout = self.ground_layout
+        # And the ATIS each field is broadcasting, so a call reporting an old
+        # letter is told the current one.
+        self.brain.atis = self.atis_for
+        self.brain.weather_for = self.weather_for
+        # And everything the simulator reports, the pilot's own excluded,
+        # for the controller's picture (ControllerBrain.contacts).
+        self.brain.sim_traffic = self._sim_contacts
+        from .atc.trafficinfo import TrafficWatch
+
+        self.traffic_watch = TrafficWatch(self.brain)
         self.simtraffic = SimTraffic(
             enabled=self.config.traffic.enabled
             and self.config.traffic.in_simulator,
@@ -329,19 +418,131 @@ class Engine:
             # given, so this is room for them rather than a share of it.
             limit=self.config.traffic.in_simulator_limit
             + max(0, int(self.config.traffic.parked)),
+            settle_s=self.config.traffic.lod.settle_s,
+            smooth=self.config.traffic.smooth_motion,
         )
+        self.simtraffic.lod_models = dict(self.config.traffic.lod.models or {})
+        # Which model each parked aeroplane is drawn with, by how far it is
+        # from the pilot: the simulator's own, with doors, nearby; FSLTL's
+        # painted one further out. The doors follow the aeroplane across.
+        lod = self.config.traffic.lod
+        self.lod = Lod(enabled=lod.enabled,
+                       detailed_m=lod.detailed_m,
+                       light_m=lod.light_m,
+                       limit=lod.limit,
+                       swaps_per_s=lod.swaps_per_s,
+                       mode=str(lod.mode).strip().lower(),
+                       radius_m=float(lod.detail_radius_km) * 1000.0,
+                       hide_m=lod.hide_m,
+                       livery=str(lod.livery).strip().lower())
+        self._ai_liveries_asked = False
+        # The schedule changes the traffic's day as well as the models:
+        # departures board before they call, arrivals hold their stand.
+        self.traffic.schedule = self.lod.scheduled
+        # The test tools (traffic.debug), all off by default. time_scale
+        # shortens the turnaround and the schedule's booking and boarding.
+        debug = self.config.traffic.debug
+        self.time_scale = max(0.01, float(debug.time_scale or 1.0))
+        self.traffic.boarding_s = max(0.0, float(lod.boarding_s)) / self.time_scale
+        self.traffic.boarding_lead_s = (max(0.0, float(lod.boarding_lead_s))
+                                        / self.time_scale)
+        self._status_at = 0.0
+        self._motion_status_at = 0.0
+        self.simtraffic.on_swapped = self._model_swapped
+        self.simtraffic.on_removed = self._model_removed
+        # A departure asks for taxi only once its doors are read shut.
+        self.traffic.can_push = self._may_push
+        # A test setting: every invented aeroplane is one of these types.
+        # traffic.debug.force_types, or the older traffic.debug_force_types.
+        self.traffic.force_types = tuple(
+            str(code).strip().upper() for code in
+            (debug.force_types or self.config.traffic.debug_force_types or [])
+            if str(code).strip())
+        if self.traffic.force_types:
+            log.info("traffic.debug: every invented aeroplane is one of %s",
+                     ", ".join(self.traffic.force_types))
         # And the aeroplanes somebody else put there, which is the other half
         # of the same question: what is actually on this airport.
-        self.simwatch = SimAircraft(
+        # Read whether or not this program draws aeroplanes of its own: a
+        # pilot who has switched the invented traffic off still has FSLTL
+        # running, and the controller has to see it.
+        self.simwatch = SimAircraft(enabled=self.config.traffic.from_simulator)
+        # And the ramp around the aeroplanes this program parks: who calls
+        # on them and when is decided here, and drawn by the simulator.
+        # Passengers and their buses are GSX's people and GSX's bus: without
+        # GSX Pro there is nobody to walk, and an aeroplane's stairs held
+        # for a bus that never comes would only keep its tug waiting.
+        handling_config = self.config.traffic.handling
+        gsx = gsx_installed()
+        visible = (max(0, int(handling_config.passengers_visible))
+                   if handling_config.passengers and gsx else 0)
+        if handling_config.passengers and not gsx:
+            log.info("traffic.handling.passengers is on, but GSX Pro is not "
+                     "installed: there is nobody to walk, so no buses")
+        self.handling = Handling(seed=self.config.traffic.seed or None,
+                                 limit=self.config.traffic.handling_limit,
+                                 schedule=self.lod.scheduled,
+                                 time_scale=self.time_scale,
+                                 passengers=visible,
+                                 baggage=bool(handling_config.baggage))
+        self._handling_raised = False
+        self.simvehicles = SimVehicles(
             enabled=self.config.traffic.enabled
-            and self.config.traffic.from_simulator,
+            and self.config.traffic.in_simulator
+            and self.config.traffic.handling.enabled
+            and self.config.traffic.handling.vehicles,
+            # The turnaround keeps the budget; this is the ceiling under
+            # it, with room for the tugs the turnaround lets through over
+            # the budget (see Handling._admit).
+            limit=self.config.traffic.handling_limit + 4,
+            dll_path=self.config.sim.simconnect_dll,
+            prefer_gsx=self.config.traffic.handling.gsx_vehicles
+            and gsx,
+            # Two buses and their passengers, with room for the ones still
+            # walking off as the next appear.
+            people=visible > 0 or bool(handling_config.baggage),
+            # Two buses and their passengers, two trains (a tractor, two
+            # carts and at most two bags on a belt), and room for the ones
+            # still going as the next appear.
+            people_limit=Handling.BUSES * (visible + 1) + Handling.TRAINS * 5 + 6,
         )
+        if self.simvehicles.prefer_gsx:
+            log.info("GSX Pro is installed: its vehicles serve this "
+                     "program's traffic where the simulator lists them")
+        # And the aeroplanes' own doors, opened with the stairs and the
+        # loaders and read shut before anything pushes.
+        self.simdoors = SimDoors(
+            enabled=self.config.traffic.enabled
+            and self.config.traffic.in_simulator
+            and self.config.traffic.handling_doors,
+            table=DoorTable.load(self.config.traffic.doors_table),
+            force_after_s=self.config.traffic.doors_force_after_s,
+        )
+        # And their engines and lights (wilcoatc.atc.systems decides,
+        # this makes the simulator agree).
+        # And where each model's doors are, which is where the vehicles go.
+        self.servicepoints = SimServicePoints(
+            enabled=self.config.traffic.enabled
+            and self.config.traffic.in_simulator
+            and self.config.traffic.handling.enabled)
+        self._service_layout = load_layout()
+        self._stairs_said: set[tuple[str, str, str]] = set()
+        self.simsystems = SimSystems(
+            enabled=self.config.traffic.enabled
+            and self.config.traffic.in_simulator
+            and self.config.traffic.engines_and_lights)
 
         self.source: StateSource = ManualSource()
         self.state = AircraftState()
         self.session: FlightSession | None = None
         # The last SimBrief plan loaded, if any.
         self.plan = None
+        # The filed route as a line on the chart (atc/route.py): from the
+        # SimBrief plan, or a flight plan file. None is a flight with no plan,
+        # worked by distance to the airport as before.
+        self.route = None
+        # The leg the aeroplane was last found on, and where, for the panel.
+        self.route_progress = None
         # How the landing went, and the flight against the plan's schedule.
         # Read through a callable so a plan loaded mid-flight still counts.
         self.landing = LandingMonitor(plan=lambda: self.plan)
@@ -364,6 +565,8 @@ class Engine:
         self.human: Any = None
         self._last_com1 = 0.0
         self._reported_empty = 0.0
+        # (frequency, since when) of an empty COM1 not yet explained.
+        self._empty_pending: tuple[float, float] | None = None
         self._reported_assumed = 0.0
         # The simulator link, watched rather than assumed. Connecting once at
         # startup is not enough: the panel is usually opened before the sim
@@ -383,6 +586,9 @@ class Engine:
         self._was_paused = False
         # The language each frequency is being worked in (_frequency_language).
         self._languages_by_frequency: dict[str, str] = {}
+        # When a controller last spoke, so a bare "say again" after them is
+        # theirs and not the first officer's (answer_the_aeroplane).
+        self._atc_said_at = 0.0
         # The debounced on-ground flag (see _debounced_ground).
         self._ground_seen: bool | None = None
         self._ground_disagrees = 0
@@ -406,6 +612,10 @@ class Engine:
         # The traffic goes quiet for a moment after anybody else transmits, so
         # two aeroplanes are never heard talking over each other.
         self._frequency_clear_at = 0.0
+        # An answer decided while the frequency was busy with somebody
+        # else's exchange, said once it is over: (reply, station, language,
+        # when it was held).
+        self._held_reply = None
         # What the other aeroplanes have said but has not reached the speakers
         # yet, in the order they said it.
         self._traffic_queue: list = []
@@ -438,6 +648,141 @@ class Engine:
         self.emit("info", f"Landing: {report.describe()}", key="log.landing",
                   fpm=int(round(report.fpm)), score=report.score)
 
+    def _frequency_for(self, name: str):
+        """(callsign, MHz) of the station whose name the pilot asked about,
+        within reach, or None."""
+        from .atc.interphone import fold
+
+        state = self.state
+        if not state.has_position or not name:
+            return None
+        wanted = fold(name).split()
+        best = None
+        for station in self.navdb.all_stations_near(
+                state.latitude, state.longitude, 120.0):
+            if station.position == "ATIS":
+                continue
+            called = fold(f"{station.callsign} {station.facility} "
+                          f"{station.description}")
+            hits = sum(1 for w in wanted if w in called.split())
+            if hits and (best is None or hits > best[0]
+                         or (hits == best[0]
+                             and station.distance_nm < best[1].distance_nm)):
+                best = (hits, station)
+        if best is None:
+            return None
+        return best[1].callsign, best[1].mhz
+
+    def _distance_to_field(self):
+        """(name, nautical miles) to where the flight is going, or None."""
+        session, state = self.session, self.state
+        if session is None or not state.has_position:
+            return None
+        airport = session.destination or self._field_below()
+        if airport is None:
+            return None
+        name = getattr(airport, "name", "") or airport.ident
+        return (name.split(" ")[0].title() if name else airport.ident,
+                state.distance_to(airport.lat, airport.lon))
+
+    def first_officer_call(self, kind: str) -> tuple[str, str]:
+        """The one call the pilot handed over: its words, or "" and why not.
+
+        Built with the same PilotSpeech the AI readback uses, so the
+        controller reads it as it reads the pilot's. A readback is made only
+        when it is what was handed over: a clearance addressed to the pilot
+        is theirs to read back.
+        """
+        from .atc.copilot import readback as build_readback
+        from .atc.pilot import PilotSpeech
+
+        session = self.session
+        station = self.station or self._current_station()
+        if session is None or station is None:
+            return "", "no station"
+        spoken = self._language_for(station.ident, self.last_language)
+        p = self.brain.for_station(station, spoken)
+        speech = PilotSpeech(spoken, p)
+        aircraft = session.aircraft
+        name = station.callsign_in(spoken)
+        pending = session.pending
+        if kind == "readback":
+            if pending is None or pending.read_back:
+                return "", "nothing to read back"
+            handoff = session.handoff_pending
+            return build_readback(
+                pending, aircraft, p, spoken,
+                station_name=(handoff.callsign_short if handoff is not None
+                              else "")), ""
+        if pending is not None and not pending.read_back:
+            return "", "readback"
+        phase = session.phase
+        if kind == "any":
+            if phase in (Phase.PREFLIGHT, Phase.CLEARED) and session.ifr \
+                    and not session.clearance_issued:
+                kind = "clearance"
+            elif phase in (Phase.PREFLIGHT, Phase.CLEARED, Phase.PUSHBACK,
+                           Phase.TAXI_OUT):
+                kind = "taxi"
+            elif phase in (Phase.HOLDING_SHORT, Phase.LINED_UP):
+                kind = "ready"
+            else:
+                return "", "which"
+        if kind == "clearance":
+            destination = session.destination
+            return speech.request_clearance(
+                aircraft, name, getattr(destination, "name", "")
+                or getattr(destination, "ident", "")), ""
+        if kind == "taxi":
+            if station.position not in ("GND", "INFO", "CTAF", "UNICOM",
+                                        "RDO", "AFIS"):
+                has_ground = any(s.position == "GND"
+                                 for s in self.navdb.stations(station.ident))
+                if has_ground:
+                    return "", "not_on:ground"
+            return speech.request_taxi(aircraft, name), ""
+        if kind == "ready":
+            return speech.ready_for_departure(
+                aircraft, session.departure_runway or ""), ""
+        if kind in ("downwind", "base", "final"):
+            return speech.circuit_report(aircraft, p.leg(kind)), ""
+        if kind == "vacated":
+            return speech.runway_vacated(aircraft), ""
+        return "", "which"
+
+    def first_officer_transmits(self, text: str) -> None:
+        """The first officer's call on the frequency: shown as theirs, and
+        through the ordinary path so the controller checks it."""
+        station = self.station or self._current_station()
+        spoken = self._language_for(station.ident if station else "",
+                                    self.last_language)
+        self.emit("pilot", text, "First officer")
+        try:
+            self.handle_text(text, spoken, speaker="first_officer")
+        except Exception:
+            log.debug("the first officer's call failed", exc_info=True)
+
+    def _where_in_the_circuit(self):
+        """Where the circuit puts the aeroplane, for the first officer's
+        "downwind", "base", "final, runway 24, cleared": the controller's own
+        circuit for the field and runway, so the two never disagree. None on
+        the ground, or with nothing to place it by."""
+        session, state = self.session, self.state
+        if session is None or state is None or state.on_ground \
+                or not state.has_position:
+            return None
+        runway = session.arrival_runway or session.departure_runway
+        airport = session.destination or self._field_below()
+        if not runway or airport is None:
+            return None
+        try:
+            circuit = self.brain._circuit_at(session, airport, runway)
+            return self.brain._where_in(circuit, state)
+        except Exception:
+            log.debug("could not place the aeroplane in the circuit",
+                      exc_info=True)
+            return None
+
     def _field_below(self):
         """The airport the aeroplane is at, if it is at one.
 
@@ -455,9 +800,10 @@ class Engine:
     # ------------------------------------------------------------------
 
     def _base_phraseology(self) -> Phraseology:
-        dialect = self.config.atc.dialect
+        # The brain's fallback, for a station with no field. Each controller
+        # is built for its own station (ControllerBrain.for_station).
         return Phraseology(
-            "faa" if dialect in ("auto", "faa") else "icao",
+            FlightProfile.of(self.config.flight).dialect_for(""),
             strict_icao_digits=self.config.atc.strict_icao_digits,
         )
 
@@ -511,6 +857,28 @@ class Engine:
         except Exception:
             log.debug("warming after a download raised", exc_info=True)
 
+    def use_cloned_voices(self) -> None:
+        """The cloned voices were asked for from the window, and have arrived.
+
+        Asking for them is the pilot's choice of engine, made the only way a
+        pilot without a text editor can make it, so it is written to
+        ``config.yaml`` and survives a restart. The synthesiser is switched
+        in place (:meth:`Synthesizer.use_engine`), because nothing that is
+        downloaded requires a restart to take effect.
+        """
+        voice = self.config.voice
+        if voice.engine != "chatterbox":
+            voice.engine = "chatterbox"
+            try:
+                self.config.save()
+            except Exception as exc:
+                log.warning("could not write config.yaml: %s", exc)
+        self.synth.use_engine(voice.engine, gpu=voice.gpu,
+                              hq_model=voice.hq_model,
+                              hq_takes=voice.hq_takes)
+        self.synth.verify_with(self.recognizer)
+        self.voices_installed()
+
     def load_flight_plan(self, username: str = "") -> str:
         """Fill the flight in from the latest SimBrief plan.
 
@@ -526,6 +894,37 @@ class Engine:
                   key="log.simbrief", detail=plan.described)
         return plan.described
 
+    def load_plan_on_start(self) -> None:
+        """The latest SimBrief plan, when the pilot asked for it at startup.
+
+        The same path as the panel's button (:meth:`load_flight_plan`), on a
+        thread of its own because it is a network fetch and the radio must
+        not wait for it. The session is begun again with what it filled in,
+        exactly as a change to the flight on the screen does.
+        """
+        self._plan_thread = None
+        simbrief = self.config.simbrief
+        if not (simbrief.load_on_start and simbrief.username.strip()):
+            return
+
+        def fetch() -> None:
+            from .integrations.simbrief import SimBriefError
+
+            try:
+                self.load_flight_plan(simbrief.username.strip())
+            except SimBriefError as why:
+                self.emit("warning", f"SimBrief: {why}",
+                          key="log.simbrief_failed", detail=str(why))
+                return
+            except Exception as exc:
+                log.warning("SimBrief at startup failed: %s", exc)
+                return
+            self.begin_session()
+
+        self._plan_thread = threading.Thread(
+            target=fetch, name="WilcoATC-simbrief", daemon=True)
+        self._plan_thread.start()
+
     def apply_flight_plan(self, plan) -> None:
         """Fill the flight in from a parsed plan."""
         flight = self.config.flight
@@ -537,11 +936,21 @@ class Engine:
         flight.destination = plan.destination
         if plan.cruise_altitude_ft:
             flight.cruise_altitude_ft = plan.cruise_altitude_ft
-        # A filed plan says which rules it was filed under, and it outranks
-        # the setting: a pilot who has loaded a flight plan has said more
-        # about this flight than the config file ever did.
-        flight.ifr = plan.ifr
+        # A filed plan that says which rules it was filed under outranks the
+        # setting: a pilot who has loaded a flight plan has said more about
+        # this flight than the config file ever did. One that does not say
+        # leaves the pilot's choice alone -- it used to make every such plan
+        # IFR, whatever the pilot of a VFR flight had chosen.
+        if plan.ifr is not None:
+            flight.ifr = plan.ifr
         self.plan = plan
+        from .atc.route import from_ofp
+
+        self.use_route(from_ofp(plan))
+        # The route's fixes, which are what a centre grants a direct to.
+        from .integrations.simbrief import route_fixes
+
+        self.brain.plan_fixes = route_fixes(plan)
         # The planned runways and SID, which the controllers use while the
         # wind allows them.
         self.brain.plan_runways = {}
@@ -570,13 +979,65 @@ class Engine:
         # Reading is attached whichever way the writing goes: a pilot who has
         # switched the injected traffic off still has FSLTL running.
         watching = self.simwatch.attach(simconnect)
+        # The stands are not set out until the simulator has said what is
+        # already standing on them (or has had its chance to).
+        self.traffic.await_observed = watching
         self.use_fsltl_liveries()
         # Logged rather than shown. "FSLTL is running and the controller is
         # not seeing it" has four possible causes and none of them is
         # something a pilot can act on from the panel, so it goes where
         # somebody reporting the problem will find it.
         log.info("%s", self.simwatch.describe())
-        return self.simtraffic.attach(simconnect) or watching
+        drawing = self.simtraffic.attach(simconnect)
+        if drawing:
+            self._read_ai_liveries()
+            # Nothing to handle unless the aeroplanes are drawn.
+            self.simvehicles.attach(simconnect)
+            self.simdoors.attach(simconnect)
+            self.simsystems.attach(simconnect)
+            self.servicepoints.attach(simconnect)
+            log.info("%s", self.simdoors.describe())
+        return drawing or watching
+
+    # How long the simulator is given to list its aircraft and liveries.
+    # A running 2024 lists six thousand in a second or two.
+    AI_LIVERIES_S = 20.0
+
+    def _read_ai_liveries(self) -> None:
+        """Learn which airlines the simulator's own AI models are painted
+        for, on a worker, once per session.
+
+        Until it answers -- and for ever, on a library without the call --
+        the detailed models are drawn in their default livery, as they
+        always were.
+        """
+        if self.simtraffic.ai_liveries is not None or self._ai_liveries_asked:
+            return
+        self._ai_liveries_asked = True
+        from .integrations.ailiveries import AiLiveries
+        from .integrations.groundvehicles import enumerate_simobjects
+
+        def read() -> None:
+            try:
+                pairs = enumerate_simobjects(
+                    2, self.config.sim.simconnect_dll,
+                    timeout_s=self.AI_LIVERIES_S,
+                    name=b"WilcoATC liveries")
+            except Exception:
+                log.info("listing the simulator's aircraft raised",
+                         exc_info=True)
+                return
+            if not pairs:
+                log.info("the simulator did not list its aircraft; the "
+                         "detailed models keep their default livery")
+                return
+            found = AiLiveries.from_pairs(pairs)
+            self.simtraffic.ai_liveries = found
+            log.info("AI liveries: %d models painted for airlines, out of "
+                     "%d aircraft listed", len(found), len(pairs))
+
+        threading.Thread(target=read, name="WilcoATC-ai-liveries",
+                         daemon=True).start()
 
     def use_fsltl_liveries(self) -> bool:
         """Paint the traffic in its airlines' colours, if FSLTL is here.
@@ -696,6 +1157,10 @@ class Engine:
     def start(self, connect_sim: bool = True) -> None:
         """Connect everything and begin the situation loop."""
         self.player.start()
+        # The simulator's runways kept from earlier sessions, ahead of the
+        # database's (navdata/runway_cache.py). Here and not in __init__, so
+        # an engine a test builds reads the database whatever is cached.
+        self._use_runway_cache()
 
         self._sim_wanted = bool(connect_sim and self.config.sim.enabled)
         if self._sim_wanted and not self.attach_simulator():
@@ -709,6 +1174,8 @@ class Engine:
             self.cabin.start()
         self.refresh_state()
         self.begin_session()
+        self.load_plan_on_start()
+        self.start_live_feed()
         self.emit("info", self.understanding.describe(),
                   key=("set.rules_plus" if self.understanding.model_available
                        else "set.rules_only"),
@@ -723,6 +1190,19 @@ class Engine:
         )
         self._situation_thread.start()
 
+    def _ptt_controller_lost(self, controller) -> None:
+        """The push-to-talk controller was unplugged mid-session. Said, not
+        left silently dead: a pilot pressing a button that does nothing
+        would otherwise think the radio had failed."""
+        self.emit("warning", f"Push-to-talk: {controller.name} was "
+                  "disconnected.", key="log.ptt_controller_lost",
+                  name=controller.name)
+
+    def _ptt_controller_back(self, controller) -> None:
+        self.emit("info", f"Push-to-talk: {controller.name} is connected "
+                  "again.", key="log.ptt_controller_back",
+                  name=controller.name)
+
     def _start_ptt(self) -> None:
         mode = self.config.ptt.mode
         if mode == "none":
@@ -731,13 +1211,18 @@ class Engine:
             if mode == "joystick":
                 self._ptt = JoystickPushToTalk(
                     joystick_index=self.config.ptt.joystick_index,
+                    joystick_id=self.config.ptt.joystick_id,
+                    joystick_name=self.config.ptt.joystick_name,
                     button=self.config.ptt.joystick_button,
                     on_press=self.begin_transmission,
                     on_release=self.end_transmission,
+                    on_lost=self._ptt_controller_lost,
+                    on_back=self._ptt_controller_back,
                 )
             else:
                 self._ptt = PushToTalk(
                     key=self.config.ptt.key,
+                    scan_code=self.config.ptt.scan_code,
                     on_press=self.begin_transmission,
                     on_release=self.end_transmission,
                 )
@@ -745,16 +1230,33 @@ class Engine:
             # The label goes inside a translated sentence, so it is the bare
             # key or button rather than an English phrase around one.
             if mode == "joystick":
-                label = (f"joystick {self.config.ptt.joystick_index} "
-                         f"button {self.config.ptt.joystick_button}")
+                controller = getattr(self._ptt, "controller", None)
+                stick = controller.name if controller is not None \
+                    else str(self.config.ptt.joystick_index)
+                label = f"{stick} button {self.config.ptt.joystick_button}"
                 self.emit("info", f"Push to talk: hold {label}.",
-                          key="log.ptt_button",
-                          stick=str(self.config.ptt.joystick_index),
+                          key="log.ptt_button", stick=stick,
                           button=str(self.config.ptt.joystick_button))
             else:
                 label = f"the {self.config.ptt.key} key"
                 self.emit("info", f"Push to talk: hold {label}.",
                           key="log.ptt", key_name=self.config.ptt.key)
+        except ControllerMissing as exc:
+            # The controller it is set to is not plugged in. Said by name,
+            # in the pilot's language; it is picked up when it arrives only
+            # by setting it again, so the panel's list is where to go.
+            self.emit("error", f"Push-to-talk: {exc.wanted} is not connected.",
+                      key="log.ptt_controller_missing", name=exc.wanted)
+            self._ptt = None
+        except ControllersUnavailable as exc:
+            if exc.reason == "missing":
+                self.emit("error", "Joystick support is missing from this "
+                          "installation. Please report it.",
+                          key="log.ptt_joystick_missing")
+            else:
+                self.emit("error", f"Push-to-talk unavailable: {exc.reason}",
+                          key="log.ptt_failed", detail=exc.reason)
+            self._ptt = None
         except Exception as exc:
             self.emit("error", f"Push-to-talk unavailable: {exc}",
                        key="log.ptt_failed", detail=exc)
@@ -772,7 +1274,8 @@ class Engine:
         without a simulator carries on rather than losing its position to a
         half-built connection.
         """
-        sim = SimConnectSource(poll_interval=self.config.sim.poll_interval_s)
+        sim = SimConnectSource(poll_interval=self.config.sim.poll_interval_s,
+                               dll_path=self.config.sim.simconnect_dll)
         if not sim.connect():
             sim.close()
             return False
@@ -911,8 +1414,140 @@ class Engine:
         self.end_transmission()
         self._start_ptt()
 
+    # ------------------------------------------------------------------
+    # the real aeroplanes round the pilot (integrations/adsb.py)
+    # ------------------------------------------------------------------
+
+    live_feed = None
+    _live_said: tuple = ("", "")
+    _live_down_said = False
+
+    def start_live_feed(self, run: bool = True):
+        """Start asking the ADS-B sources, when the pilot has switched live
+        traffic on and this program flies the traffic. With FSLTL flying it
+        (traffic.source) the feed is never asked: the two together would put
+        a second copy of every real flight in the sky."""
+        from .integrations import adsb
+        from .integrations.fsltl import traffic_source
+
+        live = self.config.traffic.live
+        if not live.enabled or self.live_feed is not None:
+            return None
+        source = traffic_source(self.config.traffic)
+        if source != "wilcoatc":
+            decision("live_feed", event="not started", source=source,
+                     why="traffic.source: FSLTL flies the traffic")
+            self.emit("info", "Live traffic stays off: FSLTL flies the "
+                      "traffic (Settings, Traffic).", key="log.live_fsltl")
+            return None
+        from .paths import data_dir
+
+        feed = adsb.Feed(sources=adsb.sources_for(live.own_url),
+                         radius_nm=live.radius_nm)
+        book = (adsb.FlightBook(data_dir() / "adsb_cache.json")
+                if live.routes else None)
+        self.live_feed = adsb.LiveFeedThread(feed, book, self._live_centre,
+                                             poll_s=live.poll_s)
+        decision("live_feed", event="started", radius_nm=feed.radius_nm,
+                 poll_s=self.live_feed.poll_s,
+                 sources=[s.name for s in feed.sources])
+        if run:
+            self.live_feed.start()
+        return self.live_feed
+
+    def _take_observed(self, session) -> None:
+        """Hand the traffic everything somebody else flies: the simulator's
+        aeroplanes (FSLTL, AIG, its own) and the real ones from the live feed,
+        in one list, because set_observed finishes the strip of anything it
+        is not given."""
+        self.simwatch.enabled = self.config.traffic.from_simulator
+        seen: list = []
+        if self.config.traffic.from_simulator:
+            self.simwatch.own_callsign = session.aircraft.callsign.written
+            try:
+                seen = list(self.simwatch.poll() or ())
+            except Exception:
+                log.debug("could not read the simulator's traffic",
+                          exc_info=True)
+        live = self._live_seen()
+        if not self.config.traffic.from_simulator and self.live_feed is None:
+            return
+        try:
+            self.traffic.set_observed(seen + live, time.monotonic())
+        except Exception:
+            log.debug("could not take the observed traffic", exc_info=True)
+        if self.config.traffic.from_simulator:
+            self._say_observed()
+
+    live_roster = None
+
+    def _live_seen(self) -> list:
+        """The live flights for this moment (atc/live.py): the feed's last
+        answer carried on, held through a quiet minute, then only an arrival
+        on final, landed by us."""
+        if self.live_feed is None:
+            return []
+        from .atc.live import LiveRoster
+
+        if self.live_roster is None:
+            live = self.config.traffic.live
+            self.live_roster = LiveRoster(live.fallback_after_s,
+                                          delay_s=live.live_delay_s)
+            roster = self.live_roster
+            # How our tower holds one short of the pilot's runway, or has it
+            # give way, and lets it go (TrafficInjector._protect_the_pilot).
+            self.traffic.hold_live = lambda hex_, on: (
+                roster.hold(hex_, time.time()) if on
+                else roster.release(hex_, time.time()))
+        feed = self.live_feed
+        self.live_roster.update(feed.flights, feed.answered_wall, feed.routes)
+        field = self.traffic.field if self.traffic.field.ident else None
+        seen = self.live_roster.seen(time.time(), field)
+        source = feed.state.source
+        for one in seen:
+            one.feed = source
+        return seen
+
+    def _live_centre(self):
+        """Where the feed asks round: the aeroplane, else the field it is
+        departing; nothing (and nothing sent) before either is known."""
+        state = self.state
+        if state is not None and state.has_position:
+            return state.latitude, state.longitude
+        field = self.session.departure if self.session is not None else None
+        if field is not None:
+            return field.lat, field.lon
+        return None
+
+    def _watch_live_feed(self) -> None:
+        """A row each time the feed's state or source changes, and the
+        outage said once, on the panel, in the pilot's language."""
+        if self.live_feed is None:
+            return
+        from .integrations.adsb import DOWN
+
+        state = self.live_feed.state
+        now = (state.status, state.source)
+        if now == self._live_said:
+            return
+        self._live_said = now
+        decision("live_feed", event="state", status=state.status,
+                 source=state.source, count=state.count, age_s=state.age_s,
+                 resting=[list(r) for r in state.resting],
+                 dropped=list(state.dropped))
+        if state.status == DOWN and not self._live_down_said:
+            self._live_down_said = True
+            self.emit("warning", "Live traffic: no source answering, invented "
+                      "traffic in use.", key="log.live_down")
+        elif state.status != DOWN and self._live_down_said and state.source:
+            self._live_down_said = False
+            self.emit("info", f"Live traffic is back, from {state.source}.",
+                      key="log.live_back", source=state.source)
+
     def stop(self) -> None:
         self._stop.set()
+        if self.live_feed is not None:
+            self.live_feed.stop()
         self.cabin.stop()
         if self._ptt is not None:
             self._ptt.stop()
@@ -921,6 +1556,10 @@ class Engine:
         self.player.stop()
         # Take the injected aeroplanes back out before the connection goes, or
         # they are left sitting in the simulator with nobody flying them.
+        self.simvehicles.detach()
+        self.simdoors.detach()
+        self.simsystems.detach()
+        self.servicepoints.detach()
         self.simtraffic.detach()
         self.simwatch.detach()
         self.facilities.close()
@@ -951,10 +1590,47 @@ class Engine:
                                 airport.lat, airport.lon)
         return distance <= self.DEPARTURE_TOLERANCE_NM
 
+    def use_region(self) -> None:
+        """A region pinned or unpinned on the screen, from the next
+        transmission, without rebuilding the flight."""
+        profile = FlightProfile.of(self.config.flight)
+        self.brain.profile = profile
+        self.traffic.profile = profile
+        if self.session is not None:
+            self.session.profile = profile
+
+    def _rules_for(self, flight) -> bool:
+        """The rules a rebuilt session flies under.
+
+        Every save of the flight, every reconnection of the simulator and
+        every setting under ``flight`` rebuilds the session, and each one
+        used to put the rules back to the setting -- so a VFR release, or
+        "IFR" said on the radio, lasted until the pilot next pressed Save.
+        What the radio changed is kept unless the setting itself has moved
+        since the session was built, which is the pilot changing them.
+        """
+        old = self.session
+        if old is not None and old.ifr_setting == flight.ifr:
+            return old.ifr
+        return flight.ifr
+
     def begin_session(self) -> FlightSession:
         """Build the flight session from the sim state and the config."""
         flight = self.config.flight
-        raw_callsign = flight.callsign or self.state.callsign or "N123AB"
+        profile = FlightProfile.of(flight)
+        self.brain.profile = profile
+        self.traffic.profile = profile
+        # Whether this is an airline flight is the pilot's to say. In general
+        # aviation the simulator's airline-and-flight-number callsign is the
+        # livery's, not the flight's, so it is the tail -- unless the pilot
+        # typed a company callsign themselves (an EJA123 business jet).
+        if profile.airliner:
+            raw_callsign = flight.callsign or self.state.callsign or "N123AB"
+            as_airline = True
+        else:
+            raw_callsign = (flight.callsign or self.state.tail_number
+                            or self.state.callsign or "N123AB")
+            as_airline = bool(flight.callsign)
 
         # The aircraft type follows the simulator, not the config file.
         #
@@ -1029,7 +1705,8 @@ class Engine:
         # it the American way.
         alternatives = every_language(
             raw_callsign, type_code,
-            dialect=dialect_for(departure.ident if departure else ""))
+            dialect=profile.dialect_for(departure.ident if departure else ""),
+            airline=as_airline)
         callsign = alternatives["en"]
         aircraft = Aircraft(callsign, type_code, wake_suffix(type_code),
                             callsigns=alternatives)
@@ -1044,7 +1721,9 @@ class Engine:
             destination=destination,
             destination_input=flight.destination,
             cruise_altitude_ft=float(flight.cruise_altitude_ft or 0),
-            ifr=flight.ifr,
+            ifr=self._rules_for(flight),
+            ifr_setting=flight.ifr,
+            profile=profile,
         )
         session.phase = Phase.PREFLIGHT if self.state.on_ground else Phase.ENROUTE
         self.session = session
@@ -1059,6 +1738,7 @@ class Engine:
         self.departures.began()
         self._centre_looked_at = 0.0
         self._centre_checked_at = 0.0
+        self._sector_noted = None
 
         where = departure.ident if departure else "an unknown field"
         self.emit(
@@ -1072,7 +1752,106 @@ class Engine:
         )
         if departure is not None:
             self.follow_languages(departure.ident, announce=True)
+        self.route_progress = self.brain.route_progress = None
+        if not self.route and session.ifr:
+            # Said, because every distance the controller uses is then to the
+            # airport's reference point rather than along a route.
+            decision("route", event="none",
+                     why="no flight plan loaded: distances are to the airport")
         return session
+
+    def use_route(self, route) -> None:
+        """Take a route as the flight's, and say so in the transcript."""
+        self.route = route if route else None
+        self.brain.route = self.route
+        self.route_progress = self.brain.route_progress = None
+        if self.route is None:
+            decision("route", event="none", source=getattr(route, "source", ""),
+                     why="the plan has fewer than two placed fixes")
+            return
+        decision("route", event="loaded", source=route.source,
+                 route=route.described(), fixes=len(route.fixes),
+                 sid=route.sid, sid_runway=route.sid_runway, star=route.star,
+                 star_runway=route.star_runway, approach=route.approach,
+                 cruise_ft=route.cruise_ft,
+                 toc=getattr(route.top_of_climb, "ident", ""),
+                 tod=getattr(route.top_of_descent, "ident", ""),
+                 floor_ft=route.arrival_floor_ft or 0,
+                 notes=list(route.notes))
+
+    def load_route_file(self, path) -> str:
+        """A simulator flight plan (``.pln``) on disk as the flight's route."""
+        from pathlib import Path
+
+        return self.load_route_text(
+            Path(path).read_text(encoding="utf-8-sig", errors="replace"))
+
+    def load_route_text(self, text: str) -> str:
+        """A simulator flight plan (``.pln``) as the flight's route: the
+        file's text, which is what the panel's button sends.
+
+        Each fix the file does not place itself is asked of the simulator,
+        then of the database (atc/route.py ``resolver``); what neither knows
+        is listed in the route's notes. Returns the route, described. Raises
+        :class:`NotAFlightPlan` for a file that is not one, so the panel can
+        say so in the pilot's language rather than show a parser's error.
+        """
+        from xml.etree.ElementTree import ParseError
+
+        from .atc.route import from_pln, resolver
+
+        sim = None
+        if self.config.sim.enabled:
+            from .integrations.fixes import SimFixes
+
+            sim = SimFixes(self.config.sim.simconnect_dll)
+        departure = self.navdb.airport(self.config.flight.departure or "")
+        near = (departure.lat, departure.lon) if departure else None
+        try:
+            route = from_pln(text, resolver(self.navdb, sim, near=near))
+        except ParseError as exc:
+            raise NotAFlightPlan(str(exc)) from exc
+        if not (route.origin or route.destination or route.fixes):
+            raise NotAFlightPlan("no departure, destination or fix")
+        flight = self.config.flight
+        if route.origin:
+            flight.departure = route.origin
+        if route.destination:
+            flight.destination = route.destination
+        if route.cruise_ft:
+            flight.cruise_altitude_ft = route.cruise_ft
+        self.brain.plan_runways = {}
+        if route.origin:
+            self.brain.plan_runways[route.origin] = {
+                "departing": route.sid_runway, "sid": route.sid}
+        if route.destination:
+            self.brain.plan_runways.setdefault(route.destination, {})
+            self.brain.plan_runways[route.destination]["landing"] = \
+                route.star_runway
+        self.use_route(route)
+        if self.session is not None:
+            self.begin_session()
+        return route.described()
+
+    def _follow_route(self, state: AircraftState) -> None:
+        """Where the aeroplane is along the route; a row at each new leg."""
+        route = self.route
+        if not route or state.on_ground:
+            return
+        last = self.route_progress
+        found = route.progress(state.latitude, state.longitude,
+                               state.ground_speed_kt or 0.0,
+                               hint=last.leg if last is not None else 1)
+        if found is None:
+            return
+        self.route_progress = found
+        self.brain.route_progress = found
+        if last is None or found.leg != last.leg:
+            decision("route", event="leg", leg=found.leg_name,
+                     via=found.to_fix.via,
+                     cross_track_nm=round(found.cross_track_nm, 1),
+                     to_go_nm=round(found.to_go_nm, 1),
+                     altitude_ft=round(state.altitude_ft))
 
     # ------------------------------------------------------------------
     # the language follows the aeroplane
@@ -1154,10 +1933,20 @@ class Engine:
 
         sim_weather = (weather_from_sim(self.state)
                        if self.config.weather.prefer_sim else None)
-        if sim_weather is not None and near_the_field(self.state, airport):
+        # A field with no report of its own: in its circuit the simulator's
+        # wind is the only one that is this field's, so it is used in the air
+        # too (in_the_circuit); beyond it, the nearest observation.
+        own_report = (airport is not None and sample.source in ("metar", "cache")
+                      and getattr(sample, "station", "")
+                      == (airport.icao or airport.ident))
+        circuit = (not own_report and sim_weather is not None
+                   and in_the_circuit(self.state, airport))
+        if sim_weather is not None and (near_the_field(self.state, airport)
+                                        or circuit):
             sample = merge_weather(sim_weather, sample,
                                    surface=bool(self.state.on_ground),
-                                   wind=at_the_surface(self.state, airport))
+                                   wind=(at_the_surface(self.state, airport)
+                                         or circuit))
         elif sample.source == "default" and sim_weather is not None:
             # Nothing observed anywhere near. Sea-level pressure is a regional
             # figure and the simulator's is as good as any; its wind and
@@ -1172,6 +1961,10 @@ class Engine:
         # field's.
         weather = replace(sample.weather,
                                       clouds=list(sample.weather.clouds))
+        if not weather.wind_from:
+            weather.wind_from = dict.fromkeys(
+                ("direction", "speed", "gust"),
+                f"{sample.source} {getattr(sample, 'station', '') or ''}".strip())
         if airport is not None:
             # Spoken winds are magnetic; the observation is true.
             weather.variation = variation(airport.lat, airport.lon)
@@ -1216,7 +2009,10 @@ class Engine:
             return online
 
         language = self._language_for(airport_ident, language)
-        key = (airport_ident, language)
+        # The pinned region is the broadcast's too: a pilot who pinned FAA
+        # wording does not get ICAO from the ATIS.
+        region = FlightProfile.of(self.config.flight).region
+        key = (airport_ident, language, region)
         with self._atis_lock:
             if airport_ident in self._atis_stale:
                 self._atis_stale.discard(airport_ident)
@@ -1230,17 +2026,27 @@ class Engine:
             generator = AtisGenerator(
                 self.navdb, airport,
                 phraseology_for(language, airport_ident,
-                                self.config.atc.strict_icao_digits),
+                                self.config.atc.strict_icao_digits,
+                                region=region),
             )
+            # The approach the controller will give: the pilot's own flight's
+            # kept choice when it is landing here, and the field's weather,
+            # so the broadcast says "ILS Zulu" when approach will.
             generator.approach_for = (
                 lambda runway, field=airport: self.brain.approach_for(
-                    None, field, runway))
+                    self.session if self.session is not None
+                    and getattr(self.session.destination, "ident", "")
+                    == field.ident else None,
+                    field, runway, self.weather_for(field.ident)))
             # The runway the controllers are using, flight plan included, so
             # the broadcast never names another.
             generator.runway_for = (
                 lambda weather, departing, field=airport: (
                     self.brain.departure_runway(field, weather) if departing
                     else self.brain.arrival_runway(field, weather)))
+            generator.vfr_briefing = (
+                lambda runway, field=airport, p=generator.phrase:
+                self.brain.atis_briefing(field, runway, p))
             self._atis[key] = generator
             self._ask_for_approaches(airport.ident)
         # Not under an aeroplane on final: a new letter there is a readback
@@ -1253,6 +2059,7 @@ class Engine:
         if report is not before:
             decision("atis", airport=airport_ident, letter=report.letter,
                      language=language, weather=report.weather.source,
+                     wind_from=report.weather.wind_from or None,
                      runways=report.landing_runways[:1],
                      departing=report.departing_runways[:1],
                      approach=report.approach_in_use)
@@ -1390,6 +2197,169 @@ class Engine:
         self._spawned[flight.written] = flight.runway
         return True, flight.written, ""
 
+    def use_gsx_vehicles(self, wanted: bool) -> bool:
+        """GSX Pro's vehicles for the traffic, or the simulator's own, from
+        the panel and without a restart. Returns whether GSX's are now used:
+        never without GSX installed, whatever was asked."""
+        self.config.traffic.handling.gsx_vehicles = bool(wanted)
+        use = bool(wanted) and gsx_installed()
+        self.simvehicles.set_prefer_gsx(use)
+        log.info("ground vehicles: %s", "GSX Pro's" if use
+                 else "the simulator's own")
+        return use
+
+    # -- test tools (traffic.debug) --------------------------------------
+
+    def debug_board_nearest(self) -> tuple[bool, str, str]:
+        """The panel's "board nearest now": the parked aeroplane nearest the
+        pilot boards now. Off unless traffic.debug.triggers."""
+        if not self.config.traffic.debug.triggers:
+            return False, "", "debug_off"
+        if not self.config.traffic.enabled:
+            return False, "", "traffic_off"
+        flight, why = self.traffic.board_nearest(time.monotonic())
+        return flight is not None, flight.written if flight else "", why
+
+    def debug_arrival_nearest(self) -> tuple[bool, str, str]:
+        """The panel's "arrival to nearest stand". Off unless
+        traffic.debug.triggers."""
+        if not self.config.traffic.debug.triggers:
+            return False, "", "debug_off"
+        if not self.config.traffic.enabled:
+            return False, "", "traffic_off"
+        self.traffic.can_invent = self.simtraffic.drawing
+        flight, why = self.traffic.arrival_to_nearest_stand(time.monotonic())
+        return flight is not None, flight.written if flight else "", why
+
+    def _say_traffic_status(self, now: float) -> None:
+        """Every status_every_s, one log line per invented aeroplane, for
+        testing the apron (traffic.debug.status). English, like every log."""
+        debug = self.config.traffic.debug
+        if not debug.status or now - self._status_at < max(
+                1.0, float(debug.status_every_s)):
+            return
+        self._status_at = now
+        try:
+            lines = self.traffic_status(now)
+        except Exception:
+            log.debug("the traffic status raised", exc_info=True)
+            return
+        status_log.info("traffic.debug: %d invented aeroplane(s)", len(lines))
+        for line in lines:
+            status_log.info("  %s", line)
+
+    # How often the motion loop's own figures are logged with the status on.
+    MOTION_STATUS_S = 10.0
+
+    def _say_motion_status(self, now: float) -> None:
+        """Every ten seconds with traffic.debug.status, how the loop that
+        moves the vehicles and the people really ran: its rate, the time a
+        frame took, the actors, the camera, the nearest person's rate, and
+        each frame reader's share. The figures are measured on the message
+        thread and only read here, so the log costs the frame nothing."""
+        if not self.config.traffic.debug.status or                 now - self._motion_status_at < self.MOTION_STATUS_S:
+            return
+        self._motion_status_at = now
+        report = getattr(self.simvehicles, "rates", None)
+        if report is None:
+            return
+        try:
+            line = report()
+        except Exception:
+            log.debug("the motion status raised", exc_info=True)
+            return
+        if line:
+            status_log.info("traffic.debug: %s", line)
+
+    def traffic_status(self, now: float) -> list[str]:
+        """What the status dump says: callsign, type, stand, level, window,
+        each door, and the next thing that happens to it and when."""
+        found = []
+        for position in self.traffic.positions(invented_only=True):
+            callsign = position["callsign"]
+            flight = self.traffic.flight_named(callsign)
+            kind, _ = self.traffic.apron_state(callsign)
+            window = self._apron_window(callsign, kind, now)
+            level = self.simtraffic.target_level(callsign) or "-"
+            stand = "-"
+            if flight is not None:
+                held = (flight.stand if flight.stand is not None
+                        else flight.planned_stand)
+                stand = str(held) if held is not None else "-"
+            found.append(
+                f"{callsign:<9} {position.get('type', ''):<5} stand {stand:<4} "
+                f"{level:<8} {window:<12} doors {self._doors_said(callsign)}"
+                f"  systems {self._systems_said(callsign)}"
+                f"  next: {self._next_event(flight, kind, callsign, now)}")
+        return found
+
+    def _systems_said(self, callsign: str) -> str:
+        """Engines and lights as read back, upper case on: ENG NAV BCN STR
+        TAX LDG; a '>' marks one still wanted the other way."""
+        simsystems = getattr(self, "simsystems", None)
+        object_id = self.simtraffic.object_id(callsign)
+        plan = simsystems.plan(object_id) if simsystems and object_id else None
+        if plan is None or plan.reading is None:
+            return "unread"
+        said = []
+        for name, short in (("engines", "eng"), ("nav", "nav"), ("beacon", "bcn"),
+                            ("strobe", "str"), ("taxi", "tax"), ("landing", "ldg")):
+            on = getattr(plan.reading, name)
+            word = short.upper() if on else short
+            if getattr(plan.goal, name) != on:
+                word += ">"
+            said.append(word)
+        return " ".join(said)
+
+    def _doors_said(self, callsign: str) -> str:
+        object_id = self.simtraffic.object_id(callsign)
+        plan = self.simdoors.plan(object_id) if object_id else None
+        if plan is None:
+            return "none (no door animation, or not drawn)"
+        said = []
+        for role, index in sorted(plan.doors.items()):
+            state = plan.is_open(index)
+            word = ("deaf" if index in plan.deaf else "open" if state is True
+                    else "shut" if state is False else "moving")
+            if plan.goal.get(index) and state is not True:
+                word += ">open"
+            elif not plan.goal.get(index) and state is True:
+                word += ">shut"
+            said.append(f"{role}={word}")
+        return ",".join(said)
+
+    def _next_event(self, flight, kind: str, callsign: str, now: float) -> str:
+        def clock(seconds: float) -> str:
+            seconds = max(0, int(round(seconds)))
+            return f"{seconds // 60}:{seconds % 60:02d}"
+
+        traffic = self.traffic
+        if flight is None:
+            return "-"
+        if kind == "booked":
+            return f"boarding in {clock(flight.boarding_at - now)}"
+        if kind == "boarding":
+            return ("boarded, calls for clearance in "
+                    f"{clock(flight.boarding_at + traffic.boarding_s - now)}")
+        if kind == "departing":
+            tug = self.handling.tug_due_at(callsign)
+            if tug is not None:
+                return f"pushback (tug) in {clock(tug - now)}"
+            if not self.simdoors.can_push(self.simtraffic.object_id(callsign)):
+                return "doors closing, then the tug"
+            return f"waiting for push clearance ({flight.phase})"
+        if kind in ("arrived", "static"):
+            ends = self.handling.arrival_ends_at(callsign)
+            if ends is not None and ends > now:
+                return f"doors shut in {clock(ends - now)}"
+            if kind == "arrived":
+                return "deplaning"
+            return ("parked until booked" if traffic.schedule
+                    else "parked until chosen as a departure")
+        if kind == "arriving":
+            return f"{flight.phase}, {flight.distance_nm:.1f} nm to run"
+        return flight.phase
+
     def _sim_pushback(self) -> bool:
         """The simulator's own tug. Handed to the ground handling as a
         callable so that nothing in ``integrations`` knows what a sim is."""
@@ -1419,38 +2389,71 @@ class Engine:
         if said:
             self.emit("info", said, key="log.ground_handling", detail=said)
 
+    def _room_on_the_channel(self, station: Station | None,
+                             mhz: float) -> Station | None:
+        """Which of a field's radar positions answers a channel they share.
+
+        Centennial's 132.750 is Denver App/Dep, filed twice, and the resolver
+        took the Approach row whoever was calling: the tower sent a
+        departure to Denver Departure and Denver Approach answered it. The
+        position already being worked keeps the channel; then the one the
+        pilot was sent to; then Departure on the way out and Approach on the
+        way in.
+        """
+        if station is None or station.position not in ("APP", "DEP"):
+            return station
+        same = [s for s in self.navdb.stations(station.ident)
+                if s.position in ("APP", "DEP")
+                and same_channel(s.mhz, mhz, 0)]
+        if len({s.position for s in same}) < 2:
+            return station
+        previous = self.station
+        session = self.session
+        handed = session.handoff_pending if session is not None else None
+        for held in (previous, handed):
+            if (held is not None and held.ident == station.ident
+                    and held.position in ("APP", "DEP")
+                    and same_channel(held.mhz, mhz, 0)):
+                return held
+        outbound = session is not None and session.phase.outbound
+        wanted = "DEP" if outbound else "APP"
+        return next((s for s in same if s.position == wanted), station)
+
     def tune(self, mhz: float) -> Station | None:
         """Tune a frequency and work out who is listening."""
         state = self.state
         lat, lon = (state.latitude, state.longitude) if state.has_position else (0.0, 0.0)
         station = self.navdb.resolve_station(mhz, lat, lon, state.altitude_ft)
+        station = self._room_on_the_channel(station, mhz)
 
         previous = self.station
-        same_centre = (station is None or (
-            station.position == "CTR"
-            and station.facility.lower() == previous.facility.lower())
-        ) if previous is not None else False
-        if (same_centre and previous.position == "CTR"
-                and same_channel(mhz, previous.mhz, 4)
-                and station_key(station) != station_key(previous)):
-            # A centre's frequency is filed at one field and counts as
-            # reachable within so many miles of it; the sector is the size of
-            # a country. Looked up again from five hundred miles on -- which
-            # every frequency read from the simulator does -- it resolved to
-            # nobody, and with nobody on the frequency nothing ever handed
-            # the flight on. The centre being worked stays until somebody
-            # else answers on the frequency.
-            #
-            # The same goes for the same centre filed at another field on
-            # the same number -- Minnipa and Wudinna are both Melbourne on
-            # 125.9. Taking the other row made a different station of it, one
-            # the flight had never called, and nothing speaks unprompted to a
-            # station that has not been called.
-            log.info("COM1 %.3f: still %s (%s), resolved here as %s", mhz,
-                     previous.callsign, previous.ident,
-                     station.ident if station else "nobody")
-            station = previous
-        elif station_key(station) != station_key(previous):
+        # A centre answers anywhere in its sector and carries the FIR's
+        # ident whichever field its number is filed at (atc/enroute.py), so
+        # retuning it -- five hundred miles on, or past Minnipa to Wudinna,
+        # both Melbourne on 125.9 -- finds the same station. That used to
+        # take a patch here that kept the old station alive.
+        oceanic = (self.session.oceanic
+                   if self.session is not None else None)
+        if station is None and oceanic is not None:
+            # Over the ocean the flight is with an HF station no COM1 can
+            # tune; the VHF box is left on whatever the pilot likes.
+            station = oceanic
+        handed = (self.session.handoff_pending
+                  if self.session is not None else None)
+        if (handed is not None and handed.position == "CTR" and handed.mhz
+                and same_channel(handed.mhz, mhz, 4)):
+            # The centre the pilot was just sent to, dialled up to four
+            # minutes before its line: the number they were given is theirs,
+            # wherever its sector is drawn from here.
+            station = handed
+            if station_key(handed) != station_key(previous):
+                self.session.with_since = time.monotonic()
+            pending = self.session.pending
+            if (pending is not None and pending.kind == "handoff"
+                    and not pending.read_back):
+                # Switching is as good as reading it back.
+                self.session.clear_pending()
+        if station_key(station) != station_key(previous):
             log.info("COM1 %.3f at %.2f, %.2f: %s -> %s", mhz, lat, lon,
                      previous.callsign if previous else "nobody",
                      station.callsign if station else "nobody listening")
@@ -1463,18 +2466,14 @@ class Engine:
                 self.station = station
 
         if station is None:
-            # Only explain once per frequency: the situation loop re-checks
-            # COM1 several times a second and repeating this would bury
-            # everything else on screen.
-            if round(mhz, 3) != round(self._reported_empty, 3):
-                self._reported_empty = mhz
-                hint = self._nearby_hint(lat, lon, mhz)
-                self.emit(
-                    "info",
-                    f"{mhz:.3f} - nobody is listening on this frequency here."
-                    + hint,
-                    key="log.empty_frequency", mhz=f"{mhz:.3f}", hint=hint,
-                )
+            # Explained by the situation loop once COM1 has stayed here
+            # (``_explain_empty``), not now: a swap passes through the
+            # standby frequency for a moment, and that moment was explained.
+            # By channel: 126.630 after 126.625 is the same empty frequency.
+            if not same_channel(mhz, self._reported_empty, 0) and (
+                    self._empty_pending is None
+                    or not same_channel(self._empty_pending[0], mhz, 0)):
+                self._empty_pending = (round(mhz, 3), time.monotonic())
             # Nobody on frequency does not mean nowhere. The language still
             # follows the aeroplane, so an empty frequency over Germany is
             # listened to in German and English rather than in whatever was
@@ -1483,6 +2482,8 @@ class Engine:
             self._follow_region(state)
             return None
         self._reported_empty = 0.0
+        self._empty_pending = None
+        self._say_invented(station)
 
         # Somebody real may be working this frequency, in which case this
         # program has nothing to do here.
@@ -1503,7 +2504,9 @@ class Engine:
             # difference between a quiet frequency and a broken program: a
             # pilot who tunes one and hears nothing back has no way to tell
             # which of the two they are looking at.
-            elif station.is_controller:
+            # Somebody is there only inside their hours: a closed tower or
+            # information service is as empty as a traffic frequency.
+            elif self.brain.staffed(station):
                 self.emit(
                     "info",
                     f"{mhz:.3f} - {station.callsign} "
@@ -1528,6 +2531,46 @@ class Engine:
             # said on the old one and nobody here would have heard it.
             self._traffic_queue.clear()
         return station
+
+    def _take_the_callsign_heard(self, session: FlightSession,
+                                 text: str) -> bool:
+        """The pilot's own callsign, when it is not the one in the settings.
+
+        At Kortrijk the pilot said "Oscar Oscar Alpha Bravo Charlie" on every
+        call and was answered "Echo Tango Delta two zero four", the ETD204
+        an old flight had left in ``config.yaml``. What the pilot says on the
+        radio is who they are: it is taken for the rest of the session, the
+        strip follows it, and the change is logged with where the old one
+        came from. Only a whole registration near the start of a
+        transmission counts (``callsigns.heard_registration``).
+        """
+        heard = heard_registration(text)
+        if not heard:
+            return False
+        written = session.aircraft.callsign.written
+        if heard.replace("-", "") == written.replace("-", "").upper():
+            return False
+        was_from = ("config.yaml flight.callsign" if self.config.flight.callsign
+                    else "the simulator's ATC ID" if self.state.callsign
+                    else "the default")
+        departure = session.departure
+        # A registration heard is a registration, whatever the profile.
+        alternatives = every_language(
+            heard, session.aircraft.type_code,
+            dialect=session.profile.dialect_for(
+                departure.ident if departure else ""),
+            airline=False)
+        old = session.aircraft
+        session.aircraft = Aircraft(
+            alternatives["en"], old.type_code, old.wake, is_heavy=old.is_heavy,
+            callsigns=alternatives, language=old.language)
+        self.understanding.set_callsign(session.aircraft.variants())
+        decision("callsign_heard", was=written, now=heard, was_from=was_from)
+        self.emit("info", f"Callsign {heard}, as said on the radio "
+                          f"(was {written}, from {was_from}).",
+                  key="log.callsign_heard", callsign=heard, was=written,
+                  source=was_from)
+        return True
 
     # Which position answers an unlisted frequency, by where the flight is.
     _POSITION_FOR_PHASE = {
@@ -1563,6 +2606,14 @@ class Engine:
         distance = haversine_nm(lat, lon, airport.lat, airport.lon)
         if distance > self.config.atc.unpublished_radius_nm:
             return None
+        # Only a field that staffs a position of its own. Kortrijk staffs
+        # none -- an AFIS and nothing else -- and a "Kortrijk Clearance
+        # Delivery" and a "Kortrijk Tower" were invented on 124.850 for it,
+        # the second calling a takeoff there a pilot deviation.
+        if not any((found := self.navdb.station_for(airport.ident, held))
+                   and found.position == held and found.is_controller
+                   for held in ("DEL", "GND", "TWR", "APP", "DEP")):
+            return None
 
         phase = self.session.phase if self.session is not None else Phase.PREFLIGHT
         position = self._POSITION_FOR_PHASE.get(phase, "GND")
@@ -1575,16 +2626,19 @@ class Engine:
             return None
         station = replace(station, distance_nm=distance)
 
-        if round(mhz, 3) != round(self._reported_assumed, 3):
+        if not same_channel(mhz, self._reported_assumed, 0):
             self._reported_assumed = mhz
+            # The command as this installation spells it: there is no
+            # "wilcoatc" program in a shipped build, and that is what the
+            # notice used to tell the pilot to run.
+            how = command_hint(f"freq {airport.ident} --add {position} {mhz:.3f}")
             self.emit(
                 "info",
                 f"{mhz:.3f} is not in the published data for {airport.ident}. "
-                f"Answering as {station.callsign}. To keep it: "
-                f"wilcoatc freq {airport.ident} --add {position} {mhz:.3f}",
+                f"Answering as {station.callsign}. To keep it: {how}",
                 key="log.unpublished", mhz=f"{mhz:.3f}",
                 airport=airport.ident, station=station.callsign,
-                position=position,
+                position=position, command=how,
             )
         return station
 
@@ -1605,50 +2659,75 @@ class Engine:
             "awaiting readback of": session.pending.kind if session.pending else "",
         }
 
-    def _nearby_hint(self, lat: float, lon: float, mhz: float) -> str:
-        """Say what *is* available, rather than leaving the pilot stuck.
+    def _explain_empty(self, now: float | None = None) -> None:
+        """Say that nobody is listening, once COM1 has stayed there.
 
-        A frequency with nobody on it is usually either a typo or a real gap in
-        the open data, and in both cases the useful response is to list the
-        frequencies that do work at the field you are at.
+        Only the active frequency, only once it has been held for
+        ``EMPTY_NOTICE_S``, and once per frequency: the situation loop
+        re-checks COM1 several times a second, and a swap passes through the
+        standby frequency on its way.
         """
-        if not self.state.has_position:
-            return (" No aircraft position available, so no frequency can be "
-                    "resolved. Is the simulator connected?")
+        pending = self._empty_pending
+        if pending is None or self.station is not None:
+            return
+        mhz, since = pending
+        if round(self.state.com1_active or 0.0, 3) != mhz:
+            self._empty_pending = None
+            return
+        now = time.monotonic() if now is None else now
+        if now - since < EMPTY_NOTICE_S:
+            return
+        self._empty_pending = None
+        self._reported_empty = mhz
+        state = self.state
+        lat, lon = (state.latitude, state.longitude) if state.has_position             else (0.0, 0.0)
+        self._say_empty(lat, lon, mhz)
 
-        airport = self.navdb.home_airport(lat, lon) or self.navdb.nearest_airport(
-            lat, lon, max_nm=30.0, min_rank=1
-        )
-        if airport is None:
-            return " No airport within range of your position."
+    def _say_empty(self, lat: float, lon: float, mhz: float) -> None:
+        """What to say about a frequency nobody answers: the field, what it
+        does publish, and the nearest of those when it is a likely mistune.
 
-        stations = self.navdb.stations(airport.ident)
-        if not stations:
-            return f" {airport.ident} publishes no ATC frequencies."
+        One translated line with its values as parameters. It used to be a
+        translated head with an English hint glued on as a parameter, half in
+        each language, and the hint told the pilot to edit a CSV file and
+        run a Python command, which a shipped build has no way to do.
+        """
+        heard = f"{mhz:.3f}"
+        airport = None
+        if self.state.has_position:
+            airport = self.navdb.home_airport(lat, lon)                 or self.navdb.nearest_airport(lat, lon, max_nm=30.0, min_rank=1)
+        stations = self.navdb.stations(airport.ident) if airport else []
+        if airport is None or not stations:
+            self.emit("info",
+                      f"{heard} - nobody is listening on this frequency here.",
+                      key="log.empty_frequency_alone", mhz=heard)
+            return
 
-        order = ["ATIS", "DEL", "GND", "TWR", "DEP", "APP", "CTR", "CTAF"]
+        # Every position a pilot can call, the information services included:
+        # Kortrijk has nothing else, and its list came out empty.
+        order = ["ATIS", "DEL", "GND", "TWR", "DEP", "APP", "CTR",
+                 "INFO", "CTAF", "AWOS"]
         seen: dict[str, float] = {}
         for st in sorted(stations, key=lambda s: (s.priority, s.mhz)):
             if st.position in order and st.position not in seen:
                 seen[st.position] = st.mhz
-        listing = "  ".join(
-            f"{position} {seen[position]:.3f}" for position in order if position in seen
-        )
+        listing = ", ".join(f"{position} {seen[position]:.3f}"
+                            for position in order if position in seen)
+        field = f"{airport.spoken} ({airport.ident})"
+        text = (f"{heard} - nobody is listening on this frequency at {field}."
+                f" Published there: {listing}.")
         # A near-miss is worth naming: 127.850 against a published 127.750 is
         # far more likely to be a mistuned radio than a missing frequency.
         closest = min(stations, key=lambda s: abs(s.mhz - mhz))
-        near = ""
         if abs(closest.mhz - mhz) <= 0.2:
-            near = (f" Did you mean {closest.mhz:.3f} for {closest.callsign}?")
-
-        return (
-            f"{near} At {airport.ident} ({airport.spoken}): {listing}."
-            f" If {mhz:.3f} really is published there, add it to"
-            f" data/navdata/overrides.csv as"
-            f" \"{airport.ident},TWR,{mhz:.3f},,,add\" (change TWR to the right"
-            f" position) and rebuild with"
-            f" {command_hint('setup --force')}."
-        )
+            self.emit("info", text + f" Did you mean {closest.mhz:.3f}"
+                      f" ({closest.callsign})?",
+                      key="log.empty_frequency_near", mhz=heard, field=field,
+                      listing=listing, near=f"{closest.mhz:.3f}",
+                      station=closest.callsign)
+            return
+        self.emit("info", text, key="log.empty_frequency", mhz=heard,
+                  field=field, listing=listing)
 
     # ------------------------------------------------------------------
     # transmission
@@ -1732,6 +2811,7 @@ class Engine:
                       key="log.still_working")
             return
         try:
+            self._tell_the_recogniser()
             with timed("recognition", warn_over_ms=4000):
                 transcript = self.recognizer.transcribe(
                     captured.audio, captured.sample_rate)
@@ -1743,14 +2823,21 @@ class Engine:
                             if hasattr(captured, "seconds") else None)
                 return
 
-            self.emit("pilot", transcript.text)
+            # "spoken": the panel empties its box, so a draft left in it is
+            # not sent again on the end of the next typed call.
+            self.emit("pilot", transcript.text, action="spoken")
             if transcript.confidence < self.config.speech.min_confidence:
                 log.info("low confidence %.2f: %s", transcript.confidence,
                          transcript.text,
                          extra={"confidence": round(transcript.confidence, 3),
                                 "heard": transcript.text})
 
-            self.handle_text(transcript.text, transcript.language)
+            self.handle_text(transcript.text, transcript.language,
+                             confidence=transcript.confidence)
+        except SpeechModelMissing:
+            self.emit("error", "The speech recognition has not been downloaded "
+                      "yet. Open Settings, then Components, and press Download.",
+                      key="log.speech_missing", action="setup")
         except Exception as exc:
             log.exception("transmission handling failed")
             self.emit("error", f"Error handling transmission: {exc}",
@@ -1758,14 +2845,54 @@ class Engine:
         finally:
             self._busy.release()
 
-    def handle_text(self, text: str, language: str | None = None) -> Reply | None:
+    # How far a station may be and still be one the pilot might call.
+    RECOGNISER_STATIONS_NM = 40.0
+
+    def _tell_the_recogniser(self) -> None:
+        """The pilot's own callsign and the stations in reach, as hotwords.
+
+        Measured on sixty pilot calls (scripts/stt_vocabulary_bench.py) they
+        bring the callsign back whole in 98% of transmissions against 38%:
+        "Oscar Oscar Alpha Bravo Shirley" was a callsign the recogniser had
+        not been told about.
+        """
+        try:
+            session = self.session
+            callsign = (session.aircraft.callsign.spoken_full
+                        if session is not None else "")
+            names = []
+            if self.station is not None:
+                names.append(self.station.callsign)
+            state = self.state
+            if state.has_position:
+                for one in self.navdb.all_stations_near(
+                        state.latitude, state.longitude,
+                        self.RECOGNISER_STATIONS_NM):
+                    if one.position != "ATIS":          # never called
+                        names.append(one.callsign)
+            # The nearest first; a dozen is all the budget is worth.
+            names = list(dict.fromkeys(names))[:12]
+            self.recognizer.set_context(callsign, names)
+        except Exception:
+            log.debug("could not give the recogniser its context",
+                      exc_info=True)
+
+    def handle_text(self, text: str, language: str | None = None,
+                    speaker: str = "", confidence: float = 1.0) -> Reply | None:
         """Process one pilot transmission that has already been transcribed.
 
         Exposed separately from the audio path so the whole ATC stack can be
         driven from typed input, which is how the tests exercise it.
         ``language`` is what the pilot spoke; the controller answers in the
-        same one when the facility works it.
+        same one when the facility works it. ``speaker`` is "first_officer"
+        for a call the pilot handed over, written to the radio log so the
+        transcript says who spoke. ``confidence`` is the recogniser's own
+        (1.0 for typed text): a name heard nearly is asked about, not
+        refused, when the recogniser was unsure of it.
         """
+        # The recogniser's spacing is not the keyboard's; the same words are
+        # the same transmission.
+        text = " ".join((text or "").split())
         if self.session is None:
             self.begin_session()
         session = self.session
@@ -1777,7 +2904,23 @@ class Engine:
         # Before the station is resolved on purpose: a pilot can ask their
         # cabin crew for a coffee at a field with nothing published on the
         # box, and being told that nobody is listening would be wrong twice.
-        if self.answer_the_aeroplane(text, language):
+        if speaker != "first_officer":
+            if self.answer_the_aeroplane(text, language):
+                return None
+            # A go-around reported to the tower is also the call on the
+            # flight deck; the transmission still goes to the tower.
+            try:
+                self.crew.heard_on_the_radio(text)
+            except Exception:
+                log.debug("the first officer raised", exc_info=True)
+
+        # A dead radio sends nothing. Said rather than silently ignored: a
+        # pilot who keys a switched-off aeroplane should know why nobody
+        # answers, and that it is the aeroplane and not the program.
+        if not self.radio_powered:
+            self.emit("info", "The radio has no power: nothing was "
+                      "transmitted. Switch on the battery and the avionics.",
+                      key="log.radio_no_power")
             return None
 
         station = self.station or self._current_station()
@@ -1786,17 +2929,16 @@ class Engine:
                       key="log.nobody_listening")
             return None
 
-        # Speech arrives with a language the recogniser decided from the sound.
-        # Typed text arrives with none, so it is read off the words -- against
-        # the languages this facility actually works, so a French phrase at
-        # Frankfurt is not answered in French.
-        if not language:
-            language = language_of_text(text, languages_for(station.ident))
-        heard_in = self._language_for(station.ident, language)
-        with timed("understanding"):
-            parsed = self.understanding.parse(
-                text, heard_in, context=self._situation(session, station)
-            )
+        tagged = language
+        # A letter heard as a word ("Bravo, Shirley") is read as the letter
+        # where a letter belongs; the log keeps what was heard.
+        heard = text
+        text, _ = letters.snap(text)
+        parsed, heard_in = self._read(text, tagged, session, station)
+        parsed.heard_confidence = float(confidence)
+        if not parsed.callsign_matched and self._take_the_callsign_heard(
+                session, text):
+            parsed.callsign_matched = True
         # The frequency keeps the language it is being worked in. Read in
         # whatever the recogniser heard, so "répétez" on an English frequency
         # is still a request to repeat -- but answered in English, because
@@ -1816,6 +2958,11 @@ class Engine:
         pending = session.pending
         RADIO.write(
             "pilot", text=text, language=spoken,
+            speaker=speaker or "pilot",
+            # The recogniser's own guess, for a spoken one: the language it
+            # was read in is the frequency's unless the words said otherwise.
+            **({"heard_as": tagged} if tagged else {}),
+            **({"heard": heard} if heard != text else {}),
             station=station.callsign, frequency=round(station.mhz, 3),
             intent=parsed.intent.value, confidence=round(parsed.confidence, 3),
             callsign_matched=parsed.callsign_matched,
@@ -1828,7 +2975,7 @@ class Engine:
         if parsed.get("atis_letter"):
             session.atis_acknowledged = parsed.get("atis_letter")
 
-        if self.stand_down:
+        if self.human is not None:
             # Somebody real is working this frequency. What the pilot said is
             # shown, because they said it, and nothing is transmitted over the
             # person who is going to answer it.
@@ -1839,6 +2986,15 @@ class Engine:
                       network=self.human.network.upper())
             return None
 
+        # Somebody else's exchange is half way through on this frequency:
+        # the first call of a flight the controller has not worked yet may
+        # go unanswered, and any other is answered "stand by" now and in full
+        # once the exchange is over.
+        congested = self._congested(station, parsed)
+        if congested and not session.established_with(station) \
+                and self._first_call_missed(session, station):
+            return Reply("", station, silent=True)
+
         weather = self.weather_for(station.ident)
         with timed("controller"):
             reply = self.brain.respond(parsed, session, station, weather,
@@ -1846,6 +3002,23 @@ class Engine:
 
         if reply.instruction is not None:
             session.remember(reply.instruction)
+
+        if congested and reply.speak and parsed.intent is Intent.READBACK:
+            # A readback is not a request: "standby" to it told the pilot
+            # their correct readback was something to wait on. Its answer
+            # waits, unannounced, for the other exchange to end.
+            self._held_reply = (reply, station, spoken, time.monotonic())
+            decision("congestion", station=station.callsign, said="nothing",
+                     held="readback")
+            reply = Reply("", station, silent=True)
+        elif congested and reply.speak:
+            self._held_reply = (reply, station, spoken, time.monotonic())
+            p = self.brain.for_station(station, spoken)
+            session.aircraft.language = getattr(p, "language", "en")
+            decision("congestion", station=station.callsign, said="standby",
+                     held=(reply.instruction.kind
+                           if reply.instruction is not None else "answer"))
+            reply = Reply(p.standby(session.aircraft), station)
 
         if reply.speak:
             self.emit("atc", reply.text, station.callsign)
@@ -1886,11 +3059,69 @@ class Engine:
     # the people who are not on the radio
     # ------------------------------------------------------------------
 
+    def _read(self, text: str, tagged: str | None, session,
+              station: Station) -> tuple[ParsedIntent, str]:
+        """Read one transmission, typed or spoken, the same way.
+
+        Once a frequency is worked in a language it is read in that one,
+        unless the words are in another over several of them. The
+        recogniser's tag does not move it: it is a guess from the sound, and
+        at Kortrijk it called an English taxi call French, which the French
+        grammar made nothing of -- "say again" to a sentence that typed got
+        "roger".
+
+        On a frequency not worked yet the words decide when they say
+        anything (:func:`detect.by_words`), and the tag only when they do
+        not. At Heubach "Heubach Tower, DEHUH, request radio check" was
+        tagged German, from the sound of the field's name, and answered in
+        German.
+
+        Where that reading makes nothing of it, it is read in the field's
+        other languages, and the first that understands it is the language
+        it was in: answered in it, and the frequency goes over to it
+        (:meth:`_frequency_language`), save for the one-word replies
+        ("répétez", "affirm") that never move it. That is how a pilot
+        changes language mid-session. At Heubach, before it, a frequency
+        answered once in German heard every English call after as nothing,
+        and nothing could bring it back.
+
+        Returns what was understood and the language it was read in.
+        """
+        ident = station.ident
+        established = self._languages_by_frequency.get(station_key(station))
+        worked = [self._language_for(ident, lang)
+                  for lang in languages_for(ident)]
+        words = self._language_for(
+            ident, language_of_text(text, languages_for(ident)))
+        tag = self._language_for(ident, tagged) if tagged else ""
+        if established:
+            first = (words if clearly_in(text, words, established)
+                     else established)
+        else:
+            decided = by_words(text, worked)
+            first = (self._language_for(ident, decided) if decided
+                     else tag or words)
+        others = [words, tag, established or self._language_for(ident),
+                  *worked]
+        context = self._situation(session, station)
+        with timed("understanding"):
+            parsed = self.understanding.parse(text, first, context=context)
+        for other in dict.fromkeys(o for o in others if o and o != first):
+            if parsed.intent is not Intent.UNKNOWN:
+                break
+            with timed("understanding"):
+                again = self.understanding.parse(text, other, context=context)
+            if again.intent is not Intent.UNKNOWN:
+                return again, other
+        return parsed, first
+
     # What one word in another language does not change: these are answered
-    # in the frequency's language.
+    # in the frequency's language. A radio check is not on it: it is the
+    # call a pilot opens with, and at Heubach the one an English pilot made
+    # on a frequency stuck in German.
     _NOT_A_CHANGE_OF_LANGUAGE = frozenset({
         Intent.SAY_AGAIN, Intent.ACKNOWLEDGE, Intent.AFFIRMATIVE,
-        Intent.NEGATIVE, Intent.STANDBY, Intent.UNKNOWN, Intent.RADIO_CHECK,
+        Intent.NEGATIVE, Intent.STANDBY, Intent.UNKNOWN,
     })
 
     def _frequency_language(self, station: Station, heard_in: str,
@@ -1915,12 +3146,24 @@ class Engine:
         settings = self.config.immersion
         if not (settings.enabled and settings.interphone):
             return False
+        session = self.session
+        # A bare checklist answer is the first officer's only while they
+        # are waiting for one, no readback is owed to the controller, and
+        # they spoke after the controller did.
+        expecting = (self.crew.waiting_for_the_pilot()
+                     and (session is None or session.pending is None)
+                     and self.crew.spoke_after(self._atc_said_at))
         try:
-            said = interphone.parse(text, self.crew.language,
-                                    names=self.crew.names())
+            said = interphone.parse(
+                text, self.crew.language, names=self.crew.names(),
+                first_officer=self.crew.first_officer_names(),
+                checklists=self.crew.checklist_titles(),
+                expecting=expecting, offered=bool(self.crew.offering()))
         except Exception:
             log.debug("could not read the interphone", exc_info=True)
             return False
+        if said is None and expecting:
+            said = self._checklist_answer_from_the_model(text)
         if said is None:
             return False
 
@@ -1940,6 +3183,31 @@ class Engine:
         # controller being handed a drinks order and asking them to say
         # again. The whole of the decision was made by the address.
         return True
+
+    def _checklist_answer_from_the_model(self, text: str):
+        """The understanding layer's model, asked whether a transmission
+        the rules made nothing of is a checklist answer. None for no model,
+        or for "not an answer", which is the controller's."""
+        try:
+            kind = self.understanding.checklist_answer(text)
+        except Exception:
+            log.debug("the model could not read a checklist answer",
+                      exc_info=True)
+            return None
+        if not kind:
+            return None
+        return interphone.Said(who=interphone.FIRST_OFFICER,
+                               what=interphone.ANSWER, text=text,
+                               language=self.crew.language,
+                               answers=(kind,))
+
+    def _read_now(self, var: str):
+        """One simulator variable, read now, or None (see
+        SimConnectSource.read_now)."""
+        reader = getattr(self.source, "read_now", None)
+        if not callable(reader):
+            return None
+        return reader(var)
 
     def ask_the_ground(self, said) -> bool:
         """Ask the ground handling for whatever the pilot just asked for.
@@ -1991,6 +3259,11 @@ class Engine:
     def speak(self, text: str, station: Station, atis: bool = False,
               language: str = "en") -> None:
         """Synthesise and queue a controller transmission."""
+        # The last guard: whatever path got here, a dead radio plays nothing.
+        if not self.radio_powered:
+            return
+        if not atis:
+            self._atc_said_at = time.monotonic()
         try:
             with timed("synthesis", warn_over_ms=4000):
                 transmission = self.synth.speak(
@@ -2040,6 +3313,11 @@ class Engine:
             )
         if not airport_ident:
             return None
+        if not self.radio_powered:
+            self.emit("info", "The radio has no power: nothing was "
+                      "transmitted. Switch on the battery and the avionics.",
+                      key="log.radio_no_power")
+            return None
 
         spoken = self._language_for(airport_ident, language)
         report = self.atis_for(airport_ident, spoken)
@@ -2085,6 +3363,7 @@ class Engine:
     def _one_tick(self) -> None:
         # Before anything is read: is the thing being read from still there?
         self._watch_simulator()
+        self._watch_live_feed()
 
         # And is the microphone still a microphone? First, because a transmit
         # state that is stuck silences everything below this line.
@@ -2127,9 +3406,13 @@ class Engine:
                       key="log.sim_unpaused")
 
         # The pilot changed frequency: work out who is now listening.
-        if state.com1_active and abs(state.com1_active - self._last_com1) > 0.004:
+        retuned = bool(state.com1_active) \
+            and abs(state.com1_active - self._last_com1) > 0.004
+        if retuned:
             self.tune(state.com1_active)
-        elif self.station is None:
+        self._settle_oceanic(session)
+        self._explain_empty()
+        if not retuned and self.station is None:
             # Nothing tuned, so the country under the aeroplane decides what
             # the recogniser listens for. Checked rarely: it only changes when
             # a border does.
@@ -2138,6 +3421,8 @@ class Engine:
         # The airport under the aeroplane decides what is on the radio there,
         # and the simulator is the authority on that.
         self.follow_facilities(state)
+        # And its taxiways, for the pilot's own taxi, at both ends.
+        self.follow_ground_layouts(state, session)
 
         # And who is on the network, which decides whether this program is
         # entitled to say anything at all. The poll is in the background; the
@@ -2149,6 +3434,7 @@ class Engine:
         # A liftoff off a landing rollout is classified first, so that the
         # surface watch does not take a bounce for a takeoff.
         self._note_rollout_liftoff(previous, state, session)
+        self._follow_route(state)
 
         # What the aircraft is doing is checked before the phase is updated,
         # because a departure and a touchdown are transitions: updating first
@@ -2162,6 +3448,8 @@ class Engine:
         # And what the rollout liftoff turns out to be: back on the ground
         # (a bounce), round the circuit, or round again.
         self._after_rollout_liftoff(previous, state, session)
+        # Or nothing at all: still on the ground, so it was a full stop.
+        self._full_stop_after_touchdown(state, session)
 
         # The landing, measured. Written up a few seconds after the wheels
         # touch, once a bounce has had time to show itself.
@@ -2187,7 +3475,16 @@ class Engine:
         # position that then passes it to the tower, not by the tower it
         # arrives on.
         self._work_the_departure(state, session)
+        self._work_the_climb(state, session)
         self._work_the_arrival(previous, state, session)
+        self._watch_airspace(state, session)
+        self._watch_restriction(state, session)
+        self._watch_radar_service(state, session)
+        self._watch_traffic(state, session)
+        self._watch_runway(state, session)
+        self._watch_points(state, session)
+        if not self.stand_down:
+            self._say_held_reply(time.monotonic())
 
         # The handoffs the flight itself calls for: off the tower after
         # departure, back to ground after landing. These are not reminders and
@@ -2234,6 +3531,7 @@ class Engine:
             self.traffic.pending.clear()
             self._traffic_queue.clear()
             self.simtraffic.sync([])
+            self.simvehicles.sync([])
 
     # ------------------------------------------------------------------
     # the other aeroplanes
@@ -2249,10 +3547,30 @@ class Engine:
         station = self.station
         self.traffic.can_invent = self.simtraffic.drawing
         if station is None or not station.ident:
-            # Nobody to talk to, so nothing is said -- but whoever is already
-            # flying keeps flying, and stays where the simulator can see them.
+            # Nobody to talk to, so nothing is said -- but the airport is
+            # still there. Whoever is already flying keeps flying, and the
+            # field under the aeroplane is worked silently: its stands set
+            # out, FSLTL's aeroplanes read off the simulator and handled,
+            # all of it on the map. A pilot on 122.800 at the gate used to
+            # see an empty airport with nobody on it, because every one of
+            # those things waited for a controller to be tuned.
+            self._work_the_field_here(state, session)
             self.traffic.advance(time.monotonic())
             self._keep_traffic_real(time.monotonic())
+            return
+
+        from .atc.enroute import is_oceanic
+
+        if station.position == "CTR" and not is_oceanic(station):
+            # A centre's frequency is worked by its own traffic
+            # (atc/centre_traffic.py); the field's goes on silently, as
+            # with nobody tuned. Pointing the field's injector at the FIR
+            # was an airfield with no runway and an hour of silence.
+            self._work_the_field_here(state, session)
+            now = time.monotonic()
+            self.traffic.advance(now)
+            self._keep_traffic_real(now)
+            self._work_the_centre(state, session, station, now)
             return
 
         # The density is a live setting, so it is read here rather than only
@@ -2265,15 +3583,7 @@ class Engine:
         # else: how many of them are on the field is what decides how many
         # more to invent, and a strip for one of them has to exist before the
         # tower looks at the field.
-        self.simwatch.enabled = self.config.traffic.from_simulator
-        if self.config.traffic.from_simulator:
-            self.simwatch.own_callsign = session.aircraft.callsign.written
-            try:
-                self.traffic.set_observed(self.simwatch.poll(), time.monotonic())
-            except Exception:
-                log.debug("could not read the simulator's traffic",
-                          exc_info=True)
-            self._say_observed()
+        self._take_observed(session)
 
         # And where the user is, so the traffic works a field with the
         # aeroplane that matters on it rather than around a hole. A departure
@@ -2297,6 +3607,7 @@ class Engine:
             departure_runway=session.departure_runway,
             arrival_runway=session.arrival_runway or session.departure_runway,
             weather=self._weather_cache.get(station.ident),
+            tuned=station,
         )
 
         self._follow_ground(station.ident)
@@ -2305,7 +3616,8 @@ class Engine:
         # Whatever has fallen due joins the back of the queue. It is not spoken
         # here: the frequency may be busy, and a transmission that cannot be
         # heard has to wait rather than disappear.
-        self._traffic_queue.extend(self.traffic.poll(now, station.position))
+        self._traffic_queue.extend(self.traffic.poll(now, station.position,
+                                                     station.mhz))
         self._speak_from_the_queue(station, now)
 
         # And the same aeroplanes, where they can be seen. This is every
@@ -2317,6 +3629,32 @@ class Engine:
         # the one way this could make the window worse rather than better.
         self._keep_traffic_real(now)
 
+    centre_traffic = None
+
+    def _work_the_centre(self, state: AircraftState, session: FlightSession,
+                         station: Station, now: float) -> None:
+        """The other flights on the centre frequency, invented and, with
+        live traffic on, real; spoken through the same queue as a field's."""
+        from .atc.centre_traffic import CentreTraffic
+
+        if not state.has_position:
+            return
+        if self.centre_traffic is None:
+            self.centre_traffic = CentreTraffic(self.navdb,
+                                                profile=self.traffic.profile)
+        live = self._live_seen() if self.live_feed is not None else []
+        try:
+            calls = self.centre_traffic.poll(
+                now, station, latitude=state.latitude,
+                longitude=state.longitude, altitude_ft=state.altitude_ft,
+                own_callsign=session.aircraft.callsign.written, live=live,
+                density=self.config.traffic.density)
+        except Exception:
+            log.debug("the centre's traffic raised", exc_info=True)
+            return
+        self._traffic_queue.extend(calls)
+        self._speak_from_the_queue(station, now)
+
     def ground_layout(self, ident: str):
         """This airport's stands and taxiways, if the simulator has given
         them; asked for in the background if it has not yet."""
@@ -2325,6 +3663,72 @@ class Engine:
         if layout is None:
             self._ask_for_ground(ident)
         return layout
+
+    # How close to the destination a layout is asked for whatever the phase
+    # says. The read takes seconds on a worker; at 250 knots sixty miles is a
+    # quarter of an hour, and a pilot who never called for descent is still
+    # descending.
+    LAYOUT_AHEAD_NM = 60.0
+
+    def follow_ground_layouts(self, state: AircraftState,
+                              session: FlightSession) -> None:
+        """Ask for the taxiways the pilot is going to be taxied on.
+
+        The traffic asks only for the field it is working, and only when it
+        is switched on, which left the pilot's own departure field unread
+        with the traffic off. So: the field the aeroplane is on the ground
+        at, as soon as it is there, and the destination during the descent,
+        well before the taxi in is asked for -- the read is asynchronous and
+        the controller never waits for it.
+        """
+        if not state.has_position:
+            return
+        if state.on_ground:
+            here = self.navdb.home_airport(state.latitude, state.longitude)
+            if here is not None:
+                self._ask_for_ground(here.ident)
+            return
+        destination = session.destination
+        if destination is None:
+            return
+        descending = session.phase in (Phase.DESCENT, Phase.APPROACH,
+                                       Phase.LANDING)
+        if descending or self.brain._distance_to(state, destination) \
+                <= self.LAYOUT_AHEAD_NM:
+            self._ask_for_ground(destination.ident)
+
+    def _work_the_field_here(self, state: AircraftState,
+                             session: FlightSession) -> None:
+        """Point the traffic at the airport the aeroplane is at, with nobody
+        tuned to say so, and read the simulator's own traffic there.
+
+        Only when the field can be told: an aeroplane on the ground, or
+        within a few miles of one. Airborne and far from anywhere, whatever
+        field was being worked stays.
+        """
+        if not state.has_position:
+            return
+        airport = self.navdb.home_airport(state.latitude, state.longitude)
+        if airport is None:
+            return
+        self.traffic.set_field(
+            airport.ident,
+            departure_runway=session.departure_runway,
+            arrival_runway=session.arrival_runway or session.departure_runway,
+            weather=self._weather_cache.get(airport.ident),
+        )
+        self._follow_ground(airport.ident)
+        self.traffic.set_user(UserAircraft(
+            callsign=session.aircraft.callsign.written,
+            type_code=session.aircraft.type_code,
+            latitude=state.latitude,
+            longitude=state.longitude,
+            altitude_ft=state.altitude_ft,
+            heading=state.heading_true,
+            ground_speed_kt=state.ground_speed_kt,
+            on_ground=state.on_ground,
+        ))
+        self._take_observed(session)
 
     def _follow_ground(self, ident: str) -> None:
         """Give the traffic this airport's taxiways, once the simulator has
@@ -2360,7 +3764,35 @@ class Engine:
         threading.Thread(target=read, name=f"WilcoATC-taxi-{ident}",
                          daemon=True).start()
 
+    runway_cache = None
+
+    def _use_runway_cache(self) -> None:
+        from .navdata.runway_cache import RunwayCache
+        from .paths import data_root
+
+        self.runway_cache = RunwayCache(data_root() / "airports")
+        self.navdb.use_runway_cache(self.runway_cache)
+
+    def say_runway_source(self, ident: str) -> None:
+        """A row for ``logs radio`` and ``logs arrival``: where the field's
+        runways come from (sim, cache or db), and, when the simulator's,
+        what they disagree with the database on -- the reason the pilot
+        heard "26" where the chart says "25". Once per field and source."""
+        if not ident:
+            return
+        source = self.navdb.runway_source(ident)
+        if self._runways_said.get(ident) == source:
+            return
+        self._runways_said[ident] = source
+        ends = sorted({end for rw in self.navdb.runways(ident)
+                       for end, *_ in rw.ends()})
+        decision("airport", airport=ident, runways_from=source, ends=ends,
+                 **self.navdb.runway_differences(ident))
+
     def _ask_for_approaches(self, ident: str) -> None:
+        # Said whether or not the simulator can be asked: without it, the
+        # row says the cache or the database is what is being used.
+        self.say_runway_source(ident)
         if not ident or ident in self._approaches_asked:
             return
         if not (self.state.source == "simconnect" and self.state.connected):
@@ -2383,6 +3815,28 @@ class Engine:
                 # the table from this worker raced the engine adding to it.
                 with self._atis_lock:
                     self._atis_stale.add(ident)
+            # The runways themselves, and from the same answer each one's
+            # pattern altitude: the scenery's are the ones the aeroplane
+            # rolls on, so from here they are the field's.
+            try:
+                runways = self.simrunways.for_airport(ident)
+                patterns = self.simrunways.patterns(ident)
+            except Exception:
+                log.debug("could not read %s's runways", ident, exc_info=True)
+                return
+            if runways:
+                from .integrations.runways import with_ils_kinds
+
+                # Which end's navaid is a localizer and which a VOR, from
+                # the approaches read just above.
+                runways = with_ils_kinds(runways, found)
+                self.navdb.set_sim_runways(ident, runways)
+                cache = getattr(self, "runway_cache", None)
+                if cache is not None:
+                    cache.save(ident, runways)
+                self.say_runway_source(ident)
+            if patterns:
+                self.brain.sim_patterns[ident] = patterns
 
         threading.Thread(target=read, name=f"WilcoATC-approaches-{ident}",
                          daemon=True).start()
@@ -2395,9 +3849,19 @@ class Engine:
         once it is there; one the simulator cannot make is dropped without a
         word ever having been said about it.
         """
-        self.simtraffic.sync(self.traffic.positions(invented_only=True), now)
+        positions = self.traffic.positions(invented_only=True)
+        if self.state.has_position:
+            # For how often each is drawn: thirty-five times a second near
+            # the pilot, five at ten kilometres.
+            self.simtraffic.viewer = (self.state.latitude, self.state.longitude)
+        self._choose_models(positions, now)
+        self.simtraffic.sync(positions, now)
         confirmed, dropped = self.traffic.confirm(
             self.simtraffic.has, self.simtraffic.failed, now)
+        self._keep_handling_real(now)
+        self._keep_systems_real(now)
+        self._say_traffic_status(now)
+        self._say_motion_status(now)
         if not self.simtraffic.drawing:
             # What was already queued from an aeroplane that no longer exists
             # is not said either.
@@ -2425,6 +3889,379 @@ class Engine:
                           f"so it is not on the runway.",
                           key="log.traffic_spawn_failed",
                           callsign=flight.written)
+
+    def _choose_models(self, positions: list[dict], now: float) -> None:
+        """Mark each invented aeroplane with the level of detail it should
+        be drawn at, for the injector to follow.
+
+        Only with LOD on: without it no position carries a level and the
+        injector draws what it always drew. One not yet drawn is created
+        at the level its distance says; one standing on its stand is
+        swapped when the decision says, so many a second; one moving is
+        left as it is until it parks.
+        """
+        if not self.lod.enabled:
+            return
+        if self.lod.scheduled:
+            self._choose_models_by_schedule(positions, now)
+            return
+        try:
+            user = self.traffic.user
+            user_xy = None
+            layout = self.traffic.ground
+            if user is not None and user.has_position:
+                if layout is not None:
+                    user_xy = layout.to_xy(user.latitude, user.longitude)
+                else:
+                    user_xy = (0.0, 0.0)
+
+            def xy(position: dict) -> tuple[float, float]:
+                if layout is not None:
+                    return layout.to_xy(position["lat"], position["lon"])
+                # Metres east and north of the pilot, near enough.
+                from .navdata.db import haversine_nm
+                east = haversine_nm(user.latitude, user.longitude,
+                                    user.latitude, position["lon"]) * 1852.0
+                north = haversine_nm(user.latitude, user.longitude,
+                                     position["lat"], user.longitude) * 1852.0
+                return (east if position["lon"] >= user.longitude else -east,
+                        north if position["lat"] >= user.latitude else -north)
+
+            detailed_now = sum(
+                1 for p in positions
+                if self.simtraffic.target_level(p["callsign"]) == "detailed")
+            candidates: list[Candidate] = []
+            for position in positions:
+                callsign = position["callsign"]
+                has_detailed = self.simtraffic.has_detailed(
+                    position.get("type", ""), position.get("operator", ""))
+                if not self.simtraffic.has(callsign):
+                    distance = None
+                    if user_xy is not None:
+                        x, z = xy(position)
+                        distance = math.hypot(x - user_xy[0], z - user_xy[1])
+                    level = self.lod.level_for_new(distance, detailed_now,
+                                                   has_detailed)
+                    if level == "detailed":
+                        detailed_now += 1
+                    position["level"] = level
+                    continue
+                # Stamped with where it is going, not where it was: on
+                # the tick a swap finishes, the old level would be read as
+                # an order to swap back.
+                level = self.simtraffic.target_level(callsign)
+                position["level"] = level
+                busy = self.simtraffic.swapping(callsign)
+                stationary = bool(position.get("on_ground")) and not position.get(
+                    "ground_speed_kt") and (position.get("static")
+                                            or position.get("intent") == "parked")
+                x, z = xy(position) if user_xy is not None else (0.0, 0.0)
+                candidates.append(Candidate(callsign, x, z, level=level,
+                                            stationary=stationary,
+                                            has_detailed=has_detailed,
+                                            busy=busy))
+            by_callsign = {p["callsign"]: p for p in positions}
+            for callsign, level in self.lod.decide(candidates, user_xy, now):
+                by_callsign[callsign]["level"] = level
+        except Exception:
+            log.debug("choosing the models raised", exc_info=True)
+
+    def _apron_window(self, callsign: str, kind: str, now: float) -> str:
+        """Where one of this program's aeroplanes is in its turnaround, from
+        what the traffic, the ramp and the doors each know of it."""
+        object_id = self.simtraffic.object_id(callsign)
+        doors_open = self.simdoors.open_now(object_id)
+        if kind == "booked":
+            return lod_windows.PRE_BOARDING
+        if kind == "boarding":
+            return lod_windows.BOARDING
+        if kind == "departing":
+            # Boarding until every door reads shut, then waiting for the tug.
+            if self.simdoors.can_push(object_id) and not doors_open:
+                return lod_windows.CLOSED
+            return lod_windows.BOARDING
+        if kind == "arrived":
+            # Blocked in and still on the radio: inside its deplaning round
+            # by definition. Asking the ramp instead read it as closed up
+            # on the tick it stopped -- the ramp had not seen it yet -- and
+            # it was lightened at the gate and detailed again a tick later.
+            return lod_windows.ARRIVAL
+        if kind == "static":
+            if self.handling.arrival_open(callsign, now) or doors_open:
+                return lod_windows.ARRIVAL
+            return lod_windows.PARKED
+        return lod_windows.MOVING
+
+    def _choose_models_by_schedule(self, positions: list[dict],
+                                   now: float) -> None:
+        """The schedule's choice of model (traffic.lod.mode: schedule).
+
+        Detailed only in the turnaround window, near the pilot and under the
+        cap; created detailed where it can be, which is an arrival whose
+        stand is near and the departure booked beside the pilot, so that it
+        never has to change at the gate. See wilcoatc.atc.lod.
+        """
+        try:
+            user = self.traffic.user
+            layout = self.traffic.ground
+            user_xy = None
+            if (user is not None and user.has_position
+                    and layout is not None):
+                user_xy = layout.to_xy(user.latitude, user.longitude)
+            detailed_now = sum(
+                1 for p in positions
+                if self.simtraffic.target_level(p["callsign"]) == "detailed")
+            roles = self.handling.doors(now)
+            candidates: list[Candidate] = []
+            for position in positions:
+                callsign = position["callsign"]
+                type_code = position.get("type", "")
+                operator = position.get("operator", "")
+                has_detailed = self.simtraffic.has_detailed(type_code, operator)
+                matches = self.simtraffic.livery_matches(type_code, operator,
+                                                         callsign)
+                kind, stand = self.traffic.apron_state(callsign)
+                if layout is not None:
+                    here = layout.to_xy(position["lat"], position["lon"])
+                else:
+                    here = None
+                # Measured from where it will turn round while it is on
+                # its way there; from where it is otherwise.
+                where = stand if kind == "arriving" and stand else here
+                if not self.simtraffic.has(callsign):
+                    window = (lod_windows.ARRIVAL if kind == "arriving"
+                              and stand else self._apron_window(
+                                  callsign, kind, now))
+                    distance = None
+                    if user_xy is not None and where is not None:
+                        distance = math.hypot(where[0] - user_xy[0],
+                                              where[1] - user_xy[1])
+                    level = self.lod.level_for_new(
+                        distance, detailed_now, has_detailed, window=window,
+                        livery_matches=matches)
+                    if level == "detailed":
+                        detailed_now += 1
+                    position["level"] = level
+                    continue
+                level = self.simtraffic.target_level(callsign)
+                position["level"] = level
+                window = self._apron_window(callsign, kind, now)
+                object_id = self.simtraffic.object_id(callsign)
+                flight = self.traffic.flight_named(callsign)
+                if (flight is not None and flight.by_hand
+                        and self.lod.livery != "match"):
+                    # Boarded with the test button: its doors are what the
+                    # pilot asked to see, so the hide rule does not apply.
+                    matches = True
+                stationary = bool(position.get("on_ground")) and not position.get(
+                    "ground_speed_kt") and kind in ("static", "booked",
+                                                    "boarding", "departing",
+                                                    "arrived")
+                x, z = where if where is not None else (0.0, 0.0)
+                candidates.append(Candidate(
+                    callsign, x, z, level=level, stationary=stationary,
+                    has_detailed=has_detailed,
+                    busy=self.simtraffic.swapping(callsign),
+                    window=window,
+                    doors_open=bool(roles.get(callsign))
+                    or self.simdoors.open_now(object_id),
+                    doors_moving=self.simdoors.moving(object_id, now),
+                    livery_matches=matches))
+            by_callsign = {p["callsign"]: p for p in positions}
+            for callsign, level in self.lod.decide(candidates, user_xy, now):
+                by_callsign[callsign]["level"] = level
+        except Exception:
+            log.debug("choosing the models by schedule raised", exc_info=True)
+
+    def _read_the_doors(self, standing: list, now: float) -> None:
+        """Where each vehicle goes, from each model's own doors: ask the
+        simulator once per model, and hand every aeroplane its spots."""
+        points_reader = getattr(self, "servicepoints", None)
+        if points_reader is None or not points_reader.available:
+            return
+        titles = {role: self.simvehicles.title_for(role)
+                  for role in list(self._service_layout.get("roles", {}))
+                  + list(handling_spots.SPOTS)}
+        for one in standing:
+            if one.observed:
+                object_id, title = one.object_id, one.title
+            else:
+                object_id = self.simtraffic.object_id(one.callsign)
+                title = self.simtraffic.title_of(one.callsign)
+            if not object_id or not title:
+                continue
+            points = points_reader.points(title)
+            if points is None:
+                points_reader.ask(object_id, title, now)
+                continue
+            length = handling_spots.fuselage_length(one.type_code, one.light)
+            fallback = {role: (right, fraction * length + extra, facing)
+                        for role, (right, fraction, extra, facing)
+                        in handling_spots.SPOTS.items()}
+            # How high each door is on this model, and a loader docked by
+            # its own belt: both from the points and the height the model
+            # stands at (servicepoints.standing).
+            # This aeroplane's own height where it is one of ours: the one
+            # read with the points is another object's, at another moment.
+            standing = None if one.observed else (
+                self.simtraffic.height_above_ground(one.callsign))
+            pitch = 0.0
+            if standing is None:
+                standing = points_reader.standing(title)
+            else:
+                pitch = self.simtraffic.resting_pitch(one.callsign)
+            fittings = fittings_for(points, standing,
+                                    self._service_layout, titles, pitch,
+                                    listed=self.simvehicles.listed_gsx())
+            chosen = dict(titles)
+            for role, fitting in fittings.items():
+                if fitting.get("title"):
+                    chosen[role] = fitting["title"]
+                    said = (one.callsign, role, fitting["title"])
+                    if said not in self._stairs_said:
+                        self._stairs_said.add(said)
+                        log.info("stairs: %s %s, sill %.2f m: %s (%s)", one.callsign,
+                                 role, fitting["sill"], fitting["title"], fitting["why"])
+            one.fittings = fittings or None
+            one.spots = spots_for(points, self._service_layout, chosen,
+                                  one.type_code, fallback, fittings) or None
+
+    def _keep_systems_real(self, now: float) -> None:
+        """This program's aeroplanes' engines and lights, by where each is
+        in its day (wilcoatc.atc.systems). Only objects this program drew;
+        never the pilot's, never anybody else's."""
+        simsystems = getattr(self, "simsystems", None)
+        if simsystems is None or not simsystems.available:
+            return
+        try:
+            simsystems.user_object_id = getattr(self.simwatch,
+                                                "user_object_id", None)
+            elevation = self.traffic.field.elevation_ft or 0.0
+            wanted = {}
+            for position in self.traffic.positions(invented_only=True):
+                callsign = position["callsign"]
+                flight = self.traffic.flight_named(callsign)
+                if flight is None:
+                    continue
+                kind, _ = self.traffic.apron_state(callsign)
+                objects = self.simtraffic.objects_of(callsign)
+                if not objects:
+                    continue
+                goal = systems_wanted(
+                    kind, flight.phase, now, parked_at=flight.parked_at,
+                    pushing=flight.target.intent == "pushing back",
+                    doors_shut=self.simdoors.can_push(objects[0]),
+                    altitude_agl_ft=max(0.0, flight.altitude_ft - elevation),
+                    on_ground=flight.on_ground, callsign=callsign)
+                for object_id in objects:
+                    wanted[object_id] = (callsign, goal)
+            simsystems.sync(wanted, now)
+        except Exception:
+            log.debug("the engines and lights raised", exc_info=True)
+
+    def _model_swapped(self, callsign: str, old: int, new: int,
+                       title: str) -> None:
+        """An aeroplane has changed object: its doors go with it."""
+        self.simdoors.carry(old, new, title)
+
+    def _model_removed(self, object_id: int, what: str) -> None:
+        """An object of ours has been taken out of the simulator. The door
+        layer keeps an aeroplane it no longer wants until its doors read
+        shut, and one that has gone never reads anything again: at
+        Innsbruck (15 October) an arrival removed as its doors were closing
+        was asked after every four seconds for the rest of the session,
+        each one an UNRECOGNIZED_ID."""
+        self.simdoors.forget(object_id)
+
+    def _may_push(self, callsign: str) -> bool:
+        """Whether this program's aeroplane may push: every door the door
+        layer knows of read shut. One it is not working is not held."""
+        return self.simdoors.can_push(self.simtraffic.object_id(callsign))
+
+    def _keep_handling_real(self, now: float) -> None:
+        """Send the ground handling to the aeroplanes the simulator has
+        drawn on their stands, and keep the vehicles where the turnaround
+        says they are.
+
+        Only aeroplanes the simulator has actually made: a baggage loader
+        at an empty stand is the one thing worse than an empty one. The
+        turnaround runs whether or not the simulator will draw vehicles, so
+        the decision is cheap and the drawing fails closed on its own.
+        """
+        # The turnaround runs whenever handling is on: with vehicles off
+        # (another tool draws them) the doors still follow its schedule.
+        if not self.config.traffic.handling.enabled:
+            return
+        try:
+            # Somebody else's parked aeroplanes are in the simulator by
+            # definition; this program's only once it has drawn them.
+            handle_observed = self.config.traffic.handling_observed
+            # The pilot's own aeroplane, as the simulator names it: never
+            # handled, its doors never touched (see SimDoors.is_the_pilot).
+            pilot = getattr(self.simwatch, "user_object_id", None)
+            if hasattr(self.simdoors, "user_object_id"):
+                self.simdoors.user_object_id = pilot
+            standing = [one for one in self.traffic.standing()
+                        if ((one.observed and handle_observed)
+                            or (not one.observed
+                                and self.simtraffic.has(one.callsign)))
+                        and not (one.observed and one.object_id in (0, pilot))]
+            layout = self.traffic.ground
+            user = self.traffic.user
+            user_xy = None
+            if layout is not None and user is not None and user.latitude:
+                user_xy = layout.to_xy(user.latitude, user.longitude)
+            # The pilot's aeroplane, for keeping the buses off it: its type
+            # if known, else as long as the longest the buses serve.
+            self.handling.pilot_footprint = None
+            if user_xy is not None and user.on_ground:
+                self.handling.pilot_footprint = (
+                    user_xy[0], user_xy[1], float(user.heading),
+                    fuselage_length(user.type_code) if user.type_code else 45.0)
+            self.handling.elevation_ft = self.traffic.field.elevation_ft
+            # Whose doors read shut, for the tug: the door layer's answer
+            # where it is working, everybody's otherwise.
+            ready = None
+            if self.config.traffic.handling_doors and self.simdoors.available:
+                ready = set()
+                for one in standing:
+                    object_id = (one.object_id if one.observed
+                                 else self.simtraffic.object_id(one.callsign))
+                    if self.simdoors.can_push(object_id):
+                        ready.add(one.callsign)
+            # The motion engine's rates go by how far each actor is from
+            # the pilot, in the layout's metres.
+            if hasattr(self.simvehicles, "motion"):
+                self.simvehicles.motion.viewer_xy = user_xy
+            self._read_the_doors(standing, now)
+            vehicles = self.handling.positions(standing, layout, user_xy, now,
+                                               ready=ready)
+            self.simvehicles.sync(vehicles, now)
+            if self.config.traffic.handling_doors:
+                # Which simulator object each handled aeroplane is, and
+                # which model: this program's by what the injector drew it
+                # as, somebody else's by what the reader saw.
+                roles = self.handling.doors(now)
+                wanted = {}
+                for one in standing:
+                    if one.observed:
+                        object_id, title = one.object_id, one.title
+                    else:
+                        object_id = self.simtraffic.object_id(one.callsign)
+                        title = self.simtraffic.title_of(one.callsign)
+                    if object_id:
+                        wanted[object_id] = (title, one.callsign,
+                                             roles.get(one.callsign, set()))
+                self.simdoors.sync(wanted, now)
+        except Exception:
+            # Once at INFO, because a pass that raises every tick looks,
+            # from the apron, exactly like one that is not running.
+            if not self._handling_raised:
+                self._handling_raised = True
+                log.info("the ground handling raised; it is being retried "
+                         "every tick", exc_info=True)
+            else:
+                log.debug("the ground handling raised", exc_info=True)
 
     def _say_observed(self) -> None:
         """Say once that the simulator's own traffic is being worked.
@@ -2470,6 +4307,88 @@ class Engine:
                 if now - value[1] < self.EXCHANGE_MEMORY_S
             }
 
+    # The chance a flight's first call goes unanswered while the frequency
+    # is busy with somebody else's exchange -- never when it is not, because
+    # then there was nobody to be talking over. Half of them was a frequency
+    # that sounded broken rather than busy. UNVERIFIED: 12% is a figure
+    # chosen, not measured.
+    MISSED_FIRST_CALL = 0.12
+
+    def _congested(self, station: Station, parsed) -> bool:
+        """Whether an exchange between the controller and another aeroplane
+        is half said on this frequency: its opening heard
+        (``_exchanges``), and the rest still to come -- in this queue, or
+        still in the traffic's own schedule, where a readback waits until it
+        falls due. Reading only this queue ended the wait in the gap before
+        the readback. Never for a distress or urgency call, which is
+        answered whatever else is going on."""
+        if not self.config.immersion.controller.congestion:
+            return False
+        if parsed.intent in (Intent.EMERGENCY, Intent.URGENCY,
+                             Intent.MINIMUM_FUEL):
+            return False
+        to_come = list(self._traffic_queue)
+        if self.traffic is not None:
+            to_come += self.traffic.pending
+        for call in to_come:
+            if not self._on_this_channel(call, station):
+                continue
+            decided = self._exchanges.get(call.exchange)
+            if decided is not None and decided[0]:
+                return True
+        return False
+
+    def _first_call_missed(self, session: FlightSession, station: Station) -> bool:
+        """Whether this first call goes unanswered, decided once per flight
+        and station and seeded from both, so the same flight is treated the
+        same way every time it is replayed. The next call is answered."""
+        key = station_key(station)
+        if session.first_call_missed == key:
+            return False
+        seed = hashlib.sha256(
+            f"{session.aircraft.callsign.written}|{key}".encode()).digest()
+        missed = seed[0] / 255.0 < self.MISSED_FIRST_CALL
+        decision("congestion", station=station.callsign,
+                 said="nothing" if missed else "answered", why="first call")
+        if missed:
+            session.first_call_missed = key
+        return missed
+
+    def _say_held_reply(self, now: float) -> bool:
+        """The answer held behind somebody else's exchange, once it is over.
+        True when it went out."""
+        held = self._held_reply
+        if held is None:
+            return False
+        reply, station, spoken, since = held
+        if self.station is None or station_key(self.station) != station_key(station):
+            self._held_reply = None
+            return False
+        # The exchange is over when its last half has been said, not when it
+        # has been taken off the queue to be said: so not while the radio is
+        # still carrying it, nor in the breath the queue leaves after one.
+        if (self._congested(station, ParsedIntent()) or not self.quiet_enough()
+                or now < self._frequency_clear_at):
+            return False
+        self._held_reply = None
+        session = self.session
+        if reply.instruction is not None:
+            # Issued now, so the readback is chased from when it was heard.
+            reply.instruction.issued_at = time.monotonic()
+        decision("congestion", station=station.callsign, said="answered_after",
+                 waited_s=round(now - since, 1))
+        self.emit("atc", reply.text, station.callsign)
+        if session is not None:
+            session.note("atc", as_written(reply.text))
+        RADIO.write("atc", text=reply.text, language=spoken,
+                    station=station.callsign, frequency=round(station.mhz, 3),
+                    instruction=(reply.instruction.kind
+                                 if reply.instruction is not None else ""),
+                    held=True)
+        self.speak(reply.text, station, language=spoken)
+        self._frequency_clear_at = now + 0.6
+        return True
+
     def _speak_from_the_queue(self, station: Station, now: float) -> None:
         """Put the next queued transmission on the air, if the air is free.
 
@@ -2478,6 +4397,10 @@ class Engine:
         aeroplanes on their radio that they cannot see and did not clear.
         """
         if self.stand_down:
+            return
+        # An answer the pilot was told to stand by for goes before anything
+        # new from the traffic.
+        if self._say_held_reply(now):
             return
         if not self._traffic_queue:
             return
@@ -2496,7 +4419,8 @@ class Engine:
         for call in self._traffic_queue:
             # A closed position has no controller for the traffic to talk to
             # either, so its frequency carries nobody's half of an exchange.
-            if call.position != station.position or self.brain.closed(station):
+            if not self._on_this_channel(call, station) \
+                    or self.brain.closed(station):
                 continue
             decided = self._exchanges.get(call.exchange)
             if decided is not None and not decided[0]:
@@ -2533,6 +4457,15 @@ class Engine:
         # Long enough for the transmission to finish before the next one
         # starts, which the player being busy also enforces.
         self._frequency_clear_at = now + 0.6
+
+    @staticmethod
+    def _on_this_channel(call, station: Station) -> bool:
+        """Whether a queued call is heard on the station tuned: by channel
+        where the call knows its own (Ground and Tower on one frequency are
+        one frequency), else by position."""
+        if getattr(call, "mhz", 0.0) and station.mhz:
+            return same_channel(call.mhz, station.mhz, 0)
+        return call.position == station.position
 
     def _speak_traffic(self, call, station: Station) -> None:
         """Put one AI transmission on the air.
@@ -2653,6 +4586,190 @@ class Engine:
         self._radio_unprompted(reply.text, station, "departure", spoken,
                                reply.instruction)
 
+    def _work_the_climb(self, state: AircraftState,
+                        session: FlightSession) -> None:
+        """The next step of an IFR climb, a flight off its SID, and the
+        centre's side of the route (atc/routing.py)."""
+        now = time.monotonic()
+        self._say_watched(state, session, "climb",
+                          lambda station, spoken: self.climbs.look(
+                              session, station, state, now, spoken))
+        self._say_watched(state, session, "sid",
+                          lambda station, spoken: self.sid_watch.look(
+                              session, station, state, now, spoken))
+        self._say_watched(state, session, "route",
+                          lambda station, spoken: self.route_watch.look(
+                              session, station, state, now, spoken))
+
+    def _sim_contacts(self) -> list:
+        """The simulator's aeroplanes, without the pilot's own."""
+        if not self.config.traffic.from_simulator:
+            return []
+        own = (self.session.aircraft.callsign.written.upper()
+               if self.session is not None else "")
+        pilot = getattr(self.simwatch, "user_object_id", None)
+        found = [one for one in self.simwatch.poll()
+                 if one.object_id != pilot
+                 and (one.callsign or "").strip().upper() != own]
+        self._log_picture(found)
+        return found
+
+    # How often the controller's picture of the simulator's traffic is
+    # written to the arrival log when nothing in it has changed.
+    PICTURE_EVERY_S = 60.0
+
+    def _log_picture(self, found: list) -> None:
+        """A row of what the simulator's traffic feed gave the controller:
+        how many, how many placed, and the nearest few with what they were
+        read as. Written when the count changes and once a minute otherwise,
+        so a flight's log shows whether FSLTL's and the simulator's
+        aeroplanes ever reached the tower."""
+        now = time.monotonic()
+        count = len(found)
+        last = getattr(self, "_picture_logged", None)
+        if last is not None and last[0] == count and now - last[1] < self.PICTURE_EVERY_S:
+            return
+        self._picture_logged = (count, now)
+        state = self.state
+        nearest = []
+        if state is not None and state.has_position:
+            placed = [one for one in found if getattr(one, "positioned", True)]
+            placed.sort(key=lambda one: state.distance_to(one.latitude, one.longitude))
+            for one in placed[:5]:
+                nearest.append(
+                    f"{(one.callsign or one.registration or '?').strip()}"
+                    f"/{one.type_code or '?'}"
+                    f" {state.distance_to(one.latitude, one.longitude):.1f}nm"
+                    f" {round(one.altitude_ft or 0)}ft"
+                    f"{' gnd' if one.on_ground else ''}")
+        within = (sum(1 for one in found if getattr(one, "positioned", True)
+                      and state.distance_to(one.latitude, one.longitude) <= 10.0)
+                  if state is not None and state.has_position else None)
+        decision("picture", observed=count, within_10nm=within,
+                 nearest=nearest or None)
+
+    def _watch_traffic(self, state: AircraftState, session: FlightSession) -> None:
+        """Traffic calls for a flight on radar advisories
+        (:class:`~wilcoatc.atc.trafficinfo.TrafficWatch`)."""
+        station = self.station
+        if station is None or self.stand_down or not self.quiet_enough():
+            return
+        spoken = self._language_for(station.ident, self.last_language)
+        try:
+            reply = self.traffic_watch.look(session, station, state,
+                                            language=spoken)
+        except Exception:
+            log.debug("the traffic watch raised", exc_info=True)
+            return
+        if reply is None or not reply.speak:
+            return
+        self.emit("atc", reply.text, station.callsign)
+        session.note("atc", as_written(reply.text))
+        self.speak(reply.text, station, language=spoken)
+        self._radio_unprompted(reply.text, station, "traffic", spoken,
+                               reply.instruction)
+
+    def _watch_points(self, state: AircraftState, session: FlightSession) -> None:
+        """A reporting point flown past without a report
+        (:class:`~wilcoatc.atc.watch.ReportingPointWatch`)."""
+        station = self.station
+        if station is None or self.stand_down or not self.quiet_enough():
+            return
+        spoken = self._language_for(station.ident, self.last_language)
+        try:
+            reply = self.point_watch.look(session, station, state,
+                                          language=spoken)
+        except Exception:
+            log.debug("the reporting-point watch raised", exc_info=True)
+            return
+        if reply is None or not reply.speak:
+            return
+        self.emit("atc", reply.text, station.callsign)
+        session.note("atc", as_written(reply.text))
+        self.speak(reply.text, station, language=spoken)
+        self._radio_unprompted(reply.text, station, "reporting_point", spoken,
+                               reply.instruction)
+
+    def _watch_runway(self, state: AircraftState, session: FlightSession) -> None:
+        """The runway in use changing with the wind
+        (:class:`~wilcoatc.atc.watch.RunwayWatch`)."""
+        station = self.station
+        if station is None or self.stand_down or not self.quiet_enough():
+            return
+        spoken = self._language_for(station.ident, self.last_language)
+        try:
+            reply = self.runway_watch.look(session, station, state,
+                                           language=spoken)
+        except Exception:
+            log.debug("the runway watch raised", exc_info=True)
+            return
+        if reply is None or not reply.speak:
+            return
+        self.emit("atc", reply.text, station.callsign)
+        session.note("atc", as_written(reply.text))
+        self.speak(reply.text, station, language=spoken)
+        self._radio_unprompted(reply.text, station, "runway_change", spoken,
+                               reply.instruction)
+
+    def _watch_airspace(self, state: AircraftState, session: FlightSession) -> None:
+        """A VFR aeroplane about to enter a zone it needs a word for
+        (:class:`~wilcoatc.atc.watch.AirspaceWatch`)."""
+        station = self.station
+        if station is None or self.stand_down or not self.quiet_enough():
+            return
+        spoken = self._language_for(station.ident, self.last_language)
+        try:
+            reply = self.airspace_watch.look(session, station, state,
+                                             language=spoken)
+        except Exception:
+            log.debug("the airspace watch raised", exc_info=True)
+            return
+        if reply is None or not reply.speak:
+            return
+        self.emit("atc", reply.text, station.callsign)
+        session.note("atc", as_written(reply.text))
+        self.speak(reply.text, station, language=spoken)
+        self._radio_unprompted(reply.text, station, "airspace", spoken,
+                               reply.instruction)
+
+    def _watch_restriction(self, state: AircraftState,
+                           session: FlightSession) -> None:
+        """A VFR flight above the altitude radar holds it under
+        (:class:`~wilcoatc.atc.watch.RestrictionWatch`)."""
+        self._say_watched(state, session, "restriction",
+                          lambda station, spoken: self.restriction_watch.look(
+                              session, station, state, time.monotonic(),
+                              language=spoken))
+
+    def _watch_radar_service(self, state: AircraftState,
+                             session: FlightSession) -> None:
+        """A VFR flight's radar service ended as it leaves
+        (:class:`~wilcoatc.atc.watch.RadarServiceWatch`)."""
+        self._say_watched(state, session, "radar_service_end",
+                          lambda station, spoken: self.radar_service_watch.look(
+                              session, station, state, language=spoken))
+
+    def _say_watched(self, state: AircraftState, session: FlightSession,
+                     why: str, look) -> None:
+        station = self.station
+        if station is None or self.stand_down or not self.quiet_enough():
+            return
+        if not self.brain.staffed(station):
+            return
+        spoken = self._language_for(station.ident, self.last_language)
+        try:
+            reply = look(station, spoken)
+        except Exception:
+            log.debug("the %s watch raised", why, exc_info=True)
+            return
+        if reply is None or not reply.speak:
+            return
+        self.emit("atc", reply.text, station.callsign)
+        session.note("atc", as_written(reply.text))
+        self.speak(reply.text, station, language=spoken)
+        self._radio_unprompted(reply.text, station, why, spoken,
+                               reply.instruction)
+
     def _work_the_arrival(self, previous: AircraftState, state: AircraftState,
                           session: FlightSession) -> None:
         """Let the controller work the arrival instead of waiting to be asked.
@@ -2676,21 +4793,35 @@ class Engine:
         if not self.quiet_enough():
             return
         spoken = self._language_for(station.ident, self.last_language)
+        why = "arrival"
         try:
-            reply = self.arrivals.look(
-                session, station, state, previous,
-                weather_for=self.weather_for, language=spoken,
-            )
+            # The circuit first: a base the tower promised to call, and a
+            # report it asked for and did not get. One transmission a look.
+            reply = self.arrivals.circuit(session, station, state,
+                                          language=spoken)
+            if reply is not None and reply.speak:
+                why = "circuit"
+            else:
+                reply = self.arrivals.look(
+                    session, station, state, previous,
+                    weather_for=self.weather_for, language=spoken,
+                )
         except Exception:
             log.debug("the arrival watch raised", exc_info=True)
             return
         if reply is None or not reply.speak:
             return
 
+        if why != "circuit":
+            # The circuit's own calls log themselves; anything else the tower
+            # says unprompted to a VFR flight gets the same row.
+            self.brain.note_circuit(
+                session, station, state,
+                reply.instruction.kind if reply.instruction else why)
         self.emit("atc", reply.text, station.callsign)
         session.note("atc", as_written(reply.text))
         self.speak(reply.text, station, language=spoken)
-        self._radio_unprompted(reply.text, station, "arrival", spoken,
+        self._radio_unprompted(reply.text, station, why, spoken,
                                reply.instruction)
 
     #: How close to the departure runway counts as being at the holding
@@ -2821,7 +4952,13 @@ class Engine:
         if airborne_s < self.BOUNCE_S and above < self.BOUNCE_AGL_FT:
             return
         session.rollout_liftoff_at = 0.0
-        if session.cleared_option or session.pattern_work:
+        # Where nobody clears anything -- an AFIS, an unattended field -- a
+        # VFR aeroplane off the rollout is flying the circuit it was flying:
+        # there was no touch-and-go to clear, so none was recorded, and every
+        # one at Kortrijk was taken for a go-around and told to join.
+        nobody_clears = not session.ifr and not self.brain.issues_clearances(
+            self.station)
+        if session.cleared_option or session.pattern_work or nobody_clears:
             # Round the circuit: the touch-and-go it was cleared for.
             session.cleared_option = False
             session.cleared_landing = False
@@ -2844,11 +4981,39 @@ class Engine:
         reply = self.brain.go_around(session, station,
                                      self.weather_for(field.ident), p, field,
                                      told=True)
+        self.brain.note_circuit(session, station, state, "go_around")
         self.emit("atc", reply.text, station.callsign)
         session.note("atc", as_written(reply.text))
         self.speak(reply.text, station, language=spoken)
         self._radio_unprompted(reply.text, station, "go_around_after_touchdown",
                                spoken, reply.instruction)
+
+    # Still on the ground this long after a touchdown, the circuits are over.
+    # A touch-and-go is airborne again in well under that; a stop-and-go
+    # (which needs a clearance of its own) does not slow below the rollout
+    # speed the bounce detection above already uses.
+    FULL_STOP_AFTER_S = 20.0
+
+    def _full_stop_after_touchdown(self, state: AircraftState,
+                                   session: FlightSession) -> None:
+        """End the circuits of an aeroplane that landed and stayed down.
+
+        Asking for circuits set a flag that only a pilot's words could clear,
+        and a pilot who simply landed and taxied in kept it -- so the next
+        arrival of the session, hours later, was cleared for the option.
+        """
+        if not session.pattern_work or not session.touchdown_at:
+            return
+        if session.full_stop_judged_at == session.touchdown_at:
+            return
+        if not state.on_ground or session.rollout_liftoff_at:
+            return
+        if time.monotonic() - session.touchdown_at < self.FULL_STOP_AFTER_S:
+            return
+        session.full_stop_judged_at = session.touchdown_at
+        session.pattern_work = False
+        decision("circuits_ended", why="landed and stayed down",
+                 runway=session.touchdown_runway)
 
     def _update_phase(self, previous: AircraftState, state: AircraftState,
                       session: FlightSession) -> None:
@@ -2865,6 +5030,11 @@ class Engine:
             # The clearance was for this departure and is now spent. Leaving
             # it set meant a circuit could be flown all day on one clearance.
             session.cleared_takeoff = False
+            # A new flight from the ground, so the last circuit's legs are
+            # history: the tower waits for this one to report its own.
+            session.pattern_leg = ""
+            session.vrp_reported = ""
+            session.expected_vrp = ""
             session.cleared_runway = ""
             session.occupying_runway = ""
             # A new landing is a new event, so its advisory is armed again,
@@ -2887,6 +5057,14 @@ class Engine:
             session.landed_cleared = session.cleared_landing
             session.cleared_landing = False
             session.cleared_takeoff = False
+            session.landing_withheld = False
+            session.landing_anticipated = ""
+            if session.flight_plan_open:
+                # Nobody closes it on landing: that is the pilot's call to
+                # flight service, or a controller asked to pass it on (FAA
+                # AIM 5-1-14). Logged, so a flight plan left open is seen.
+                decision("flight_plan", said="still_open_after_landing",
+                         airport=getattr(session.destination, "ident", "") or None)
             # The landing clearance covers the rollout, so the runway stays
             # allowed until the aircraft is off it. That holds even for a
             # landing nobody cleared: it has already been called, and calling
@@ -3083,7 +5261,38 @@ class Engine:
         aeroplanes. Talking over a real controller is the one failure that
         matters more than any of them.
         """
-        return self.human is not None
+        return self.human is not None or not self.radio_powered
+
+    @property
+    def radio_powered(self) -> bool:
+        """Whether the aeroplane's radio has power (atc/radio_power.py).
+
+        Cold and dark, the radio is dead both ways: nothing the pilot says
+        goes out and nothing on the frequency comes in -- which is why
+        :attr:`stand_down`, read before every transmission, reads this too.
+        Each change is a ``radio_power`` row in ``logs radio`` with what it
+        was decided from, because "the controller will not answer" is a
+        report that has to be answerable.
+        """
+        if not self.config.atc.radio_needs_power:
+            return True
+        from .atc.radio_power import decide
+
+        on, why = decide(self.state)
+        if on != getattr(self, "_radio_on", None):
+            first = getattr(self, "_radio_on", None) is None
+            self._radio_on = on
+            RADIO.write("radio_power", powered=on, why=why,
+                        com1_status=getattr(self.state, "com1_status", -1),
+                        bus_volts=getattr(self.state, "main_bus_volts", -1.0),
+                        title=getattr(self.state, "title", ""))
+            if not on:
+                self.emit("info", "The radio has no power: nothing is heard "
+                          "and nothing goes out until the battery and the "
+                          "avionics are on.", key="log.radio_off")
+            elif not first:
+                self.emit("info", "The radio has power.", key="log.radio_on")
+        return on
 
     def _copilot_reads_back(self, session: FlightSession) -> bool:
         """The first officer works the radio, if that is what you asked for.
@@ -3235,7 +5444,10 @@ class Engine:
         """
         if session.phase is not Phase.HOLDING_SHORT:
             return
-        if session.advise_once("handoff:tower"):
+        # Its own key: "handoff:tower" is the arrival's, and spending it at
+        # the holding point left every arrival on approach's frequency until
+        # the pilot called the tower at six miles.
+        if session.advise_once("handoff:ground_to_tower"):
             self._pass_to(session, station, "TWR",
                           runway=session.departure_runway)
 
@@ -3257,6 +5469,18 @@ class Engine:
         climbing_out = (not state.on_ground and session.phase.outbound
                         and above >= self.HANDOFF_ABOVE_AGL_FT)
         if climbing_out:
+            if self._kept_by_the_tower(session, station):
+                # A VFR departure with no code and no advisories is the
+                # tower's until it leaves the zone, and then it is let go:
+                # handed to Departure, it was a radar service nobody had
+                # asked for (and nobody ended).
+                if self._in_the_zone(station, state):
+                    return
+                if session.advise_once("handoff:departure"):
+                    decision("vfr_departure", airport=station.ident,
+                             said="frequency_change", why="left the zone")
+                    self._pass_to_station(session, station, None)
+                return
             if session.advise_once("handoff:departure"):
                 self._pass_to(session, station, "DEP", "APP")
             return
@@ -3277,6 +5501,33 @@ class Engine:
             self._pass_to(session, station, "GND",
                           welcome=self._welcome_to(station)
                           if session.landed_cleared else "")
+
+    # A field's zone where the airspace files have none for it: the radius of
+    # an FAA Class D surface area, give or take.
+    ZONE_NM = 4.5
+
+    def _kept_by_the_tower(self, session: FlightSession,
+                           station: Station) -> bool:
+        """A VFR departure the tower does not hand to radar: no advisories
+        asked for, no code given."""
+        if session.ifr or session.flight_following or session.emergency:
+            return False
+        p = self.brain.for_station(station, self.last_language)
+        return str(session.squawk) == str(p.vfr_squawk)
+
+    def _in_the_zone(self, station: Station, state: AircraftState) -> bool:
+        """Whether the aeroplane is still inside the tower's own airspace."""
+        def own(volume) -> bool:
+            return volume.airport == station.ident and volume.cls in ("B", "C", "D")
+
+        try:
+            if any(own(v) for v in self.navdb.airspace_volumes()):
+                return any(own(v) for v in self.navdb.airspace_at(
+                    state.latitude, state.longitude, state.altitude_ft))
+        except Exception:
+            log.debug("zone lookup failed at %s", station.ident, exc_info=True)
+        where = self._station_position(station)
+        return where is not None and state.distance_to(*where) < self.ZONE_NM
 
     def _on_a_runway(self, ident: str, state: AircraftState) -> bool:
         try:
@@ -3303,7 +5554,14 @@ class Engine:
     HANDOFF_TO_CENTRE_FT = 10000.0
     HANDOFF_TO_CENTRE_NM = 30.0
     HANDOFF_TO_APPROACH_NM = 60.0
+    # Below an approach area's ceiling, an arrival this close is handed to
+    # approach even outside a small area (after LocalTC: three miles a
+    # thousand feet above the field, plus five).
+    SMALL_AREA_NM_PER_1000FT = 3.0
+    SMALL_AREA_SPARE_NM = 5.0
     HANDOFF_TO_TOWER_NM = 15.0
+    TOWER_AT_NM = 6.0
+    TOWER_MARGIN_NM = 4.0
 
     # The phases in which a flight still belongs to the field it left. Enroute
     # is one of them: the phase tracker sets it at ten thousand feet, before
@@ -3330,6 +5588,44 @@ class Engine:
         origin = session.departure
         return origin is not None and origin.ident == destination.ident
 
+    def _terminal_area(self, airport):
+        """A field's approach area (navdata.approach_areas), when the switch
+        is on and the field's coordinates fall in one; else None."""
+        if airport is None or not self.brain.realism.approach_areas:
+            return None
+        return self.navdb.approach_area(airport.ident)
+
+    def _arriving_in_area(self, state: AircraftState, destination,
+                          to_run: float) -> str:
+        """Why the destination's approach now has the flight, or "".
+
+        Below the area's ceiling, and inside the field's approach area or
+        close enough for a small one -- the area alone is not enough, since
+        an arrival still at FL300 over it is the centre's. Without an area,
+        the old sixty miles.
+        """
+        if destination is None:
+            return ""
+        area = self._terminal_area(destination)
+        if area is not None:
+            if area.contains(state.latitude, state.longitude, state.altitude_ft):
+                return f"inside {area.id} below {int(area.ceiling_ft)} ft"
+            # A small area and a fast arrival: handed over in time to get
+            # down, three miles a thousand feet above the field and room to
+            # slow and turn (after LocalTC). Heathrow Director's area is
+            # twenty miles across, and without this London Control gave the
+            # descent to 3,000 ft and approach took the flight at FL063.
+            above = float(state.altitude_ft) - float(destination.elev_ft or 0.0)
+            reach = above / 1000.0 * self.SMALL_AREA_NM_PER_1000FT \
+                    + self.SMALL_AREA_SPARE_NM
+            if state.altitude_ft < area.ceiling_ft and to_run <= reach:
+                return (f"below {int(area.ceiling_ft)} ft, {to_run:.0f} nm "
+                        f"out, within {reach:.0f} nm of a small area")
+            return ""
+        if to_run <= self.HANDOFF_TO_APPROACH_NM:
+            return f"within {self.HANDOFF_TO_APPROACH_NM:g} nm, no approach area"
+        return ""
+
     def _radar_hands_on(self, state: AircraftState, session: FlightSession,
                         station: Station) -> None:
         """Departure to centre, centre to approach, approach to the tower."""
@@ -3342,8 +5638,27 @@ class Engine:
                 return
             home = self.navdb.airport(station.ident)
             out = state.distance_to(home.lat, home.lon) if home else 0.0
-            leaving = (state.altitude_ft >= self.HANDOFF_TO_CENTRE_FT
-                       or out >= self.HANDOFF_TO_CENTRE_NM)
+            if self.brain.realism.climb_steps and session.ifr:
+                # Where departure's airspace ends (atc/climb.py), and only
+                # once the flight has checked in: a handoff before the first
+                # word is a frequency the pilot never spoke on.
+                area = self._terminal_area(session.departure or home)
+                why = leaving_departure(
+                    state.altitude_agl_ft, out, state.altitude_ft,
+                    state.vertical_speed_fpm, session.assigned_altitude_ft,
+                    session.cruise_altitude_ft or 0,
+                    in_area=(area.covers(state.latitude, state.longitude)
+                             if area is not None else None),
+                    area_ceiling_ft=getattr(area, "ceiling_ft", 0.0))
+                leaving = bool(why) and session.established_with(station)
+                if leaving and "handoff:centre" not in session.advisories:
+                    decision("climb", event="handoff", station=station.callsign,
+                             why=why, here_ft=round(state.altitude_ft),
+                             out_nm=round(out, 1),
+                             area=getattr(area, "id", None))
+            else:
+                leaving = (state.altitude_ft >= self.HANDOFF_TO_CENTRE_FT
+                           or out >= self.HANDOFF_TO_CENTRE_NM)
             if leaving and session.advise_once("handoff:centre"):
                 centre = self.navdb.center_station(
                     state.latitude, state.longitude, state.altitude_ft)
@@ -3374,16 +5689,31 @@ class Engine:
         to_run = (state.distance_to(destination.lat, destination.lon)
                   if destination is not None else float("inf"))
 
-        if station.position == "CTR" and to_run > self.HANDOFF_TO_APPROACH_NM:
+        arriving_why = self._arriving_in_area(state, destination, to_run)
+        if station.position == "CTR" and not arriving_why:
             self._centre_hands_on(state, session, station)
             return
         if destination is None:
             return
 
-        if station.position == "CTR" and to_run <= self.HANDOFF_TO_APPROACH_NM:
+        if station.position == "CTR" and arriving_why:
             if session.advise_once("handoff:approach"):
-                self._pass_to(session, station, "APP", "DEP",
-                              at=destination.ident)
+                approach = self._approach_at(destination, station)
+                decision("handoff", to="approach", station=station.callsign,
+                         field=destination.ident, why=arriving_why,
+                         to_run_nm=round(to_run, 1),
+                         altitude_ft=round(state.altitude_ft),
+                         worked_by=("approach" if approach is not None
+                                    else "the centre: no approach control"))
+                if approach is None:
+                    # No approach control at the field: the centre works the
+                    # arrival itself -- the descent, the approach clearance
+                    # and the handoff to the tower, which ArrivalWatch and
+                    # the tower handoff below give any radar position. It
+                    # used to say "frequency change approved" here and let
+                    # the flight go with nobody to call.
+                    return
+                self._pass_to_station(session, station, approach)
                 return
             # That has already been said. A field that publishes no approach
             # control is worked by the centre the whole way in, so the flight
@@ -3399,42 +5729,377 @@ class Engine:
                     and not session.phase.outbound
                     and self._on_the_way_in(state, session, destination, to_run))
         if arriving and session.advise_once("handoff:tower"):
+            from .atc.arrival import CLEARED_APPROACH_KEY
+
+            decision("handoff", to="tower", station=station.callsign,
+                     field=destination.ident, to_run_nm=round(to_run, 1),
+                     why=("cleared and established on the final"
+                          if CLEARED_APPROACH_KEY in session.advisories
+                          and self.brain.realism.star_final
+                          else "in the final's cone or close in"))
             self._pass_to(session, station, "TWR", at=destination.ident,
                           runway=session.arrival_runway)
 
-    # How often a centre looks at where the flight now is. Thirty seconds is
-    # four miles at cruise speed, and a sector is a hundred.
-    CENTRE_CHECK_S = 30.0
+    # How often a centre looks ahead. Ten seconds is a mile and a third at
+    # cruise speed, against a handoff window two minutes wide.
+    CENTRE_CHECK_S = 10.0
+    # How long before the boundary a centre hands a flight on: a moment in
+    # this window, the same one every time for a given flight and sector, so
+    # one controller is early and the next a little later, as people are.
+    HANDOFF_LEAD_S = (120.0, 240.0)
+    # A sector the flight is across in less than this is coordinated by the
+    # controllers either side, not handed into.
+    SHORT_SECTOR_S = 240.0
+    # How far ahead the centre looks: the window, a short sector, and margin.
+    LOOK_AHEAD_MIN = 10.0
+    # A centre does not hand a flight back to the one it has just left.
+    BACK_AGAIN_S = 600.0
+    # Climbing or descending faster than this towards its assigned level,
+    # a flight is handed to the sector at that level.
+    CHANGING_LEVEL_FPM = 500.0
+    # Not switched by then, the handoff is said again, once.
+    REOFFER_AFTER_S = 90.0
+    # However short the time on a frequency, a flight half a minute from the
+    # line is handed on.
+    LAST_MOMENT_S = 30.0
 
     def _centre_hands_on(self, state: AircraftState, session: FlightSession,
                          station: Station) -> None:
-        """Pass the flight to the next centre when it is in the next one's sector.
+        """Pass the flight to the next centre before it reaches the boundary.
 
-        Which centre covers a position is :meth:`NavDB.center_station`'s
-        answer: the boundary the aeroplane is inside names the centre, and
-        the frequency is one filed under that name. When the answer for here
-        is on another channel from the one being worked, this centre is done
-        with the flight. Two rows of the same centre on the same number --
-        Minnipa and Wudinna are both 125.9 -- are not a handoff.
+        The sector ahead along the track (or the SimBrief route) is
+        :meth:`EnRoute.crossings`'s answer; the handoff is given two to four
+        minutes before the line, to the next controller in the region's
+        words. It used to be given only once the aeroplane was inside the
+        next sector, which is late by the whole of a real controller's
+        margin, and before that it was measured from the field a frequency
+        is filed at -- the circle round a country airstrip that took a
+        flight across Australia on one frequency.
 
-        Not measured from the field the frequency is filed at, which is what
-        the coverage reminder did: a centre is not a circle round a country
-        airstrip, and that circle is how a flight crossed Australia on one
-        frequency. Nor behind the reminder setting: no centre leaves a flight
-        to find the next one for itself.
+        A sector crossed in under four minutes is skipped; the handoff never
+        goes to the station already worked, nor back to the one just left,
+        nor while a readback is owed. Where the moment was missed -- the
+        pilot was mid-exchange, or the data put the line closer than the
+        window -- the flight is still handed on once it is inside the next
+        sector, so it is never left with nobody. Every decision is a row of
+        ``logs radio`` with its reason.
         """
+        from .atc.enroute import is_oceanic
+
         now = time.monotonic()
         if now - self._centre_checked_at < self.CENTRE_CHECK_S:
             return
         self._centre_checked_at = now
-        here = self.navdb.center_station(
-            state.latitude, state.longitude, state.altitude_ft)
-        if here is None or not here.mhz or same_channel(here.mhz, station.mhz, 4):
+        handed = session.handoff_pending
+        if handed is not None and station_key(handed) == station_key(station) \
+                and session.established_with(station):
+            # The flight is with the station it was sent to and has called
+            # it: that handoff is done, and the next one may be given.
+            session.handoff_pending = None
+        if self._reoffer_handoff(session, station, now):
             return
-        log.info("centre handoff at %.2f, %.2f: %s %.3f -> %s %.3f",
-                 state.latitude, state.longitude, station.callsign,
-                 station.mhz, here.callsign, here.mhz)
-        self._pass_to_station(session, station, here)
+        if session.handoff_pending is not None:
+            return
+        pending = session.pending
+        if pending is not None and pending.readback_required \
+                and not pending.read_back:
+            return
+
+        enroute = self.navdb.enroute
+        lat, lon, alt = state.latitude, state.longitude, state.altitude_ft
+        sector = enroute.which(lat, lon, alt)
+        # On the way to a level it was given, the flight belongs to the
+        # sector at that level, not to each one it passes through: coming
+        # down into London it was handed 135.0, 134.9 and 120.525 inside a
+        # minute, one stratum after another.
+        assigned = float(session.assigned_altitude_ft or 0.0)
+        vs = float(state.vertical_speed_fpm or 0.0)
+        if assigned and abs(vs) > self.CHANGING_LEVEL_FPM \
+                and (assigned - alt) * vs > 0:
+            at_level = enroute.which(lat, lon, assigned)
+            if at_level is not None:
+                if sector is not None and at_level.key != sector.key \
+                        and session.advise_once(
+                            f"enroute:to_level:{at_level.key}"):
+                    decision("enroute", event="to the level",
+                             sector=at_level.facility,
+                             passing=sector.facility, level_ft=int(assigned))
+                sector, alt = at_level, assigned
+        self._note_sector(sector)
+
+        # Already inside a sector that is not this station's: late, but
+        # handed on rather than left.
+        if sector is not None and sector.oceanic:
+            if not is_oceanic(station):
+                self._go_oceanic(session, station, sector)
+                return
+        elif sector is None:
+            here = self.navdb.center_station(lat, lon, alt)
+            if here is not None and here.mhz \
+                    and not same_channel(here.mhz, station.mhz, 4):
+                self._pass_to_station(session, station, here)
+            return
+
+        crossings = enroute.crossings(
+            lat, lon, state.heading_true, state.ground_speed_kt, alt,
+            self.LOOK_AHEAD_MIN, self._route_points())
+        if not sector.oceanic and not sector.answers(station.mhz):
+            # Already over the line. Into a sector the flight leaves again
+            # within four minutes it is not handed at all, or the late
+            # handoff hands it in and straight out again: Maastricht, Reims,
+            # Maastricht inside four miles.
+            if crossings and crossings[0].minutes * 60.0 < self.SHORT_SECTOR_S:
+                if session.advise_once(f"enroute:skipped:{sector.key}"):
+                    decision("enroute", event="skipped",
+                             sector=sector.facility,
+                             reason=f"left again in "
+                                    f"{crossings[0].minutes:.1f} min",
+                             to=crossings[0].sector.facility)
+                target = self._past_short_sectors(session, crossings)
+                if target.sector.oceanic:
+                    self._go_oceanic(session, station, target.sector)
+                else:
+                    self._centre_hands_to(session, station, target.sector,
+                                          minutes=0.0, late=True)
+                return
+            self._centre_hands_to(session, station, sector, minutes=0.0,
+                                  late=True)
+            return
+        if not crossings:
+            return
+        first = crossings[0]
+        if session.advise_once(f"enroute:boundary:{first.sector.key}"):
+            decision("enroute", event="boundary", sector=first.sector.facility,
+                     minutes=round(first.minutes, 1),
+                     distance_nm=round(first.distance_nm, 1))
+        lead = self._handoff_lead_s(session, first.sector)
+        if first.minutes * 60.0 > lead:
+            return
+        held = time.monotonic() - session.with_since if session.with_since else None
+        if (held is not None and held < self.SHORT_SECTOR_S
+                and first.minutes * 60.0 > self.LAST_MOMENT_S):
+            # Handed in early to a sector not much wider than the window,
+            # and out early again, the flight was on a frequency for thirty
+            # seconds: Hong Kong Radar on one number, then on another four
+            # miles on. A controller who has just taken a flight keeps it
+            # four minutes, or until the line is half a minute off.
+            if session.advise_once(f"enroute:held:{first.sector.key}"):
+                decision("enroute", event="held", station=station.callsign,
+                         sector=first.sector.facility,
+                         reason=f"on this frequency {held / 60.0:.1f} min")
+            return
+
+        nxt = self._past_short_sectors(session, crossings).sector
+        if nxt.oceanic:
+            if not is_oceanic(station):
+                self._go_oceanic(session, station, nxt)
+            return
+        self._centre_hands_to(session, station, nxt, minutes=first.minutes)
+
+    def _past_short_sectors(self, session: FlightSession, crossings):
+        """The first crossing whose sector the flight stays in for four
+        minutes or more; those it is across sooner are logged as skipped."""
+        target = crossings[0]
+        for later in crossings[1:]:
+            across = (later.minutes - target.minutes) * 60.0
+            if across >= self.SHORT_SECTOR_S:
+                break
+            if session.advise_once(f"enroute:skipped:{target.sector.key}"):
+                decision("enroute", event="skipped",
+                         sector=target.sector.facility,
+                         reason=f"crossed in {across / 60.0:.1f} min",
+                         to=later.sector.facility)
+            target = later
+        return target
+
+    def _centre_hands_to(self, session: FlightSession, station: Station,
+                         sector, minutes: float, late: bool = False) -> None:
+        """Say the handoff to ``sector``'s controller, unless it is a rule
+        not to: the same station, or the one just left."""
+        nxt = sector.station()
+        if not nxt.mhz:
+            return
+        if sector.answers(station.mhz) or station_key(nxt) == station_key(station):
+            if session.advise_once(f"enroute:same:{sector.key}"):
+                decision("enroute", event="skipped", sector=sector.facility,
+                         reason="the station already worked")
+            return
+        if self._handing_back(nxt):
+            if session.advise_once(f"enroute:back:{station_key(nxt)}"):
+                decision("enroute", event="skipped", sector=sector.facility,
+                         reason="left less than ten minutes ago")
+            return
+        log.info("centre handoff%s, %.1f min before the line: %s %.3f -> "
+                 "%s %.3f", " (late)" if late else "", minutes,
+                 station.callsign, station.mhz, nxt.callsign, nxt.mhz)
+        state = self.state
+        here = (self.navdb.enroute.which(state.latitude, state.longitude,
+                                         float(state.altitude_ft or 0.0))
+                if state is not None and state.has_position else None)
+        decision("enroute", event="offered", station=station.callsign,
+                 to=nxt.callsign, frequency=round(nxt.mhz, 3),
+                 minutes=round(minutes, 1), late=late,
+                 from_sector=here.id if here is not None else None,
+                 sector=sector.id,
+                 source=sector.frequency_source, invented=sector.invented)
+        session.left_at[station_key(station)] = time.monotonic()
+        session.oceanic = None
+        self._pass_to_station(session, station, nxt)
+
+    def _handing_back(self, station: Station) -> bool:
+        """Whether ``station`` is one the flight left under ten minutes ago."""
+        session = self.session
+        if session is None:
+            return False
+        left = session.left_at.get(station_key(station))
+        return left is not None and time.monotonic() - left < self.BACK_AGAIN_S
+
+    def _handoff_lead_s(self, session: FlightSession, sector) -> float:
+        """How long before this boundary this flight is handed on.
+
+        Seeded from the callsign and the sector, so a test flight -- or a
+        pilot flying the same route twice -- meets the same controller
+        habits, while two boundaries in a row are not handed on alike.
+        """
+        low, high = self.HANDOFF_LEAD_S
+        seed = f"{session.aircraft.callsign.written}:{sector.id}:{sector.facility}"
+        fraction = int(hashlib.sha1(seed.encode("utf-8")).hexdigest()[:8], 16)
+        return low + (high - low) * fraction / 0xFFFFFFFF
+
+    def _note_sector(self, sector) -> None:
+        """A row in ``logs radio`` each time the flight enters a sector."""
+        key = sector.key if sector is not None else None
+        if key == self._sector_noted:
+            return
+        self._sector_noted = key
+        if sector is not None:
+            decision("enroute", event="entered", sector=sector.facility,
+                     id=sector.id, source=sector.source,
+                     frequency=round(sector.mhz, 3), invented=sector.invented)
+
+    def _reoffer_handoff(self, session: FlightSession, station: Station,
+                         now: float) -> bool:
+        """Say a centre handoff again when the flight has not switched.
+
+        Ninety seconds after it was given, with the flight still on this
+        frequency: "did you get the frequency?", and the handoff once more.
+        Once; after that it is the pilot's frequency to find.
+        """
+        handed = session.handoff_pending
+        if handed is None or handed.position != "CTR" or not handed.mhz:
+            return False
+        if now - session.handoff_offered_at < self.REOFFER_AFTER_S:
+            return False
+        if not session.advise_once(f"enroute:reoffer:{station_key(handed)}"):
+            return False
+        spoken = self._language_for(station.ident, self.last_language)
+        p = self.brain.for_station(station, spoken)
+        session.aircraft.language = getattr(p, "language", "en")
+        text = p.handoff_reoffer(session.aircraft,
+                                 handed.callsign_in(spoken, short=True),
+                                 handed.mhz)
+        decision("enroute", event="reoffered", station=station.callsign,
+                 to=handed.callsign, frequency=round(handed.mhz, 3))
+        self.emit("atc", text, station.callsign)
+        session.note("atc", as_written(text))
+        self.speak(text, station, language=spoken)
+        self._radio_unprompted(text, station, "handoff_reoffer", spoken)
+        session.handoff_offered_at = now
+        return True
+
+    def _route_points(self) -> list[tuple[float, float]] | None:
+        """The loaded route as points, for looking ahead along it."""
+        if self.route:
+            return self.route.points()
+        plan = self.plan
+        if plan is None:
+            return None
+        if self._route_cache is not None and self._route_cache[0] is plan:
+            return self._route_cache[1]
+        from .integrations.simbrief import route_points
+
+        points = route_points(plan) or None
+        self._route_cache = (plan, points)
+        return points
+
+    def _say_invented(self, station: Station) -> None:
+        """Say once that a frequency was made up, and ask for the real one.
+
+        A sector with no published frequency in any data this program has is
+        given one rather than left silent (atc/enroute.py), and a made-up
+        number that looks like a real one is a number nobody corrects.
+        """
+        from .atc.enroute import is_invented
+
+        session = self.session
+        if session is None or not is_invented(station):
+            return
+        if not session.advise_once(f"invented:{station_key(station)}"):
+            return
+        mhz = f"{station.mhz:.3f}"
+        self.emit("info",
+                  f"No published frequency is known for {station.callsign}; "
+                  f"{mhz} is invented. If you know the real one, please "
+                  "report it on GitHub.",
+                  key="log.invented_frequency", station=station.callsign,
+                  mhz=mhz)
+
+    def _go_oceanic(self, session: FlightSession, station: Station,
+                    sector) -> None:
+        """The last radar controller sends the flight to the ocean's HF station.
+
+        Over the ocean there is no VHF radar, so the honest transmission is
+        "radar service terminated, contact ... Radio", with the HF family
+        where the data has one. Nothing a simulator's COM radio can tune, so
+        the station is held in the session (``session.oceanic``) and taken
+        over once the readback is in (:meth:`_settle_oceanic`).
+        """
+        oceanic = sector.station()
+        spoken = self._language_for(station.ident, self.last_language)
+        p = self.brain.for_station(station, spoken)
+        session.aircraft.language = getattr(p, "language", "en")
+        text = p.oceanic_contact(session.aircraft,
+                                 oceanic.callsign_in(spoken, short=True),
+                                 sector.hf_khz)
+        log.info("oceanic: %s hands %s to %s (HF %s)", station.callsign,
+                 session.aircraft.callsign.written, oceanic.callsign,
+                 sector.hf_khz or "unknown")
+        decision("enroute_oceanic", station=station.callsign,
+                 to=oceanic.callsign, hf=list(sector.hf_khz))
+        self.emit("atc", text, station.callsign)
+        session.note("atc", as_written(text))
+        self.speak(text, station, language=spoken)
+        self._radio_unprompted(text, station, "oceanic", spoken)
+        session.oceanic = oceanic
+        session.handoff_pending = oceanic
+        session.handoff_offered_at = time.monotonic()
+        # Nothing in it can be checked: the HF family is not a number the
+        # simulator's radio takes. The first call the HF station hears --
+        # the readback or a position report -- is its first contact.
+        session.remember(Instruction("handoff", station_key(station), text,
+                                     {"station": oceanic.callsign},
+                                     readback_required=False))
+
+    def _settle_oceanic(self, session: FlightSession) -> None:
+        """Once the oceanic handoff is read back, the flight is with HF.
+
+        There is no frequency to tune, so the readback is the switch. The
+        station is established at once: a flight checks in with its first
+        position report, and nothing in the ocean volunteers anything
+        before it.
+        """
+        from .atc.enroute import is_oceanic
+
+        oceanic = session.oceanic
+        if oceanic is None or is_oceanic(self.station):
+            return
+        pending = session.pending
+        if pending is not None and pending.readback_required \
+                and not pending.read_back:
+            return
+        self.station = oceanic
+        session.establish(oceanic)
+        log.info("now with %s on HF", oceanic.callsign)
 
     # Close enough to the field that the tower has it whichever way it is
     # pointing. Inside this an aeroplane flying a visual circuit to the
@@ -3465,10 +6130,23 @@ class Engine:
             if final is None:
                 return to_run <= self.HANDOFF_TO_TOWER_NM
             return final.in_cone(state, self.HANDOFF_TO_TOWER_NM, aligned=False)
+        if self.brain.realism.vectors and session.ifr \
+                and CLEARED_APPROACH_KEY not in session.advisories:
+            # Vectored arrivals are cleared on the intercept; one handed to
+            # the tower before that -- a downwind passes close to the field
+            # -- was sent back to approach to be vectored.
+            return False
         if to_run <= self.HANDOFF_ANYWAY_NM:
             return True
         if final is None:
             return to_run <= self.HANDOFF_TO_TOWER_NM
+        if CLEARED_APPROACH_KEY in session.advisories \
+                and self.brain.realism.star_final:
+            # Cleared and established: to the tower about TOWER_AT_NM +
+            # TOWER_MARGIN_NM out, lined up and tracking down the final
+            # (after LocalTC: 6 + 4 nm).
+            return final.in_cone(state, self.TOWER_AT_NM + self.TOWER_MARGIN_NM,
+                                 aligned=True)
         return final.in_cone(state, self.HANDOFF_TO_TOWER_NM, aligned=False)
 
     def _no_enroute_frequency(self, session: FlightSession,
@@ -3527,6 +6205,15 @@ class Engine:
             owed=instruction.owed_items if instruction is not None else [],
             values=dict(instruction.values) if instruction is not None else {},
         )
+
+    def _approach_at(self, field, station: Station):
+        """The field's approach or departure control, from this program's
+        station data (never the approach area's name), or None."""
+        for position in ("APP", "DEP"):
+            found = self.brain.controller_at(field.ident, position)
+            if found is not None and station_key(found) != station_key(station):
+                return found
+        return None
 
     def _pass_to(self, session: FlightSession, station: Station,
                  *positions: str, at: str = "", welcome: str = "",
@@ -3598,6 +6285,11 @@ class Engine:
             return
         if time.monotonic() - session.handoff_offered_at < self.config.atc.handoff_grace_s:
             return
+        if station.position == "INFO":
+            # A VFR flight on an information service is not handed to a
+            # radar position. The next information sector, or a free call.
+            self._leave_information(session, station, state)
+            return
 
         distance = state.distance_to(
             *self._station_position(station)
@@ -3608,6 +6300,22 @@ class Engine:
             return
 
         nxt = self._next_station(state, session, station)
+        if nxt is None and session.flight_following and not session.ifr:
+            # Out of range of the advisories with nobody to hand them on to:
+            # the service ends, in the region's words, rather than going
+            # quiet on a flight that thinks it is still being watched.
+            if not session.advise_once(f"ff:end:{station_key(station)}"):
+                return
+            spoken = self._language_for(station.ident, self.last_language)
+            p = self.brain.for_station(station, spoken)
+            session.flight_following = False
+            session.squawk = p.vfr_squawk
+            text = p.radar_service_terminated(session.aircraft)
+            decision("flight_following", station=station.callsign, said="terminated")
+            self.emit("atc", text, station.callsign)
+            self.speak(text, station, language=spoken)
+            self._radio_unprompted(text, station, "flight_following_end", spoken)
+            return
         if nxt is None or station_key(nxt) == station_key(station):
             return
 
@@ -3623,6 +6331,76 @@ class Engine:
             Instruction("handoff", station_key(station), text,
                         {"frequency": nxt.mhz})
         )
+
+    def _leave_information(self, session: FlightSession, station: Station,
+                           state: AircraftState) -> None:
+        """An en-route information service letting a flight go at the edge
+        of its range: to the next information sector where one can hear it,
+        else "squawk 7000, frequency change approved".
+
+        The coverage handoff above sends a flight to a centre or an
+        approach, which for a VFR flight talking to Langen Information was
+        a radar position that had never heard of it. An aerodrome service
+        says nothing: the pilot reports leaving it.
+        """
+        from .atc import afis
+
+        if afis.kind_of(self.navdb, station) != afis.FIS:
+            return
+        if not session.established_with(station):
+            return
+        where = self._station_position(station)
+        if where is None:
+            return
+        reach = STATION_RANGE_NM.get("INFO", 120.0)
+        if state.distance_to(*where) <= reach * 0.9:
+            return
+        if not session.advise_once(f"fis:left:{station_key(station)}"):
+            return
+        spoken = self._language_for(station.ident, self.last_language)
+        p = self.brain.for_station(station, spoken)
+        nxt = self._next_information(station, state)
+        if nxt is not None:
+            text = p.handoff(session.aircraft,
+                             self.brain.station_name(nxt, p, short=True),
+                             nxt.mhz, farewell=True)
+            session.handoff_pending = nxt
+            values = {"frequency": nxt.mhz}
+        else:
+            session.squawk = p.vfr_squawk
+            text = p.frequency_change_approved(session.aircraft,
+                                               squawk=p.vfr_squawk)
+            values = {}
+        decision("fis", station=station.callsign, said="leaving_range",
+                 next=nxt.callsign if nxt is not None else None)
+        session.handoff_offered_at = time.monotonic()
+        session.remember(Instruction("handoff", station_key(station), text,
+                                     values, readback_required=bool(values)))
+        self.emit("atc", text, station.callsign)
+        self.speak(text, station, language=spoken)
+        self._radio_unprompted(text, station, "handoff_reminder", spoken)
+
+    def _next_information(self, current: Station,
+                          state: AircraftState) -> Station | None:
+        """The nearest other en-route information sector in reach."""
+        from .atc import afis
+
+        best = None
+        for airport, _distance in self.navdb.nearest_airports(
+                state.latitude, state.longitude, limit=25, max_nm=120.0):
+            for other in self.navdb.stations(airport.ident):
+                if other.position != "INFO" or not other.mhz:
+                    continue
+                if other.facility.strip().lower() == current.facility.strip().lower():
+                    continue
+                if afis.kind_of(self.navdb, other) != afis.FIS:
+                    continue
+                if not self._within_reach(other, state):
+                    continue
+                distance = state.distance_to(airport.lat, airport.lon)
+                if best is None or distance < best[0]:
+                    best = (distance, other)
+        return best[1] if best else None
 
     def _station_position(self, station: Station) -> tuple[float, float] | None:
         airport = self.navdb.airport(station.ident)
@@ -3653,8 +6431,9 @@ class Engine:
             if centre and centre.mhz and self._within_reach(centre, state):
                 return centre
             destination = session.destination
-            if destination is None or state.distance_to(
-                    destination.lat, destination.lon) > self.HANDOFF_TO_APPROACH_NM:
+            if destination is None or not self._arriving_in_area(
+                    state, destination, state.distance_to(
+                        destination.lat, destination.lon)):
                 return None
             found = self.brain.controller_at(destination.ident, "APP")
             if found is not None and self._within_reach(found, state):
@@ -3701,7 +6480,14 @@ class Engine:
         """Load models so the first transmission is not delayed."""
         self.emit("info", "Loading speech recognition...",
                   key="log.loading_stt")
-        self.recognizer.warm()
+        from .audio.stt import SpeechModelMissing
+
+        try:
+            self.recognizer.warm()
+        except SpeechModelMissing:
+            # A fresh install: the first-run setup's Downloads screen fetches
+            # it, and the recogniser loads on the first transmission after.
+            log.info("speech model not downloaded yet; the setup fetches it")
         # Kokoro is loaded whatever ``preload`` says: it is one model for
         # nearly every controller, and paying for it here rather than on the
         # first clearance is the difference between a two-second wait for the

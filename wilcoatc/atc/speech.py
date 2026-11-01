@@ -191,6 +191,18 @@ def _two_digit_group(n: int) -> str:
     return _TENS[tens] if ones == 0 else f"{_TENS[tens]} {_ONES[ones]}"
 
 
+def cardinal(n: int) -> str:
+    """A small whole number as a word: 13 -> "thirteen". A place in a
+    sequence is a number, not a string of digits; read as digits under
+    strict ICAO it was "number one tree". Digits again from a hundred."""
+    n = int(n)
+    if 0 <= n < 10:
+        return _ONES[n]
+    if 10 <= n < 100:
+        return _two_digit_group(n)
+    return digits(n)
+
+
 def group_form(number: str | int) -> str:
     """Speak an air-carrier flight number the way US controllers do.
 
@@ -460,40 +472,48 @@ def radio_callsign(registration: str, airline: str = "",
     return f"{icao}{int(number)}"
 
 
-# Manufacturer names controllers actually use for light aircraft, keyed by the
-# ICAO type designator reported by the sim.
+# What a US controller puts in front of a registration, keyed by the ICAO
+# type designator the sim reports. FAA JO 7110.65 (Aircraft Identification)
+# allows the aircraft type, the model or the manufacturer's name in place of
+# "November", and the manufacturer is what is heard most. There is no FAA
+# list of these per type to check against (JO 7360.1 gives designators and
+# manufacturers, not radio names), so:
+# UNVERIFIED: the whole table. The entries not marked are the
+# manufacturer's name; those marked "model" are a model name, which the
+# order allows but which is usage, not a source. A DA40 was "Diamond Star"
+# and is "Diamond" now; a type not here is "November".
 GA_TYPE_TELEPHONY: dict[str, str] = {
     "C172": "Cessna",
     "C152": "Cessna",
     "C182": "Cessna",
-    "C208": "Caravan",
-    "C25A": "Citation",
-    "C25C": "Citation",
-    "C700": "Citation",
-    "P28A": "Cherokee",
-    "P28R": "Arrow",
-    "PA18": "Cub",
-    "PA24": "Comanche",
-    "PA34": "Seneca",
-    "PA44": "Seminole",
-    "PA46": "Malibu",
+    "C208": "Caravan",          # model
+    "C25A": "Citation",         # model
+    "C25C": "Citation",         # model
+    "C700": "Citation",         # model
+    "P28A": "Cherokee",         # model
+    "P28R": "Arrow",            # model
+    "PA18": "Cub",              # model
+    "PA24": "Comanche",         # model
+    "PA34": "Seneca",           # model
+    "PA44": "Seminole",         # model
+    "PA46": "Malibu",           # model
     "SR20": "Cirrus",
     "SR22": "Cirrus",
-    "BE36": "Bonanza",
-    "BE58": "Baron",
-    "BE9L": "King Air",
-    "B350": "King Air",
-    "DA40": "Diamond Star",
-    "DA42": "Twin Star",
+    "BE36": "Bonanza",          # model
+    "BE58": "Baron",            # model
+    "BE9L": "King Air",         # model
+    "B350": "King Air",         # model
+    "DA40": "Diamond",
+    "DA42": "Diamond",
     "DA62": "Diamond",
-    "DV20": "Katana",
-    "TBM9": "Tee Bee Em",
+    "DV20": "Diamond",
+    "TBM9": "Tee Bee Em",       # model
     "EPIC": "Epic",
     "PC12": "Pilatus",
     "M20P": "Mooney",
-    "AC11": "Commander",
-    "RV10": "Are Vee",
-    "VL3": "Vee Ell",
+    "AC11": "Commander",        # model
+    "RV10": "Are Vee",          # model
+    "VL3": "Vee Ell",           # model
 }
 
 # The types that fly under an airline's telephony name: airliners, regional
@@ -560,6 +580,7 @@ def parse_callsign(
     dialect: Dialect = "faa",
     airline_names: dict[str, str] | None = None,
     strict_icao_digits: bool = False,
+    airline: bool | None = None,
 ) -> Callsign:
     """Turn a written callsign into its spoken forms.
 
@@ -572,6 +593,10 @@ def parse_callsign(
     digits are then pronounced "three" or "tree" is a different question and
     is ``strict_icao_digits``, exactly as it is for the rest of the
     phraseology; an ICAO field does not automatically mean an ICAO alphabet.
+
+    ``airline`` is the pilot's own answer to whether this is an airline
+    flight (``FlightProfile``); None, for the traffic, asks the type
+    (:func:`flies_as_airline`).
     """
     figures: Dialect = ("icao" if (dialect == "icao" and strict_icao_digits)
                         else "faa")
@@ -583,7 +608,8 @@ def parse_callsign(
 
     # --- air carrier: three-letter designator plus flight number -----------
     m = _AIRLINE_RE.match(raw)
-    if m and m.group(1) in table and flies_as_airline(aircraft_type):
+    as_airline = flies_as_airline(aircraft_type) if airline is None else airline
+    if m and m.group(1) in table and as_airline:
         icao, flight = m.group(1), m.group(2)
         name = table[icao]
         if not _NUMERIC_FLIGHT_RE.match(flight):
@@ -611,6 +637,14 @@ def parse_callsign(
         short_body = digits_and_letters(body[-3:], figures)
         short = f"{prefix} {short_body}".strip() if prefix else f"November {short_body}"
         return Callsign(raw, full, short)
+
+    # --- an airline's shape with no airline to say: ETD204 in a VL3 --------
+    # Spelled, and never cut to its last three characters: an airline-style
+    # identification is not abbreviated (ICAO Doc 4444 12.3.1.9 abbreviates
+    # registrations only). "Two zero four" was heard at Kortrijk.
+    if _AIRLINE_RE.match(raw):
+        spoken = digits_and_letters(raw, figures)
+        return Callsign(raw, spoken, spoken)
 
     # --- other registrations (G-ABCD, D-EFGH, VH-ABC ...) -----------------
     m = _TAIL_RE.match(raw)
@@ -711,18 +745,26 @@ def vertical_speed(fpm: float, dialect: Dialect = "faa") -> str:
 # frequencies
 # --------------------------------------------------------------------------
 
+from ..navdata.channels import channel_digits  # noqa: E402
 
-def frequency(mhz: float | str, dialect: Dialect = "faa") -> str:
+
+def frequency(mhz: float | str, dialect: Dialect = "faa",
+              channel: bool = False) -> str:
     """Speak a VHF frequency.
 
     US practice drops trailing zeros, so 121.900 is "one two one point niner"
     and 118.000 is "one one eight point zero". An 8.33 kHz channel keeps its
     third decimal, because 118.005 and 118.000 are different channels.
+
+    ``channel`` is a channel name in 8.33 airspace, said in six digits
+    unless its last two are zero (``channels.channel_digits``).
     """
     text = f"{float(mhz):.3f}" if not isinstance(mhz, str) else mhz
     whole, _, frac = text.partition(".")
     frac = (frac + "000")[:3]
-    if frac[2] != "0":
+    if channel:
+        spoken_frac = digits(channel_digits(float(f"{whole}.{frac}")), dialect)
+    elif frac[2] != "0":
         spoken_frac = digits(frac, dialect)  # true 8.33 kHz channel
     else:
         trimmed = frac[:2].rstrip("0") or "0"
@@ -769,11 +811,42 @@ def runway(ident: str, dialect: Dialect = "faa",
     return spoken
 
 
+# A taxiway named by a word and a number, as Heathrow's links are ("LINK
+# 11"). The word is said as a word; spelling it was "Lima India November
+# Kilo one one". The number is read digit by digit like every other one on
+# the ground here -- CAP 413 has not been checked for how a link's is.
+NAMED_TAXIWAY = re.compile(r"^([A-Z]{3,}) ?([0-9]+)$")
+_VOWELS = set("AEIOUY")
+
+
+def taxiway_word(ident: str) -> tuple[str, str] | None:
+    """``(word, number)`` for a taxiway whose name is a word -- ``OUT3`` ->
+    ``("Out", "3")``, ``INN`` -> ``("Inn", "")``, ``LINK 11`` -> ``("Link",
+    "11")`` -- or None for one that is spelled. A word is three letters or
+    more with a vowel in it: "OUT" said "Oscar Uniform Tango three" was the
+    taxi clearance at Brussels (30 Oct 2026) -- and the vowel within its
+    first two letters, so a designator like "NTA" is still spelled. A
+    field's own words, where the label is short for one ("OUT" is "Outer"),
+    or one to spell whatever this rule says, are put in before this by
+    atc.taxi.say_words."""
+    ident = (ident or "").strip().upper()
+    named = NAMED_TAXIWAY.match(ident)
+    word, number = (named.group(1), named.group(2)) if named else (ident, "")
+    if len(word) < 3 or not word.isalpha() or not (set(word[:2]) & _VOWELS):
+        return None
+    return word.capitalize(), number
+
+
 def taxiway(ident: str) -> str:
-    """``A``->``Alpha``, ``B4``->``Bravo four``, ``KILO``->``Kilo``."""
+    """``A``->``Alpha``, ``B4``->``Bravo four``, ``KILO``->``Kilo``,
+    ``LINK 11``->``Link one one``, ``OUT3``->``Out three``."""
     ident = (ident or "").strip().upper()
     if len(ident) > 2 and ident.isalpha() and ident.capitalize() in _ALPHABET.values():
         return ident.capitalize()
+    named = taxiway_word(ident)
+    if named:
+        word, number = named
+        return f"{word} {digits(number)}" if number else word
     return digits_and_letters(ident)
 
 
@@ -793,8 +866,25 @@ def altimeter(value: float, dialect: Dialect = "faa") -> str:
     return digits(f"{int(round(float(value))):04d}", dialect)
 
 
+# A gust is reported when it exceeds the mean by 10 kt (ICAO Annex 3
+# 4.1.5.2 b; the METAR's own rule), and not at all in a wind under 3 kt.
+# "Wind two seven zero at one gusting four five" was said at Kortrijk.
+GUST_OVER_MEAN_KT = 10.0
+GUST_MIN_MEAN_KT = 3.0
+
+
+def reportable_gust(knots: float, gust: float | None) -> float:
+    """The gust to say, or 0 when there is none worth saying."""
+    knots = float(knots or 0.0)
+    gust = float(gust or 0.0)
+    if knots < GUST_MIN_MEAN_KT or gust - knots < GUST_OVER_MEAN_KT:
+        return 0.0
+    return gust
+
+
 def wind(direction: float | str, knots: float, gust: float | None = None,
          dialect: Dialect = "faa") -> str:
+    gust = reportable_gust(knots, gust)
     if int(round(float(knots))) == 0:
         # Calm is calm from any direction, and after variation is applied
         # a calm wind is no longer from zero.

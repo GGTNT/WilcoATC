@@ -92,12 +92,58 @@ INVENTORY: dict[str, frozenset[str]] = {
     "it": frozenset("abdefijklmnoprstuvwzɔɛɡɲɾʃʎʒ"),
     "nl": frozenset("abdefhijklmnoprstuvwxyzøŋœɑɔəɛɣɪɲɵʃʋʒ"),
     "pt": frozenset("abdefijklmnopstuvwxzɐɔɛɡɪɲɾʃʊʎʒ"),
+    # Every other country whose Piper voices speak English with its accent.
+    # Sampled rather than written: each language's own words, a pangram and
+    # its numbers put through espeak-ng in that language
+    # (scripts/accent_inventories.py), so these are what the models saw in
+    # training. A sound missing from a sample is substituted when it need
+    # not be, which costs a little accent and never a glitch.
+    # Without the English r espeak writes into some Arabic: the model reads a
+    # trill, and with ɹ declared its English lost 61% of its words, without
+    # it 42% (dry, the recogniser, three clearances).
+    'ar': frozenset('abdfhijklmnqrstuwxzðħɣʃʒʔʕːˤ̪θχ'),
+    'bg': frozenset('abdefijklmnoprstuvxzɐəɡɫʃʒʲː'),
+    'bn': frozenset('abdefhijklmnoprstuwæŋɔɖɟɡɳɾʃʈʰː̃'),
+    'zh': frozenset('125aefhijklmnoprstuwyæŋɑɕəɛɜɡʐ̪χ'),
+    'cs': frozenset('abcdefhijklmnoprstuvxzɟɡɲʃʊʑʒʲː̝̩̊'),
+    'da': frozenset('abdefhijklmnopstuwyðœɐɑɒəɛɡɾʁʋʌʔː̯ε'),
+    'el': frozenset('abcdefijklmnoprstvxzðɡɣʲ̧θ'),
+    'et': frozenset('abdefhijklmnoprstuvyzæøŋɑɛɡɪɵʃʊʎʒː'),
+    'fa': frozenset('1abdefhijklmnopqrstuvxzɑɡʃʒː'),
+    'fi': frozenset('abdefhijklmnopqrstuvyæøŋɡɪʲː'),
+    'hi': frozenset('abcdefhijklmnopqrstuwxzɔɖəɛɟɡɣɪɲɳɾʂʃʈʊʋʌʰʲː̩̃'),
+    'hu': frozenset('abcdefhijklmnoprstuvyzøɑɛɟɡɲʃʒʲː'),
+    'hy': frozenset('abdefhijklmnoprstuvzəɡɪɹɾʀʃʒʰːχ'),
+    'id': frozenset('abcdfhijklmnoprstuvwxzŋɔəɛɡɪɲʃʒ̧'),
+    'is': frozenset('#abcdefhijklmnorstuxyðøŋœɔəɛɟɡɣɪɾʊʋʲːθ'),
+    'ka': frozenset('abcdehiklmnopqrstuvxzəɡɣʃʒʰ'),
+    'kk': frozenset('abefhjklmnopqrstuwxzæøŋɑəɡɪɫɵɾʀʃʊʒʔ'),
+    'ko': frozenset('dehijkmnopqrstuwŋɐɕɛɡɫɯɾʃʌʑʲ'),
+    'lb': frozenset('Xabdefghijklmnopstuvwzæɐɑɕəɜɪɳʀʁʃʊʦː'),
+    'lv': frozenset('abcdefhijklmnoprstuzæɟɡɲʃʋʎʒː͡'),
+    'no': frozenset('abdefhijklmnoprstuvwxyøŋɑɔəɛɡɪʂʃʉʊʲː'),
+    'ne': frozenset('abcdefhijklmnoprstuvwzŋɒɔɖəɛɜɟɡɪɲɳɹɾʂʃʈʊʌʰʲː̃θ'),
+    'pl': frozenset('abcdfijklmnprstuvwxzŋɔɕɛɡɨɲʃʑʒʲː̃'),
+    'ro': frozenset('abdefhijklmnoprstuvwzŋəɡɨɪɾʃʊʒʲ'),
+    'ru': frozenset('abdefijkmnoprstuvxyzɑɕɛɡɪɭɵɾʃʌʑʒʲ'),
+    'sk': frozenset('abdehijklmnoprstuvwxzæɣɲɾʃʎʒʲː̩'),
+    'sl': frozenset('abdeijklmnoprstuwxzɔəɛɡɲʃʋʒː'),
+    'sq': frozenset('abdefhijklmnprstuyzðɑɔɕəɛɡɪɫɲɾʃʌʑʒθ'),
+    'sr': frozenset('abdefijklmnoprstuvxzɐɑɕɛɡɪɲʃʎʑʒʲ̩'),
+    'sv': frozenset('abdefhijklmnoprstuvyøœɑɔɕəɛɡɧɪɭɳɵʂʈʉʲː'),
+    'tr': frozenset('abcdefhijklmnoprstuvyzæøœɛɟɡɪɫɯɾʃʊʒː'),
+    'uk': frozenset('abdefhijklmnoprstuvxzɛɡɪʃʎʒʲː̪β'),
+    'ur': frozenset('abcdefhijklmnopqrstuxzŋɔɖəɛɟɡɣɪʂʃʈʊʋʌʒʰʲːθ'),
+    'vi': frozenset('124567abcefhijklmnopstuvwxyzŋɔɗəɛɜɣɪɲʃʊː̪'),
 }
 
 # Vowels take a length mark in the languages that contrast length. French,
 # Spanish, Italian and Portuguese do not, so the mark is dropped there and the
 # vowel comes out short, which is itself an audible part of the accent.
-KEEPS_LENGTH: frozenset[str] = frozenset({"en", "de", "nl"})
+KEEPS_LENGTH: frozenset[str] = frozenset(
+    {"en", "de", "nl"} | {language for language, sounds in INVENTORY.items()
+                          if "ː" in sounds and language not in
+                          ("fr", "es", "it", "pt")})
 
 
 # --------------------------------------------------------------------------
@@ -813,6 +859,56 @@ def _hold_final_vowel(word: list[Token]) -> list[Token]:
 # --------------------------------------------------------------------------
 
 
+# For a language with no table of its own: where each English sound goes,
+# in order of preference, the first the target has. A chain rather than a
+# table per language, because forty languages written by hand would be forty
+# guesses; the chain is one, and it is the textbook one (the dental
+# fricatives to s/z, then t/d; the English r to the trill or tap; the lax
+# vowels to the tense ones; the diphthongs to their first vowel and a glide).
+# UNVERIFIED: none of these accents has been listened to.
+_NEAREST: dict[str, tuple[str, ...]] = {
+    "θ": ("θ", "s", "t", "f"), "ð": ("ð", "z", "d", "v", "t", "s"),
+    "w": ("w", "ʋ", "v", "u", "β"), "ʍ": ("w", "ʋ", "v", "u"),
+    "ɹ": ("ɹ", "r", "ɾ", "ʁ", "ɻ", "ɽ", "l"), "ɻ": ("r", "ɾ", "ʁ", "l"),
+    "r": ("r", "ɾ", "ʁ", "l"), "ɾ": ("ɾ", "t", "d", "r"),
+    "h": ("h", "ɦ", "x", "χ", "ħ", ""), "ʔ": ("ʔ", ""),
+    "v": ("v", "ʋ", "w", "β", "b", "f", "p"), "z": ("z", "s", "ʃ"), "ʒ": ("ʒ", "ʑ", "ʐ", "ʃ", "z", "j", "s"),
+    "ʃ": ("ʃ", "ɕ", "ʂ", "s", "h"), "ŋ": ("ŋ", "n"), "ɡ": ("ɡ", "k"), "g": ("ɡ", "k"),
+    "ɫ": ("ɫ", "l", "ɭ", "ɬ"), "l": ("l", "ɭ", "ɫ", "ɾ"), "j": ("j", "i"),
+    "p": ("p", "b"), "b": ("b", "p"), "t": ("t", "d"), "d": ("d", "t"),
+    "k": ("k", "ɡ", "q"), "f": ("f", "ɸ", "p", "v", "h"), "s": ("s", "ɕ", "ʃ"),
+    "m": ("m", "n"), "n": ("n", "ɲ", "m"),
+    "tʃ": ("tʃ", "tɕ", "ʈʂ", "ts", "ʃ", "tj", "t"), "dʒ": ("dʒ", "dʑ", "ɖʐ", "dz", "ʒ", "tʃ", "tɕ", "dj", "j", "d"),
+    "æ": ("æ", "ɛ", "e", "a", "ɐ"), "ʌ": ("ʌ", "a", "ɐ", "ɑ", "ə"),
+    "ɐ": ("ɐ", "a", "ʌ", "ə"), "ɑ": ("ɑ", "a", "ɐ", "ʌ", "ɒ", "ɔ", "o"), "a": ("a", "ɑ", "ɐ", "ʌ", "æ"),
+    "ɒ": ("ɒ", "ɔ", "o", "ɑ", "a", "u", "ɐ"), "ɔ": ("ɔ", "o", "ɒ", "ɑ", "u", "a", "ɐ"),
+    "o": ("o", "ɔ", "u", "a"), "ə": ("ə", "ɐ", "ɛ", "e", "a", "ɨ"),
+    "ɚ": ("ɚ", "əɹ", "ər", "ɐ", "ə", "e", "ɛr", "ɛ", "a"), "ɝ": ("ɝ", "ɜ", "ər", "ə", "ɛ", "e", "a"),
+    "ɜ": ("ɜ", "ə", "ɛ", "œ", "e", "ø", "a"), "ɪ": ("ɪ", "i", "e", "ɨ", "ɛ"),
+    "ᵻ": ("ᵻ", "ɪ", "i", "ɨ", "e"), "ʊ": ("ʊ", "u", "o", "ɯ"), "u": ("u", "ʊ", "o", "ɯ"),
+    "i": ("i", "ɪ", "e"), "e": ("e", "ɛ", "i", "a"), "ɛ": ("ɛ", "e", "æ", "a", "i"),
+    "eɪ": ("eɪ", "ej", "ei", "e", "ɛ"), "oʊ": ("oʊ", "ow", "ou", "o", "ɔ"),
+    "əʊ": ("əʊ", "oʊ", "ou", "o"), "aɪ": ("aɪ", "aj", "ai", "a"),
+    "aʊ": ("aʊ", "aw", "au", "a"), "ɔɪ": ("ɔɪ", "ɔj", "oj", "oi", "o"),
+    "ɪə": ("ɪə", "iə", "ia", "i"), "eə": ("eə", "ɛə", "ɛ", "e"),
+    "ɛə": ("ɛə", "ɛ", "e"), "ʊə": ("ʊə", "uə", "ua", "u"),
+    "ɑɹ": ("ɑɹ", "ar", "aɾ", "a", "ɐ"), "ɚɹ": ("ər", "ɐ", "ə", "ɛr", "ɛ", "a"), "ɝɹ": ("ər", "ɜ", "ə", "ɛr", "ɛ", "a"),
+}
+
+
+def nearest(unit: str, inventory: frozenset[str]) -> str | None:
+    """The first sound of ``unit``'s chain that ``inventory`` has; for a
+    digraph, its parts one at a time; None where nothing fits."""
+    for candidate in _NEAREST.get(unit, (unit,)):
+        if all(c in inventory for c in candidate):
+            return candidate
+    if len(unit) > 1:
+        parts = [nearest(c, inventory) for c in unit if c not in _TRAILING]
+        if all(part is not None for part in parts):
+            return "".join(parts)
+    return None
+
+
 def substitute(tokens: list[Token], target: str, strength: float = 0.5) -> list[Token]:
     """Replace every phoneme the target voice cannot make.
 
@@ -852,6 +948,14 @@ def substitute(tokens: list[Token], target: str, strength: float = 0.5) -> list[
                 replacement = base
             else:
                 replacement = table.get(base)
+        if replacement is None and target not in _INTO:
+            # A language with no table of its own: the nearest sound it has,
+            # its length kept where the language has length.
+            bare = unit.replace(_LENGTH, "")
+            replacement = nearest(bare, inventory) or nearest(_base(unit), inventory)
+            if replacement and keep_length and _LENGTH in unit \
+                    and _LENGTH in inventory:
+                replacement += _LENGTH
         if replacement is None:
             log.debug("no %s realisation for %r; dropping it", target, unit)
             continue

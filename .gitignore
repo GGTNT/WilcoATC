@@ -1,4 +1,5 @@
 .venv/
+.venv-hq/
 .venv.zip
 build/
 dist/
@@ -25,3 +26,23 @@ data/metar_cache.json
 !data/navdata/overrides.csv
 !data/navdata/preferred_runways.csv
 !data/navdata/minimum_altitudes.csv
+!data/navdata/service_hours.csv
+!data/navdata/circuits.csv
+!data/navdata/circuits_faa.csv
+!data/navdata/vrps.csv
+!data/navdata/vrps_faa.csv
+!data/navdata/airspace.csv
+!data/navdata/airspace_faa.csv
+!data/navdata/fir_frequencies.csv
+!data/navdata/sectors_faa.csv
+!data/navdata/centre_sites_faa.csv
+!data/navdata/sectors.csv
+!data/navdata/taxiway_words.csv
+!data/navdata/SOURCES.md
+
+# Recordings of real frequencies that reference clips are cut from
+# (scripts/clone_prompts.py). Somebody else's audio; never committed.
+new_voices_cloning/
+
+# One machine's own settings on top of config.yaml (wilcoatc.config.Config.load).
+config.local.yaml

@@ -13,7 +13,10 @@ a normal machine (about 40 MB of CSV, 25 MB once indexed):
     and Maastricht above Brussels come from: the published dataset has no
     area control frequency for most of Europe. CC BY-NC-SA 4.0, VatGlasses
     contributors. About 26 MB, one file per country, kept apart from the
-    program under ``vatglasses/``.
+    program under ``vatglasses/``. The one non-commercial dependency, so it
+    is fetched only when the pilot asks for it, after being shown that
+    licence (``fetch_all(vatglasses=True)``: the setup screen's tick box, or
+    ``setup --vatglasses``), and never bundled.
 
 Run ``python -m wilcoatc.navdata.fetch`` to refresh.
 """
@@ -70,8 +73,14 @@ VATGLASSES_FILES: tuple[str, ...] = (
     "zvr", "zwg"
 )
 
-for _name in VATGLASSES_FILES:
-    FILES[f"vatglasses/{_name}.json"] = f"{VATGLASSES}/{_name}.json"
+# Fetched only on request; see the module docstring.
+VATGLASSES_DOWNLOADS: dict[str, str] = {
+    f"vatglasses/{_name}.json": f"{VATGLASSES}/{_name}.json"
+    for _name in VATGLASSES_FILES
+}
+VATGLASSES_LICENCE = ("CC BY-NC-SA 4.0 (attribution, non-commercial, "
+                      "share-alike), VatGlasses contributors, "
+                      "https://github.com/lennycolton/vatglasses-data")
 
 DATA_DIR = navdata_dir()
 
@@ -110,11 +119,16 @@ REQUIRED: frozenset[str] = frozenset({
 
 
 def fetch_all(dest: Path = DATA_DIR, force: bool = False,
-              on_progress: Progress = None) -> None:
+              on_progress: Progress = None, vatglasses: bool = False) -> None:
     dest.mkdir(parents=True, exist_ok=True)
     if on_progress is None:
         print(f"Downloading navigation data into {dest}")
-    for name, url in FILES.items():
+    wanted = dict(FILES)
+    if vatglasses:
+        if on_progress is None:
+            print(f"  en-route sectors: VatGlasses, {VATGLASSES_LICENCE}")
+        wanted.update(VATGLASSES_DOWNLOADS)
+    for name, url in wanted.items():
         if (dest / name).exists() and not force:
             if on_progress is None:
                 size = (dest / name).stat().st_size / 1e6
@@ -130,4 +144,4 @@ def fetch_all(dest: Path = DATA_DIR, force: bool = False,
 
 
 if __name__ == "__main__":
-    fetch_all(force="--force" in sys.argv)
+    fetch_all(force="--force" in sys.argv, vatglasses="--vatglasses" in sys.argv)

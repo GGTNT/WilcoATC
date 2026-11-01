@@ -60,12 +60,35 @@ const Airspace = (() => {
   const PLANE = "M21.5 15.6v-1.9L13.6 9V3.9a1.6 1.6 0 0 0-3.2 0V9L2.5 13.7v1.9"
     + "l7.9-2.2v4.9l-2.1 1.6v1.6l3.7-1.1 3.7 1.1v-1.6l-2.1-1.6v-4.9l7.9 2.2z";
 
-  const INK = "#141414";
-  const LAND = "#ffffff";
-  const WATER = "#dfe4e9";
-  const COAST = "#9aa3ac";
-  const BORDER = "#c2c8cf";
-  const REGION = "#a9b1b8";
+  // The chart's colours, which follow the window's theme: read off the
+  // stylesheet (--map-*) at the start of every draw, so a change of theme or
+  // accent is on the map at the next redraw without anything here knowing
+  // which theme it is. The values are the light theme's, for a page without
+  // the stylesheet.
+  let INK = "#141414";
+  let LAND = "#ffffff";
+  let WATER = "#dfe4e9";
+  let COAST = "#9aa3ac";
+  let BORDER = "#c2c8cf";
+  let REGION = "#a9b1b8";
+  // What a label or a mark is cut out of the chart with: the ground the
+  // chart is drawn on, white on the light one.
+  let PAPER = "#ffffff";
+  // Your own aeroplane, in the accent.
+  let OWN = INK;
+
+  function palette() {
+    const style = getComputedStyle(document.documentElement);
+    const read = (name, fallback) => style.getPropertyValue(name).trim() || fallback;
+    INK = read("--map-ink", INK);
+    LAND = read("--map-land", LAND);
+    WATER = read("--map-water", WATER);
+    COAST = read("--map-coast", COAST);
+    BORDER = read("--map-border", BORDER);
+    REGION = read("--map-region", REGION);
+    PAPER = read("--map-paper", PAPER);
+    OWN = read("--accent", INK);
+  }
 
   // The view: where the middle of the map is, and how big it is drawn.
   //
@@ -532,7 +555,7 @@ const Airspace = (() => {
           // The bar across a large field's ring is the chart convention for
           // one with hard runways in more than one direction.
           mark.appendChild(el("path", {
-            d: `M${-r} 0H${r}`, stroke: airport.towered ? "#fff" : INK,
+            d: `M${-r} 0H${r}`, stroke: airport.towered ? PAPER : INK,
             "stroke-width": 1.6,
           }));
         }
@@ -633,6 +656,124 @@ const Airspace = (() => {
   }
 
   /**
+   * The approach areas of the flight's two fields: where departure lets the
+   * flight go and where approach takes it. The one the flight is handed to
+   * next is drawn in the pilot's own colour, the other faintly.
+   */
+  function drawAreas(root, areas, k, midY, labels) {
+    if (!areas || !areas.length) return;
+    const group = el("g", { class: "approach-areas" });
+    areas.forEach((area) => {
+      area.rings.forEach((ring) => {
+        const pts = ring.map(([lat, lon]) => project(lat, lon, k, midY));
+        group.appendChild(el("polygon", {
+          points: pts.map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(" "),
+          fill: area.next ? OWN : INK, "fill-opacity": area.next ? 0.06 : 0.025,
+          stroke: area.next ? OWN : INK, "stroke-width": area.next ? 1.4 : 1,
+          "stroke-opacity": area.next ? 0.7 : 0.3, "stroke-dasharray": "5 4",
+        }));
+        if (area.next && pts.length) {
+          const top = pts.reduce((a, b) => (b[1] < a[1] ? b : a));
+          labels.push({ x: top[0], y: top[1] - 6, text: area.label, size: 9.5,
+                        weight: 600, fill: OWN, rank: 1 });
+        }
+      });
+    });
+    root.appendChild(group);
+  }
+
+  /**
+   * The final the arrival is worked onto: the cone every arrival clearance
+   * is measured in, the extended centreline, and the vector pattern's
+   * downwind, base and gate on the side in use. The leg the controller last
+   * gave is drawn in the pilot's own colour, so the next heading can be read
+   * off the chart before it is said.
+   */
+  function drawFinal(root, final, k, midY, labels) {
+    if (!final || !final.cone) return;
+    const group = el("g", { class: "final" });
+    const pts = (line) => line.map(([lat, lon]) => project(lat, lon, k, midY));
+    const str = (line) => pts(line)
+      .map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(" ");
+    group.appendChild(el("polygon", {
+      points: str(final.cone), fill: INK, "fill-opacity": 0.03,
+      stroke: INK, "stroke-width": 1, "stroke-opacity": 0.25,
+    }));
+    group.appendChild(el("polyline", {
+      points: str(final.centreline), fill: "none", stroke: INK,
+      "stroke-width": 1.2, "stroke-opacity": 0.6, "stroke-dasharray": "8 4",
+    }));
+    const flying = final.leg === "downwind" || final.leg === "join"
+      ? "downwind" : final.leg === "base" ? "base" : null;
+    ["downwind", "base"].forEach((leg) => {
+      group.appendChild(el("polyline", {
+        points: str(final[leg]), fill: "none",
+        stroke: leg === flying ? OWN : INK,
+        "stroke-width": leg === flying ? 2.2 : 1,
+        "stroke-opacity": leg === flying ? 0.9 : 0.4,
+        "stroke-dasharray": leg === flying ? "" : "3 3",
+      }));
+    });
+    const [gx, gy] = pts([final.gate])[0];
+    group.appendChild(el("circle", {
+      cx: gx.toFixed(1), cy: gy.toFixed(1), r: 3,
+      fill: "none", stroke: final.leg === "intercept" ? OWN : INK,
+      "stroke-width": 1.2,
+    }));
+    if (view.spanNm <= 120) {
+      const [ex, ey] = pts([final.centreline[1]])[0];
+      labels.push({ x: ex, y: ey + 6, text: final.runway, size: 9.5,
+                    weight: 600, fill: INK, rank: 0 });
+    }
+    root.appendChild(group);
+  }
+
+  /**
+   * The filed route, under everything else.
+   *
+   * The whole line faint and the leg being flown in the accent, so where the
+   * controller will send the aeroplane next is on the chart before it is on
+   * the radio. A fix is named only when there is room: at five hundred
+   * miles across, forty idents are a smear.
+   */
+  function drawRoute(root, route, k, midY, labels) {
+    if (!route || !route.fixes || route.fixes.length < 2) return;
+    const group = el("g", { class: "route" });
+    const pts = route.fixes.map((f) => project(f.lat, f.lon, k, midY));
+    const line = pts.map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(" ");
+    group.appendChild(el("polyline", {
+      points: line, fill: "none", stroke: INK,
+      "stroke-width": 1.2, "stroke-opacity": 0.45,
+      "stroke-linejoin": "round",
+    }));
+    const leg = route.leg;
+    if (leg != null && leg > 0 && leg < pts.length) {
+      const [a, b] = [pts[leg - 1], pts[leg]];
+      group.appendChild(el("line", {
+        x1: a[0].toFixed(1), y1: a[1].toFixed(1),
+        x2: b[0].toFixed(1), y2: b[1].toFixed(1),
+        stroke: OWN, "stroke-width": 2.6, "stroke-linecap": "round",
+      }));
+    }
+    const named = view.spanNm <= 250;
+    route.fixes.forEach((f, i) => {
+      if (f.marker) return;
+      const [x, y] = pts[i];
+      group.appendChild(el("path", {
+        d: `M${x.toFixed(1)} ${(y - 3.5).toFixed(1)} l3.5 6.5 h-7 z`,
+        fill: "none", stroke: INK, "stroke-width": 1, "stroke-opacity": 0.7,
+      }));
+      if (named) {
+        // Below the mark, as the airports are, and ranked under them: a
+        // field's name wins the space over a fix's.
+        labels.push({ x, y: y + 6, text: f.ident, size: 9.5,
+                      weight: i === leg ? 700 : 500, fill: INK, rank: 0 });
+      }
+    });
+    root.appendChild(group);
+  }
+
+  /**
    * Who is on frequency, and where.
    *
    * A column of position codes beside the field, with the one you are tuned
@@ -722,7 +863,7 @@ const Airspace = (() => {
           return `${index ? "L" : "M"}${px.toFixed(1)} ${py.toFixed(1)}`;
         }).join("");
         group.appendChild(el("path", {
-          d, fill: "none", stroke: "#ffffff", "stroke-width": 7,
+          d, fill: "none", stroke: PAPER, "stroke-width": 7,
           "stroke-linecap": "round", "stroke-linejoin": "round",
           "stroke-opacity": 0.9,
         }));
@@ -744,6 +885,15 @@ const Airspace = (() => {
         "stroke-opacity": aircraft.on_ground ? 0.55 : 0.95,
         "stroke-linejoin": "round",
       }));
+      // A real aeroplane from the live feed, ringed in the pilot's colour,
+      // so the invented traffic and the real are told apart at a glance.
+      if (aircraft.source === "live") {
+        mark.appendChild(el("circle", {
+          cx: x.toFixed(1), cy: y.toFixed(1), r: (size * 0.85).toFixed(1),
+          fill: "none", stroke: OWN, "stroke-width": 1.2,
+          "stroke-opacity": 0.85,
+        }));
+      }
 
       // Where it will be in a minute, which turns a heading and a speed into
       // one glance instead of two readings.
@@ -792,6 +942,22 @@ const Airspace = (() => {
     const [x, y] = project(ownship.lat, ownship.lon, k, midY);
     const group = el("g", { class: "ownship" });
 
+    // The taxi the controller gave, along the taxiways it named. Drawn
+    // before the aeroplane so the aeroplane sits on it, and whether or not
+    // the aeroplane is on screen: it is where the pilot is going.
+    const route = ownship.taxi_route || [];
+    if (route.length >= 2) {
+      const d = route.map(([lat, lon], i) => {
+        const [px, py] = project(lat, lon, k, midY);
+        return `${i ? "L" : "M"}${px.toFixed(1)} ${py.toFixed(1)}`;
+      }).join("");
+      root.appendChild(el("path", {
+        d, class: "taxi-route", fill: "none", stroke: INK,
+        "stroke-width": 3, "stroke-opacity": 0.55,
+        "stroke-linejoin": "round", "stroke-linecap": "round",
+      }));
+    }
+
     // Off screen, it becomes an arrow on the edge pointing at itself. A pilot
     // who has panned away should still be able to find the way back.
     if (x < 0 || x > W || y < 0 || y > H) {
@@ -820,11 +986,11 @@ const Airspace = (() => {
     }
     group.appendChild(el("circle", {
       cx: x.toFixed(1), cy: y.toFixed(1), r: 15,
-      fill: "#fff", "fill-opacity": 0.85, stroke: INK,
-      "stroke-width": 1.2, "stroke-opacity": 0.35,
+      fill: PAPER, "fill-opacity": 0.85, stroke: OWN,
+      "stroke-width": 1.2, "stroke-opacity": 0.6,
     }));
     group.appendChild(plane(x, y, 20, ownship.heading, {
-      fill: INK, stroke: INK, "stroke-width": 1, "stroke-linejoin": "round",
+      fill: OWN, stroke: OWN, "stroke-width": 1, "stroke-linejoin": "round",
     }));
     root.appendChild(group);
 
@@ -868,7 +1034,7 @@ const Airspace = (() => {
         group.appendChild(el("rect", {
           x: (spot.x0 - 1).toFixed(1), y: (spot.y0 - 1).toFixed(1),
           width: (width + 2).toFixed(1), height: (height + 2).toFixed(1),
-          rx: 3, fill: "#fff", "fill-opacity": 0.84,
+          rx: 3, fill: PAPER, "fill-opacity": 0.84,
         }));
       }
       lines.forEach((line, index) => {
@@ -957,7 +1123,7 @@ const Airspace = (() => {
     const y = 34;
     const rose = el("g", { class: "compass", "pointer-events": "none" });
     rose.appendChild(el("circle", {
-      cx: x, cy: y, r: 17, fill: "#fff", "fill-opacity": 0.7,
+      cx: x, cy: y, r: 17, fill: PAPER, "fill-opacity": 0.7,
       stroke: INK, "stroke-width": 0.8, "stroke-opacity": 0.3,
     }));
     rose.appendChild(el("path", {
@@ -991,6 +1157,7 @@ const Airspace = (() => {
    * everything, and the names last so that nothing is written over.
    */
   function render(svg, data, layers, options = {}) {
+    palette();
     resize(svg);
     svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
     svg.replaceChildren();
@@ -1015,6 +1182,9 @@ const Airspace = (() => {
       drawRegions(svg, (data && data.boundaries) || [], k, midY, labels);
       drawCoverage(svg, (data && data.stations) || [], k, midY);
     }
+    drawAreas(svg, data && data.areas, k, midY, labels);
+    drawFinal(svg, data && data.final, k, midY, labels);
+    drawRoute(svg, data && data.route, k, midY, labels);
     if (layers.has("airports")) {
       drawAirports(svg, (data && data.airports) || [], k, midY, labels,
                    view.spanNm <= 80);

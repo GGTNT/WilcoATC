@@ -33,7 +33,7 @@ target and a number of seconds, and it moves an aeroplane.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from ..navdata.build import project
 
@@ -49,6 +49,23 @@ RATE_LIGHT = 5.0
 # Below this the aeroplane is stopped rather than creeping, which stops a
 # holding point from drifting over ten minutes of rounding error.
 STOPPED_KT = 0.4
+
+# The takeoff, as a crew flies it: the nose comes up at Vr at about two and a
+# half degrees a second, the mains leave the runway when it has reached about
+# eight -- three seconds after rotation began -- and the climb then builds
+# over a few seconds rather than starting at its full rate. Without these the
+# aeroplane went from rolling to climbing at two thousand feet a minute in
+# one tick, which in the simulator was a step into the air.
+ROTATE_DEG_S = 2.5
+LIFTOFF_PITCH_DEG = 8.0
+LIFTOFF_AFTER_S = LIFTOFF_PITCH_DEG / ROTATE_DEG_S
+# How fast a climb rate may build, feet a minute per second. An airliner is at
+# its initial climb rate five seconds after the wheels leave.
+CLIMB_ONSET_FPM_S = 450.0
+# The flare: below this height over the runway the descent is eased off, to
+# about this rate at the touchdown.
+FLARE_FT = 40.0
+FLARE_FPM = 160.0
 
 
 @dataclass(frozen=True)
@@ -70,6 +87,9 @@ class Performance:
     descend_fpm: float = 2000.0
     accelerate_kt_s: float = 3.0         # knots per second
     decelerate_kt_s: float = 2.0
+    # On the takeoff roll, at takeoff thrust: an airliner is at a hundred and
+    # forty knots in thirty-five seconds, in about 1,400 m.
+    takeoff_kt_s: float = 4.2
     # The speeds each phase of flight is flown at.
     taxi_kt: float = 14.0
     rotate_kt: float = 145.0
@@ -86,13 +106,13 @@ AIRLINER = Performance()
 
 TURBOPROP = Performance(
     turn_rate=RATE_ONE, climb_fpm=1500.0, descend_fpm=1600.0,
-    accelerate_kt_s=2.6, decelerate_kt_s=1.8,
+    accelerate_kt_s=2.6, decelerate_kt_s=1.8, takeoff_kt_s=3.4,
     rotate_kt=105.0, climb_kt=170.0, cruise_kt=230.0, approach_kt=115.0,
     braking_kt_s=4.0, pattern_agl_ft=1500.0)
 
 LIGHT = Performance(
     turn_rate=RATE_LIGHT, climb_fpm=750.0, descend_fpm=900.0,
-    accelerate_kt_s=2.2, decelerate_kt_s=2.2,
+    accelerate_kt_s=2.2, decelerate_kt_s=2.2, takeoff_kt_s=2.4,
     taxi_kt=10.0, rotate_kt=60.0, climb_kt=85.0, cruise_kt=110.0,
     approach_kt=70.0, braking_kt_s=3.5, pattern_agl_ft=1000.0)
 
@@ -109,12 +129,21 @@ def performance_for(type_code: str, light: bool = False) -> Performance:
     """How this type flies."""
     code = (type_code or "").upper()
     if code in _LIGHT_TYPES:
-        return LIGHT
-    if code in _TURBOPROP_TYPES:
-        return TURBOPROP
-    if not code and light:
-        return LIGHT
-    return LIGHT if light and code not in _TURBOPROP_TYPES else AIRLINER
+        base = LIGHT
+    elif code in _TURBOPROP_TYPES:
+        base = TURBOPROP
+    elif not code and light:
+        base = LIGHT
+    else:
+        base = LIGHT if light and code not in _TURBOPROP_TYPES else AIRLINER
+    # The same table the first officer calls rotate from, each figure with
+    # its source (atc/vspeeds.py).
+    from .vspeeds import rotate_kt
+
+    rotate = rotate_kt(code)
+    if rotate is not None and rotate != base.rotate_kt:
+        return replace(base, rotate_kt=rotate)
+    return base
 
 
 @dataclass
@@ -136,6 +165,12 @@ class Target:
     # Held still on the ground: a holding point, a lined-up aeroplane waiting
     # for its clearance, a stand.
     hold: bool = False
+    # How fast it may speed up, knots a second, where that is not its
+    # ordinary rate: the takeoff roll.
+    accel_kt_s: float | None = None
+    # The most it may descend, feet a minute, where that is less than it
+    # can: the flare.
+    max_descent_fpm: float | None = None
     # What this is, in one word, for the strip and the map. Not used by the
     # model; it is what the pilot sees when they ask what that aeroplane is
     # doing.
@@ -145,6 +180,8 @@ class Target:
         self.heading = self.altitude_ft = self.speed_kt = None
         self.turn = ""
         self.hold = False
+        self.accel_kt_s = None
+        self.max_descent_fpm = None
 
 
 # Every kind of instruction an aeroplane can be given. The window needs a word
@@ -155,6 +192,22 @@ ORDERS: tuple[str, ...] = (
     "touch_and_go", "go_around", "extend", "continue", "pattern", "handoff",
     "taxi_in", "turn_out", "heading", "altitude", "speed", "resume",
 )
+
+# What the strip shows instead, at a field where nobody clears anybody: the
+# aeroplane's own decision. A traffic list reading "cleared takeoff" at
+# Kortrijk's AFIS was a tower that does not exist.
+OWN_DECISIONS: dict[str, str] = {
+    "takeoff": "takeoff_discretion",
+    "land": "land_discretion",
+    "touch_and_go": "touch_and_go_discretion",
+    "line_up": "line_up_own",
+    # And what the traffic decides on its own in the circuit: an AFIS
+    # extends nobody's downwind ("prolongez vent arrière" was shown).
+    "extend": "extend_own",
+    "continue": "continue_own",
+    "pattern": "pattern_own",
+    "hold_short": "hold_short_own",
+}
 
 
 @dataclass
@@ -171,6 +224,10 @@ class Command:
     text: str = ""                  # what was said, for the strip
     values: dict = field(default_factory=dict)
     applied: bool = False
+    # What the strip calls it, where that is not the kind: at a field nobody
+    # clears anybody at, a takeoff is the aeroplane's own decision and the
+    # traffic list said "cleared takeoff" (``TrafficInjector._tell``).
+    shown: str = ""
 
     @property
     def detail(self) -> str:
@@ -197,7 +254,7 @@ class Command:
         them; an English "go around" underneath a translated everything else
         would be the one thing on the page that had not been thought about.
         """
-        return {"kind": self.kind, "detail": self.detail}
+        return {"kind": self.shown or self.kind, "detail": self.detail}
 
 
 # ----------------------------------------------------------------------
@@ -257,7 +314,8 @@ def step(flight, target: Target, performance: Performance, dt: float,
     elif target.speed_kt is not None:
         flight.ground_speed_kt = _towards(
             flight.ground_speed_kt, max(0.0, target.speed_kt),
-            performance.accelerate_kt_s,
+            target.accel_kt_s if target.accel_kt_s is not None
+            else performance.accelerate_kt_s,
             performance.braking_kt_s if flight.on_ground
             else performance.decelerate_kt_s,
             dt)
@@ -274,9 +332,16 @@ def step(flight, target: Target, performance: Performance, dt: float,
     if target.altitude_ft is not None:
         before = flight.altitude_ft
         wanted = max(ground_elevation_ft, target.altitude_ft)
+        # A climb builds from the rate it has; a descent is not eased in,
+        # because the glide path is followed by it and lagging it would
+        # float every arrival above the slope.
+        rate = max(0.0, getattr(flight, "vertical_rate_fpm", 0.0) or 0.0)
+        climb = min(performance.climb_fpm, rate + CLIMB_ONSET_FPM_S * dt)
+        descend = performance.descend_fpm
+        if target.max_descent_fpm is not None:
+            descend = min(descend, target.max_descent_fpm)
         flight.altitude_ft = _towards(
-            flight.altitude_ft, wanted,
-            performance.climb_fpm / 60.0, performance.descend_fpm / 60.0, dt)
+            flight.altitude_ft, wanted, climb / 60.0, descend / 60.0, dt)
         flight.vertical_rate_fpm = (flight.altitude_ft - before) / dt * 60.0
     else:
         flight.vertical_rate_fpm = 0.0
@@ -311,7 +376,7 @@ def offset_from_track(lat: float, lon: float, from_lat: float, from_lon: float,
 
 
 __all__ = [
-    "Performance", "Target", "Command", "ORDERS",
+    "Performance", "Target", "Command", "ORDERS", "OWN_DECISIONS",
     "AIRLINER", "TURBOPROP", "LIGHT",
     "performance_for", "step", "turn_towards", "glide_altitude",
     "offset_from_track", "RATE_ONE", "RATE_LIGHT",

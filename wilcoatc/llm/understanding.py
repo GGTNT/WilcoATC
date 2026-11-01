@@ -179,6 +179,42 @@ class Understanding:
             log.debug("AI returned nothing usable: %r", raw[:200])
         return result
 
+    # The question asked when the rules made nothing of a short transmission
+    # while the first officer waits for a checklist answer. One word back:
+    # anything else, or "none", leaves it for the controller.
+    CHECKLIST_SYSTEM = (
+        "A pilot has just been read a checklist item by the first officer. "
+        "Decide whether the pilot's words answer it. Reply with exactly one "
+        "word: check, set, on, off, up, down, green, complete -- or none if "
+        "the words are not a checklist answer (for example a radio call to "
+        "air traffic control)."
+    )
+
+    def checklist_answer(self, text: str) -> str:
+        """The kind of checklist answer the model hears in ``text``, or ""
+        when there is no model or it is not one."""
+        from ..atc.checklist_files import ANSWERS
+
+        if not (text or "").strip() or not self.model_available:
+            return ""
+        started = time.perf_counter()
+        try:
+            raw = self.provider.classify(f"Pilot: {text.strip()}",
+                                         self.CHECKLIST_SYSTEM)
+        except Exception as exc:
+            self.stats.model_failures += 1
+            log.warning("AI checklist reading failed: %s", exc)
+            return ""
+        finally:
+            self.stats.model_calls += 1
+            self.stats.model_time_s += time.perf_counter() - started
+        words = (raw or "").strip().lower().split()
+        word = words[0].strip(".,!\"'") if words else ""
+        if word in ANSWERS and word != "value":
+            log.info("AI read %r as the checklist answer %s", text, word)
+            return word
+        return ""
+
     @property
     def last_result(self) -> LLMResult | None:
         """The most recent model answer, for the console and for debugging."""

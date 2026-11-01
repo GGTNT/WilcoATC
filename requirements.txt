@@ -2,6 +2,9 @@
 numpy>=1.26,<3
 scipy>=1.11
 PyYAML>=6.0
+# Writing config.yaml back without losing a pilot's comments, order or own
+# keys (config._write_keeping_comments). PyYAML still reads it.
+ruamel.yaml>=0.18
 requests>=2.31
 rich>=13.7
 

@@ -1,21 +1,140 @@
-"""Configuration loading.
+"""Configuration loading, checking and saving.
 
 Defaults are chosen so the system runs correctly with no config file at all.
 ``config.yaml`` in the project root overrides any subset of them.
+
+Every field also carries a :class:`Setting`, declared beside its dataclass:
+its kind, its range and its choices, whether a change needs a restart.
+Everything the panel writes is checked against it (:func:`check`), so a
+value out of range is refused with the reason rather than written -- the
+panel's own hand-kept table of thirty settings used to drop anything not in
+it without a word. ``tests/test_config_file.py`` fails for a field that is
+not described.
+
+It is written with ruamel.yaml's round trip, so a pilot who does open the
+file keeps their comments, their order and their own keys.
 """
 
 from __future__ import annotations
 
+import io
+import math
+import re
 from dataclasses import asdict, dataclass, field, fields, is_dataclass
 from pathlib import Path
 from typing import Any
 
 import yaml
+from ruamel.yaml import YAML as RoundTripYAML
+from ruamel.yaml.comments import CommentedMap
 
 from .paths import bundle_root, config_path
 
 ROOT = bundle_root()
 CONFIG_PATH = config_path()
+
+
+# --------------------------------------------------------------------------
+# what each setting is
+# --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Setting:
+    """How one field is checked.
+
+    ``kind`` is derived from the default when it is left empty: a bool is a
+    toggle, a number a number, a string text, a list a list, a dict a map. A
+    ``widget`` is a control the panel draws itself (a device list, the key
+    capture, the voice picker); it changes the control, not the checking.
+
+    ``advanced`` keeps a field in its tab under "more"; ``developer`` puts it
+    in the Advanced tab behind the warning; ``measured`` is a figure fitted
+    to a recording, read-only, whose only other value is its measured one.
+    ``restart`` is a change the running program cannot pick up.
+    """
+
+    tab: str = "advanced"
+    group: str = ""
+    kind: str = ""
+    choices: tuple = ()
+    # The catalogue keys for the choices, where they already have words.
+    choice_keys: tuple = ()
+    min: float | None = None
+    max: float | None = None
+    step: float | None = None
+    unit: str = ""
+    # Shown multiplied by this: a volume of 0.8 is "80 %".
+    scale: float = 1.0
+    restart: bool = False
+    advanced: bool = False
+    developer: bool = False
+    readonly: bool = False
+    measured: bool = False
+    # State the program keeps (the tour has been shown), not a choice.
+    hidden: bool = False
+    widget: str = ""
+    # For a level shown as a switch: the value that means "off".
+    off: Any = None
+    # Shown only while another setting has this value: "ptt.mode=keyboard".
+    when: str = ""
+    label: str = ""
+    help: str = ""
+
+
+def measured(group: str, **more) -> Setting:
+    """A figure measured or fitted against a recording (see CLAUDE.md)."""
+    return Setting(tab="advanced", group=group, readonly=True, measured=True,
+                   developer=True, **more)
+
+
+def describe(cls, **settings: Setting):
+    """Hang each field's Setting on its dataclass."""
+    known = {f.name for f in fields(cls)}
+    unknown = set(settings) - known
+    if unknown:
+        raise TypeError(f"{cls.__name__} has no field {sorted(unknown)}")
+    cls.__settings__ = settings
+    return cls
+
+
+def describe_field(path: str, default: Any,
+                   setting: Setting | None = None) -> Setting:
+    """The Setting for a field, its kind derived from the default.
+
+    A field nobody described still renders, with a generic label, so a new
+    one is never invisible; the test names it.
+    """
+    setting = setting or Setting()
+    if setting.kind:
+        return setting
+    if setting.choices:
+        kind = "choice"
+    elif isinstance(default, bool):
+        kind = "toggle"
+    elif isinstance(default, (int, float)):
+        kind = "number"
+    elif isinstance(default, list):
+        kind = "list"
+    elif isinstance(default, dict):
+        kind = "map"
+    else:
+        kind = "text"
+    return Setting(**{**_fields_of(setting), "kind": kind})
+
+
+def _fields_of(setting: Setting) -> dict:
+    return {f.name: getattr(setting, f.name) for f in fields(setting)}
+
+
+class SettingRefused(ValueError):
+    """A value the screen may not write, with the catalogue key that says
+    why and the numbers that go in it."""
+
+    def __init__(self, key: str, text: str, **params):
+        super().__init__(text.format(**params) if params else text)
+        self.key = key
+        self.params = params
 
 
 @dataclass
@@ -28,24 +147,74 @@ class AudioConfig:
     # Radio effects are what make synthesised speech sound like ATC; turning
     # them off is useful only for debugging the voice itself.
     radio_effects: bool = True
-    sidetone: bool = False
+
+
+describe(
+    AudioConfig,
+    input_device=Setting("radio", "audio", widget="input_device",
+                         restart=True, label="set.microphone"),
+    output_device=Setting("radio", "audio", widget="output_device",
+                          restart=True, label="set.output"),
+    volume=Setting("radio", "audio", min=0, max=1.5, step=0.05, unit="%",
+                   scale=100, widget="slider", label="set.volume"),
+    capture_rate=Setting("advanced", "internals", min=8000, max=48000,
+                         unit="Hz", restart=True, developer=True),
+    max_transmission_s=Setting("radio", "audio", min=5, max=120, unit="s",
+                               restart=True, advanced=True),
+    radio_effects=Setting("radio", "audio", advanced=True,
+                          label="set.radio_effects",
+                          help="set.radio_effects_why"),
+)
 
 
 @dataclass
 class PttConfig:
     mode: str = "keyboard"          # keyboard | joystick | none
+    # The key by its name, as it was pressed -- "$" on an AZERTY keyboard --
+    # for showing, and for a file written before the scan code was kept.
     key: str = "grave"
+    # The same key by where it is on the keyboard (a Windows scan code),
+    # which is what is matched when it is set: a name is whatever the
+    # layout prints, and the layout can change under a running program.
+    # 0 is none, and the name is matched instead.
+    scan_code: int = 0
+    # The controller by vendor and product ("294b:1900"), as read out of
+    # SDL's GUID, and by name behind that: its index in SDL's list moved
+    # whenever another device was plugged in ahead of it, and the button
+    # that keyed the radio was then on the throttle. The index is kept for
+    # a file written before these existed (audio/controllers.py).
+    joystick_id: str = ""
+    joystick_name: str = ""
     joystick_index: int = 0
     joystick_button: int = 0
 
 
+describe(
+    PttConfig,
+    mode=Setting("radio", "ptt", choices=("keyboard", "joystick", "none"),
+                 choice_keys=("set.keyboard", "set.joystick", "set.off"),
+                 label="set.ptt"),
+    key=Setting("radio", "ptt", kind="key", widget="key",
+                when="ptt.mode=keyboard", label="set.key", help="set.ptt_why"),
+    scan_code=Setting("radio", "ptt", min=0, max=1023, hidden=True),
+    joystick_id=Setting("radio", "ptt", widget="joystick",
+                        when="ptt.mode=joystick", label="set.controller"),
+    joystick_name=Setting("radio", "ptt", hidden=True),
+    joystick_index=Setting("radio", "ptt", min=0, max=31, hidden=True),
+    joystick_button=Setting("radio", "ptt", widget="joystick_button", min=0,
+                            max=127, when="ptt.mode=joystick",
+                            label="set.button", help="set.button_why"),
+)
+
+
 @dataclass
 class SpeechConfig:
-    model: str = "small.en"
+    # Read as its multilingual twin whatever is written here (audio/stt.py
+    # engine_model): the pilot may speak any language the radio is worked in.
+    model: str = "small"
     device: str = "cpu"
     compute_type: str = "int8"
     beam_size: int = 5
-    language: str = "en"
     # Which languages you may speak is not a setting: it follows the aeroplane.
     # English everywhere, plus the local language over a state that works one,
     # changing as the flight crosses a border. Leave this empty for that.
@@ -60,6 +229,40 @@ class SpeechConfig:
     # English being heard as the speaker's mother tongue.
     detection_threshold: float = 0.85
     min_confidence: float = 0.35
+    # Below this confidence a readback item heard nearly -- a SID's name
+    # close to the one given, a frequency, squawk, altitude or runway one
+    # figure off -- is asked about ("confirm ...") rather than refused
+    # ("negative ..."); above it, the recogniser heard what was said. Well
+    # above min_confidence, since one name or figure can be doubtful in a
+    # transcript that is not. UNVERIFIED: not measured on the corpus; a
+    # value to revisit with flight logs. 0 turns the question off.
+    confirm_below: float = 0.6
+
+
+#: The recogniser models the screen offers (audio/stt.py MODEL_CHOICES).
+SPEECH_MODELS = ("tiny.en", "base.en", "small.en", "small", "medium",
+                 "large-v3")
+
+describe(
+    SpeechConfig,
+    model=Setting("radio", "recogniser", choices=SPEECH_MODELS, restart=True),
+    device=Setting("radio", "recogniser", choices=("cpu", "cuda", "auto"),
+                   restart=True, advanced=True),
+    compute_type=Setting("radio", "recogniser",
+                         choices=("int8", "int8_float16", "float16",
+                                  "float32"),
+                         restart=True, advanced=True),
+    beam_size=Setting("radio", "recogniser", min=1, max=10, restart=True,
+                      advanced=True),
+    languages=Setting("radio", "recogniser", widget="languages",
+                      restart=True, advanced=True),
+    detection_threshold=Setting("radio", "recogniser", min=0, max=1,
+                                step=0.05, restart=True, advanced=True),
+    min_confidence=Setting("radio", "recogniser", min=0, max=1, step=0.05,
+                           advanced=True),
+    confirm_below=Setting("radio", "recogniser", min=0, max=1, step=0.05,
+                          advanced=True),
+)
 
 
 @dataclass
@@ -71,13 +274,12 @@ class VoiceConfig:
     # Which synthesiser speaks.
     #
     # auto       -- Supertonic if it is installed: ten speakers of each sex in
-    #               every controller language, against one speaker per
-    #               language from Kokoro. Then Kokoro, which keeps British
-    #               English because Supertonic's English is American only.
-    #               Then Piper. The last two also keep every foreign accent
-    #               pool between them, because an accent is made by
-    #               substituting phonemes and Supertonic reads text.
-    # kokoro     -- Kokoro only. Nothing is spoken where it has no voice.
+    #               every controller language, and American English. Then
+    #               Piper: British English, French, and every country's
+    #               accent, because an accent is made by substituting
+    #               phonemes and Supertonic reads text.
+    # kokoro     -- no longer cast; read as auto. Its module stays for one
+    #               release.
     # supertonic -- Supertonic only, likewise. Thirty-one languages, ten
     #               speakers, and no accents.
     # piper      -- the older, faster, more obviously synthetic engine.
@@ -91,18 +293,46 @@ class VoiceConfig:
     # on. Off, because the card is drawing the simulator. Naming the engine
     # above is the other way in and does not need this.
     gpu: bool = False
-    # Which Chatterbox model the cloning tier uses: standard (the default: it
-    # stays on the text, losing 14% of its words to the recogniser where the
-    # quick one loses 32%), turbo (twice as quick, and worth it on a card
-    # where the read-back below catches what it drops), or multilingual (the
-    # only one that speaks French, German and the rest).
-    hq_model: str = "standard"
+    # Which Chatterbox model the cloning tier uses -- on the panel, the
+    # performance profile: turbo is "Normal" and the default (about the time
+    # it takes to say a clearance on a CPU, where standard takes twice that;
+    # the read-back below catches most of what it drops), standard is "High"
+    # (it stays on the text, losing 14% of its words to the recogniser where
+    # the quick one loses 32%), multilingual (the
+    # only one that speaks French, German and the rest), or flash (block
+    # diffusion: measured three times quicker than standard on a CPU for the
+    # same words lost -- a twenty-word clearance in 1.35x the time it takes
+    # to say, against 4.1x -- English only, 3.2 GB).
+    hq_model: str = "turbo"
     # How many takes the cloning tier may try before it settles for the best
     # one. It samples, and a take can come back with a number mumbled, so
     # each take is read back by the recogniser and re-rolled if the words did
     # not survive. On a CPU every extra take costs about the length of the
     # transmission, and is only paid when the take before it failed.
     hq_takes: int = 2
+
+
+describe(
+    VoiceConfig,
+    # "kokoro" is still read, as auto, and is not offered.
+    engine=Setting("voices", "voices",
+                   choices=("auto", "supertonic", "piper", "chatterbox"),
+                   restart=True),
+    gpu=Setting("voices", "voices", restart=True),
+    # Not a restart: the engine loads the other model in place
+    # (web/server._apply_settings), once it is on disk.
+    hq_model=Setting("voices", "voices",
+                     choices=("standard", "turbo", "multilingual", "flash"),
+                     when="voice.engine=chatterbox"),
+    hq_takes=Setting("voices", "voices", min=1, max=6, restart=True,
+                     when="voice.engine=chatterbox"),
+    seed=Setting("voices", "voices", restart=True, advanced=True),
+    preload=Setting("voices", "voices", advanced=True),
+    voice_dir=Setting("advanced", "internals", kind="path", restart=True,
+                      developer=True),
+    cache_size=Setting("advanced", "internals", min=0, max=10000,
+                       restart=True, developer=True),
+)
 
 
 @dataclass
@@ -139,6 +369,16 @@ class ProsodyConfig:
     jitter: float = 0.025
 
 
+describe(
+    ProsodyConfig,
+    enabled=Setting("voices", "delivery", advanced=True),
+    **{name: measured("prosody") for name in (
+        "address", "closing", "min_clauses", "min_body_clauses",
+        "min_closing_words", "pace", "short_words", "long_words", "quick",
+        "measured", "jitter")},
+)
+
+
 @dataclass
 class ImperfectionsConfig:
     """The operator, as opposed to the radio.
@@ -165,10 +405,28 @@ class ImperfectionsConfig:
     clip_chance: float = 0.18
     clip_ms: float = 45.0
     # "Uh" at the head of a transmission -- they keyed up before they were
-    # ready -- and "uh" at a comma part way through, where they lost their
-    # place. Both stay rare: this is the most noticeable setting here.
+    # ready -- and "uh" part way through, at a comma or in front of a number,
+    # where they lost their place. Both stay rare: this is the most
+    # noticeable setting here.
     hesitation_chance: float = 0.05
     mid_hesitation_chance: float = 0.06
+    # How long the voice may stop after an "uh" part way through, in ms,
+    # before the word it was looking for. Each one draws up to this; 650 is
+    # what a recorded clearance exchange measured. 0 runs straight on.
+    stall_ms: float = 650.0
+    # Each phrase on its own note and at its own pace (audio/intonation.py):
+    # the spread of the phrases' pitch in semitones, how far the callsign is
+    # lifted, the spread of their pace, and the instructions' pace against
+    # the engine's. All zero and 1.0 puts it back as the engine said it.
+    phrase_pitch_st: float = 1.3
+    address_lift_st: float = 3.5
+    phrase_rate: float = 0.07
+    instruction_pace: float = 1.04
+    # Stopping for air in a long transmission: after about this many seconds
+    # of speech a pause is lengthened and an inhale goes in it, at this level
+    # under the speech. 0 seconds turns it off.
+    breath_group_s: float = 5.5
+    catch_breath_db: float = -23.0
     # An audible inhale in a pause the synthesiser already left. The chance is
     # per pause, not per transmission: "roger" has nowhere to breathe and a
     # route clearance has two or three places.
@@ -192,16 +450,42 @@ class ImperfectionsConfig:
     carrier: float = 0.25
 
 
+describe(
+    ImperfectionsConfig,
+    enabled=Setting("voices", "operator", label="set.operator",
+                    help="set.operator_why"),
+    # Levels, shown as switches: on is the measured level, off is silence.
+    breath_db=Setting("voices", "operator", widget="switch_value", off=-90.0,
+                      min=-90, max=-10, unit="dB", label="set.breathing",
+                      help="set.breathing_why"),
+    wind_db=Setting("voices", "operator", widget="switch_value", off=-90.0,
+                    min=-90, max=-10, unit="dB", label="set.wind",
+                    help="set.wind_why"),
+    hesitation_chance=Setting("voices", "operator", widget="switch_value",
+                              off=0.0, min=0, max=0.5, label="set.hesitation",
+                              help="set.hesitation_why"),
+    mid_hesitation_chance=Setting("voices", "operator", widget="switch_value",
+                                  off=0.0, min=0, max=0.5),
+    **{name: measured("imperfections") for name in (
+        "lead_in_ms", "lead_in_jitter_ms", "clip_chance", "clip_ms",
+        "stall_ms", "phrase_pitch_st", "address_lift_st", "phrase_rate",
+        "instruction_pace", "breath_group_s", "catch_breath_db",
+        "breath_chance", "breath_max", "breath_pause_ms", "wind_gust",
+        "wander_pitch", "wander_level_db", "wander_hz", "level", "carrier")},
+)
+
+
 @dataclass
 class ToneConfig:
     """Where the receiver puts its energy.
 
     A handful of the radio profile's own numbers, restated so the balance can
     be matched to a recording without the measured chain being edited. The
-    defaults were measured against Heathrow Director: they take the
-    transmitter's presence lift off, tilt the passband darker, move the
-    cockpit speaker's resonance down to where the recordings peak, and narrow
-    the band to the Annex 10 channel the recordings actually are. Mirrors
+    defaults were measured against the controllers in a reference flight
+    video: the presence lift off, the passband tilted darker, the cockpit
+    speaker's resonance at 1.9 kHz, the band 400-2700 Hz, the floor 20 dB
+    under the voice and a quiet key-up. The earlier fit, to Heathrow
+    Director, is ``tone.HEATHROW``. Mirrors
     :class:`wilcoatc.audio.tone.Tone`, field for field -- see that module for
     the measurement and for what was tried and left out; ``enabled: false``
     gives the chain's own, brighter balance back exactly.
@@ -210,12 +494,26 @@ class ToneConfig:
     enabled: bool = True
     tilt_db: float = -6.0
     presence_db: float = 0.0
-    speaker_db: float = 4.0
-    speaker_hz: float = 900.0
-    band_low: float = 330.0
+    speaker_db: float = 6.0
+    speaker_hz: float = 1900.0
+    band_low: float = 400.0
     band_high: float = 2700.0
-    noise_db: float = -8.0
+    noise_db: float = 0.0
     room_db: float = -10.0
+    click_db: float = -7.0
+    rush_db: float = -5.0
+    tail_burst_db: float = -11.0
+    tail_ms: float = 0.0
+
+
+describe(
+    ToneConfig,
+    enabled=Setting("voices", "delivery", advanced=True),
+    **{name: measured("tone") for name in (
+        "tilt_db", "presence_db", "speaker_db", "speaker_hz", "band_low",
+        "band_high", "noise_db", "room_db", "click_db", "rush_db",
+        "tail_burst_db", "tail_ms")},
+)
 
 
 @dataclass
@@ -254,10 +552,26 @@ class AiConfig:
     min_confidence: float = 0.55
 
 
+describe(
+    AiConfig,
+    provider=Setting("understanding", "understanding",
+                     choices=("none", "ollama", "anthropic"), restart=True),
+    model=Setting("understanding", "understanding", restart=True,
+                  when="ai.provider!=none"),
+    host=Setting("understanding", "understanding", restart=True,
+                 advanced=True, when="ai.provider=ollama"),
+    # Never sent back to the panel: shown as set or not set.
+    api_key=Setting("understanding", "understanding", kind="secret",
+                    restart=True, when="ai.provider=anthropic"),
+    timeout_s=Setting("understanding", "understanding", min=1, max=120,
+                      unit="s", restart=True, advanced=True),
+    min_confidence=Setting("understanding", "understanding", min=0, max=1,
+                           step=0.05, restart=True, advanced=True),
+)
+
+
 @dataclass
 class AtcConfig:
-    # "auto" follows the region of the facility being spoken to.
-    dialect: str = "auto"           # auto | faa | icao
     strict_icao_digits: bool = False
     # Hand the synthesiser figures rather than the words a controller says:
     # "runway 30" instead of "runway three zero", "118.310" instead of "one
@@ -271,8 +585,6 @@ class AtcConfig:
     # Volunteer an ATIS reminder and a handoff when the pilot forgets.
     proactive_handoff: bool = True
     handoff_grace_s: float = 25.0
-    # Controllers stop using the full callsign after two-way contact.
-    abbreviate_callsigns: bool = True
     # The published frequency data is thin at some large airports. When you
     # tune a frequency nobody is listed on while you are at a field that does
     # staff positions, answer on it anyway rather than leaving you talking to
@@ -286,7 +598,34 @@ class AtcConfig:
     # pushback is the pilot's own business with the ground handling. Taxi is
     # then worked by the tower (or delivery), exactly as at a field that
     # publishes no Ground, and nobody is ever handed to a Ground frequency.
-    ground_control: bool = False
+    # On by default: it was off from the first commit, and a pilot calling
+    # the Ground the chart lists -- Centennial on 121.800 -- got silence at
+    # every field for a month without knowing there was a switch.
+    ground_control: bool = True
+    # Whether the radio needs the aeroplane's power (atc/radio_power.py): cold
+    # and dark, nothing is heard and nothing goes out. Off, the radio works
+    # whatever the switches say -- for an add-on whose own electrics the
+    # simulator's variables do not follow and that is not yet listed.
+    radio_needs_power: bool = True
+
+
+describe(
+    AtcConfig,
+    strict_icao_digits=Setting("radio", "phraseology", restart=True,
+                               label="set.strict_digits",
+                               help="set.strict_digits_why"),
+    spoken_numerals=Setting("radio", "phraseology", advanced=True),
+    proactive_handoff=Setting("radio", "phraseology", label="set.handoffs",
+                              help="set.handoffs_why"),
+    handoff_grace_s=Setting("radio", "phraseology", min=0, max=300,
+                            unit="s", advanced=True),
+    answer_unpublished=Setting("radio", "phraseology", advanced=True),
+    unpublished_radius_nm=Setting("radio", "phraseology", min=0, max=50,
+                                  unit="nm", advanced=True),
+    ground_control=Setting("radio", "phraseology", restart=True),
+    radio_needs_power=Setting("radio", "phraseology", label="set.radio_power",
+                              help="set.radio_power_why"),
+)
 
 
 @dataclass
@@ -301,6 +640,14 @@ class SimBriefConfig:
     username: str = ""
     # Fetch the latest plan when the engine starts.
     load_on_start: bool = False
+
+
+describe(
+    SimBriefConfig,
+    username=Setting("flight", "simbrief", label="set.simbrief_user",
+                     help="set.simbrief_why"),
+    load_on_start=Setting("flight", "simbrief"),
+)
 
 
 @dataclass
@@ -339,6 +686,23 @@ class GsxConfig:
     client: str = "WilcoATC"
 
 
+describe(
+    GsxConfig,
+    enabled=Setting("traffic", "ground", label="set.ground_watch",
+                    help="set.ground_why"),
+    control=Setting("traffic", "ground", label="set.ground_call",
+                    help="set.ground_call_why"),
+    voice=Setting("traffic", "ground", label="set.ground_voice",
+                  help="set.ground_voice_why"),
+    bridge=Setting("traffic", "ground",
+                   choices=("auto", "file", "mobiflight", "off"),
+                   restart=True, advanced=True),
+    lvar_file=Setting("traffic", "ground", kind="path", restart=True,
+                      advanced=True, when="gsx.bridge!=mobiflight"),
+    client=Setting("advanced", "internals", restart=True, developer=True),
+)
+
+
 @dataclass
 class UiConfig:
     """The panel's own language, which is about the reader rather than the flight.
@@ -360,6 +724,78 @@ class UiConfig:
     # SimBrief schedule. The measuring happens either way; this is whether
     # the panel puts it in front of you.
     landing_report: bool = True
+    # How the window looks: Settings, Personalisation. Kept here rather than
+    # in the browser's own storage because the desktop window runs in private
+    # mode, which forgets everything a page stored the moment it closes.
+    # ``theme`` is dark or light; ``accent`` a #rrggbb colour; ``scene`` the
+    # colour of the light behind the glass (accent, dusk, night, aurora);
+    # ``blur`` how frosted the glass is, in pixels; ``lights`` the slow
+    # coloured glows drifting in the corners; ``grid`` the faint grid;
+    # ``gradient`` whether what is filled with the accent is filled with a
+    # gradient of it or with the flat colour.
+    theme: str = "dark"
+    accent: str = "#697f9b"
+    scene: str = "accent"
+    blur: int = 24
+    lights: bool = True
+    grid: bool = True
+    gradient: bool = True
+    # Whether the guided tour of the window has been shown -- finished or
+    # skipped. It opens by itself on the first run, after the startup notice
+    # and any download, and from Settings, Interface whenever asked for.
+    tour_done: bool = False
+    # Whether the first-run setup has been walked through: the downloads,
+    # the microphone, the key and SimBrief, one screen each. It comes up by
+    # itself before the tour until it is finished, and from Settings,
+    # Interface whenever asked for.
+    onboarding_done: bool = False
+    # Which revision of the first-run setup was walked through (OB_VERSION in
+    # app.js). A pilot who finished an older one is walked through the new
+    # one once: otherwise a screen added later -- Appearance, First officer --
+    # is never seen by anybody who installed before it existed.
+    onboarding_version: int = 0
+    # Whether the program asks GitHub at startup if a newer version is out
+    # (wilcoatc/update.py): one small request, nothing downloaded until the
+    # pilot says yes. ``skipped_version`` is the one they turned down.
+    check_updates: bool = True
+    skipped_version: str = ""
+
+
+#: The looks the panel offers. Anything else is refused rather than stored,
+#: because it ends up in the page's style as written.
+THEMES = ("dark", "light")
+SCENES = ("accent", "dusk", "night", "aurora")
+
+describe(
+    UiConfig,
+    language=Setting("appearance", "interface", widget="ui_language",
+                     label="set.ui_language", help="set.ui_language_why"),
+    numerals=Setting("appearance", "interface"),
+    landing_report=Setting("flight", "flight", label="set.landing_report",
+                           help="set.landing_report_why"),
+    # The look is drawn by its own card (swatches, previews) and checked
+    # here like everything else.
+    theme=Setting("appearance", "look", choices=THEMES, widget="look",
+                  label="set.look_theme", help="set.look_theme_why"),
+    accent=Setting("appearance", "look", kind="colour", widget="look",
+                   label="set.look_accent", help="set.look_accent_why"),
+    scene=Setting("appearance", "look", choices=SCENES, widget="look",
+                  label="set.look_scene", help="set.look_scene_why"),
+    blur=Setting("appearance", "look", min=0, max=48, step=2, unit="px",
+                 widget="look", label="set.look_blur"),
+    lights=Setting("appearance", "look", widget="look",
+                   label="set.look_lights", help="set.look_lights_why"),
+    grid=Setting("appearance", "look", widget="look", label="set.look_grid",
+                 help="set.look_grid_why"),
+    gradient=Setting("appearance", "look", widget="look",
+                     label="set.look_gradient", help="set.look_gradient_why"),
+    tour_done=Setting("appearance", "interface", hidden=True),
+    onboarding_done=Setting("appearance", "interface", hidden=True),
+    onboarding_version=Setting("appearance", "interface", hidden=True, min=0, max=1000),
+    check_updates=Setting("appearance", "interface", label="update.check",
+                          help="update.check_why"),
+    skipped_version=Setting("appearance", "interface", hidden=True),
+)
 
 
 @dataclass
@@ -377,6 +813,234 @@ class ToolbarConfig:
 
     enabled: bool = True
     port: int = 8787
+
+
+describe(
+    ToolbarConfig,
+    enabled=Setting("weather_data", "simulator", restart=True, advanced=True),
+    port=Setting("weather_data", "simulator", min=1024, max=65535,
+                 restart=True, advanced=True, when="toolbar.enabled=true"),
+)
+
+
+@dataclass
+class LodConfig:
+    """Which model each invented aeroplane is drawn with, by distance.
+
+    Two kinds of model can draw the traffic. The simulator's own AI models
+    have doors and holds that open and cost what a full aeroplane costs.
+    FSLTL's, when FSLTL is installed, are painted in the airline's colours,
+    light enough to have an apron full of, and have no door animation at
+    all. So the aeroplanes near you are drawn with the first and the rest
+    with the second, and an aeroplane standing on its stand is swapped from
+    one to the other as you move -- new model first, old one removed once
+    it has loaded, doors carried across. Nothing moving is ever swapped.
+    The aeroplane is the same aeroplane throughout; only the drawing
+    changes.
+    """
+
+    # Off, every aeroplane is drawn the way it always was: FSLTL's painted
+    # model when FSLTL is installed, the simulator's own otherwise, and
+    # nothing is ever swapped.
+    enabled: bool = True
+    # Nearer than this, detailed; further than light_m, light; in between,
+    # whatever it already is, so the stands do not flicker as you taxi past.
+    detailed_m: float = 1500.0
+    light_m: float = 2500.0
+    # How many may be detailed at once, the nearest first.
+    limit: int = 6
+    # How many swaps a second at most, because each is a model loading.
+    swaps_per_s: float = 0.5
+    # How long the new model is given to load before the old one goes.
+    settle_s: float = 3.0
+    # "distance": detailed by how far it is from you, as above. "schedule":
+    # detailed only in its turnaround -- from block-in, or from a couple of
+    # minutes before boarding, until its doors read shut for the push --
+    # and only within detail_radius_km, under the same limit. Parked with
+    # its doors shut, it is light however near.
+    mode: str = "distance"
+    detail_radius_km: float = 3.0
+    # The simulator's own models are painted for a couple of dozen airlines
+    # only. "match": detailed only in the airline's own livery. "any": in
+    # the house livery where it has none, and then a swap that would change
+    # the colours is only made with you further than hide_m from it.
+    # Schedule mode only.
+    livery: str = "match"
+    hide_m: float = 1200.0
+    # Schedule mode: a departure is booked, starts boarding this long
+    # after (the minutes in which its model can change with the doors
+    # shut), boards for boarding_s, and only then calls for its clearance.
+    boarding_lead_s: float = 120.0
+    boarding_s: float = 240.0
+    # Models of your own, by type or "AIRLINE/TYPE", each with a detailed
+    # and a light title, for example
+    #   models: {A20N: {detailed: "Asobo PassiveAircraft A320 NEO",
+    #                   light: "FSLTL_FAIB_A20N"}}
+    # A type with no detailed model anywhere stays light.
+    models: dict = field(default_factory=dict)
+
+
+_LOD = dict(tab="traffic", group="lod", restart=True, advanced=True)
+describe(
+    LodConfig,
+    enabled=Setting(**_LOD),
+    detailed_m=Setting(min=100, max=10000, unit="m", **_LOD),
+    light_m=Setting(min=100, max=20000, unit="m", **_LOD),
+    limit=Setting(min=0, max=40, **_LOD),
+    swaps_per_s=Setting(min=0.05, max=5, step=0.05, **_LOD),
+    settle_s=Setting(min=0, max=30, unit="s", **_LOD),
+    mode=Setting(choices=("distance", "schedule"), **_LOD),
+    detail_radius_km=Setting(min=0.5, max=20, unit="km",
+                             when="traffic.lod.mode=schedule", **_LOD),
+    livery=Setting(choices=("match", "any"),
+                   when="traffic.lod.mode=schedule", **_LOD),
+    hide_m=Setting(min=0, max=10000, unit="m",
+                   when="traffic.lod.livery=any", **_LOD),
+    boarding_lead_s=Setting(min=0, max=3600, unit="s",
+                            when="traffic.lod.mode=schedule", **_LOD),
+    boarding_s=Setting(min=0, max=3600, unit="s",
+                       when="traffic.lod.mode=schedule", **_LOD),
+    # A table of model titles; read-only on the screen.
+    models=Setting("advanced", "debug", readonly=True, developer=True,
+                   restart=True),
+)
+
+
+@dataclass
+class HandlingConfig:
+    """The ground handling around the parked traffic.
+
+    ``traffic.handling: true`` or ``false`` is still understood: a plain
+    value is taken as ``enabled``.
+    """
+
+    # The turnaround at all: who calls on which aeroplane, and when, and so
+    # when its doors open and shut.
+    enabled: bool = True
+    # Whether this program draws the vehicles. Off, the turnaround and the
+    # doors still run on this program's schedule and no vehicle is put in
+    # the simulator -- for a pilot who prefers another tool's (ApronLife's)
+    # vehicles around the same aeroplanes.
+    vehicles: bool = True
+    # With GSX Pro installed, its own vehicles (stairs, loaders, caterers,
+    # fuel, power, tugs) for this program's traffic instead of the
+    # simulator's stock ones. Ignored without GSX: nothing is asked for that
+    # the simulator does not list.
+    gsx_vehicles: bool = True
+    # Passengers between the aeroplane and a bus that drives along the
+    # airport's service roads (wilcoatc.atc.passengers): GSX Pro's own
+    # people and bus, because nothing else in the simulator walks, so this
+    # does nothing without it. Off by default: every passenger is an object
+    # in the simulator.
+    passengers: bool = False
+    # How many passengers each bus run shows walking.
+    passengers_visible: int = 12
+    # The bags (wilcoatc.atc.baggage): a tractor and carts beside each
+    # loader, and with GSX Pro the handler on the loader at work and the
+    # bags on the belt. Off by default, like the passengers.
+    baggage: bool = False
+
+    def __bool__(self) -> bool:
+        return self.enabled
+
+
+describe(
+    HandlingConfig,
+    enabled=Setting("traffic", "handling"),
+    vehicles=Setting("traffic", "handling", restart=True),
+    gsx_vehicles=Setting("traffic", "handling", label="set.traffic_gsx",
+                         help="set.traffic_gsx_why"),
+    passengers=Setting("traffic", "handling", restart=True),
+    passengers_visible=Setting("traffic", "handling", min=0, max=60,
+                               restart=True,
+                               when="traffic.handling.passengers=true"),
+    baggage=Setting("traffic", "handling", restart=True),
+)
+
+
+@dataclass
+class LiveTrafficConfig:
+    """The real aeroplanes round the pilot, from the free ADS-B sources
+    (integrations/adsb.py): adsb.lol, adsb.fi, and a receiver of the pilot's
+    own. Off until a real flight has been flown with it.
+
+    What leaves the machine is the pilot's position and a radius, nothing
+    else; adsbdb.com is asked the routes and types of the callsigns the
+    sources have just broadcast, and its answers are kept on this PC.
+    """
+
+    enabled: bool = False
+    # One area request this often; the sources' fair use is one a second at
+    # most (adsb.fi), and 6 s is what LocalTC asks at. Never less than 6.
+    poll_s: float = 6.0
+    # Round the pilot. One request covers the area; 250 nm is the most the
+    # sources serve.
+    radius_nm: float = 60.0
+    # A local readsb's aircraft.json (http://<pi>:8080/data/aircraft.json),
+    # asked after the public sources; {lat} {lon} {nm} filled in if present.
+    own_url: str = ""
+    # Routes and missing types from adsbdb.com, kept in data/adsb_cache.json.
+    routes: bool = True
+    # How long the feed may be quiet before the invented traffic takes the
+    # whole density back. Within it nothing changes: the live flights are
+    # carried on from their last positions, so pulling the feed is not heard.
+    fallback_after_s: float = 60.0
+    # Each live aeroplane is drawn this far behind the feed (after LocalTC),
+    # always between two positions already heard: a new one appears this
+    # long after it is first heard, and what it is about to do is known
+    # before it does it.
+    live_delay_s: float = 30.0
+
+
+_LIVE = dict(tab="traffic", group="live")
+describe(
+    LiveTrafficConfig,
+    enabled=Setting(restart=True, **_LIVE),
+    poll_s=Setting(min=6, max=60, unit="s", restart=True, advanced=True,
+                   **_LIVE),
+    radius_nm=Setting(min=5, max=250, unit="nm", restart=True,
+                      advanced=True, **_LIVE),
+    own_url=Setting(restart=True, advanced=True, **_LIVE),
+    routes=Setting(restart=True, advanced=True, **_LIVE),
+    fallback_after_s=Setting(min=10, max=600, unit="s", advanced=True,
+                             **_LIVE),
+    live_delay_s=Setting(min=0, max=120, unit="s", restart=True,
+                         advanced=True, **_LIVE),
+)
+
+
+@dataclass
+class TrafficDebugConfig:
+    """Tools for testing the apron, every one of them off by default.
+
+    Best set in config.local.yaml, so they never reach the shared file.
+    """
+
+    # Invent only these types (ICAO codes, e.g. [A321]) instead of the
+    # airlines' real fleets. The airlines and callsigns stay real.
+    force_types: list = field(default_factory=list)
+    # Every status_every_s, one line per invented aeroplane in the log
+    # (logger wilcoatc.traffic.debug): type, stand, level, window, doors,
+    # and how long until the next thing happens to it.
+    status: bool = False
+    status_every_s: float = 30.0
+    # Two buttons in the traffic bay: board the parked aeroplane nearest
+    # you now, and an arrival on short final to the free stand nearest you.
+    triggers: bool = False
+    # How much faster the turnaround runs: the ramp's timings and the
+    # schedule's booking and boarding are divided by it. 1 is real time.
+    time_scale: float = 1.0
+
+
+_DEBUG = dict(tab="advanced", group="debug", developer=True)
+describe(
+    TrafficDebugConfig,
+    force_types=Setting(restart=True, **_DEBUG),
+    status=Setting(**_DEBUG),
+    status_every_s=Setting(min=1, max=600, unit="s", **_DEBUG),
+    triggers=Setting(**_DEBUG),
+    time_scale=Setting(min=0.1, max=60, restart=True, **_DEBUG),
+)
 
 
 @dataclass
@@ -407,18 +1071,69 @@ class TrafficConfig:
     # real aeroplane in the simulator, so a busy field is capped rather than
     # allowed to fill the ramp.
     in_simulator_limit: int = 12
+    # Drawn every frame between the traffic's ticks (wilcoatc.atc.follow),
+    # frozen so the simulator does not move them itself; off writes each
+    # aeroplane once a tick, which is what jumped on the taxiway and made a
+    # takeoff a teleport.
+    smooth_motion: bool = True
     # How many aeroplanes stand at the gates on top of that, going nowhere
     # until one of them becomes a departure. Only at a field whose stands the
     # simulator has given us, never on every stand (the moving traffic has
     # to have somewhere to park), and 0 is none. They are drawn after the
     # moving traffic, so they never cost it a place.
     parked: int = 12
+    # Which model each invented aeroplane is drawn with, by how far it is
+    # from you. See LodConfig.
+    lod: LodConfig = field(default_factory=LodConfig)
+    # Tools for testing the apron. See TrafficDebugConfig; all off.
+    debug: TrafficDebugConfig = field(default_factory=TrafficDebugConfig)
+    # The old name of traffic.debug.force_types, still read.
+    debug_force_types: list = field(default_factory=list)
     # FSLTL's model matching table, for the airlines' own liveries. Empty
     # finds it in the Community folder the simulator records; a path names
     # the file for an installation that is somewhere else.
     fsltl_rules: str = ""
+    # Whether the aeroplanes this program parks are handled: a power unit,
+    # stairs at a ramp, a baggage loader, a caterer and a fuel truck call on
+    # an arrival, and a tug comes for a departure. See HandlingConfig;
+    # "handling: false" still switches all of it off.
+    handling: HandlingConfig = field(default_factory=HandlingConfig)
+    # Whether somebody else's parked aeroplanes -- FSLTL's, AIG's -- are
+    # handled too. Microsoft Flight Simulator 2024 sends nothing to them
+    # (measured: seven FSLTL aeroplanes at Madeira's gates with not a
+    # vehicle between them), so they are by default; off, for a setup
+    # where something else already does it.
+    handling_observed: bool = True
+    # Whether a handled aeroplane's doors and holds are opened with the
+    # stairs and the loaders and read shut before it pushes. Done with the
+    # exit event aimed at the aeroplane itself, on the models the door
+    # table knows (integrations/doors.json); a model not in it is left
+    # alone, which is right for FSLTL's, which have no door animation.
+    handling_doors: bool = True
+    # Whether this program's own aeroplanes have their engines and lights
+    # run the way an airline runs them: off on the stand, the beacon before
+    # the push, started during it, taxi/strobe/landing lights by phase,
+    # shut down a minute or two after block-in. Never the pilot's, never
+    # anybody else's traffic.
+    engines_and_lights: bool = True
+    # A door table of your own, in the same shape as the shipped one, for
+    # models scripts/scan_doors.py has been run on. Empty is the shipped
+    # table.
+    doors_table: str = ""
+    # How long a departure's doors may go on closing before the close is
+    # forced and the aeroplane released: a door that answers slowly holds
+    # a departure for this long, never for ever.
+    doors_force_after_s: float = 300.0
+    # How many vehicles are out on the apron at once, not counting the
+    # stairs and the tugs. Each is a drawn object; the nearest aeroplanes
+    # to the pilot are served first and the rest wait their turn or go
+    # without. Twenty-four is five aeroplanes being fully worked at once.
+    handling_limit: int = 24
     # Roughly how many aircraft are worked at once, as a multiple of what the
-    # airport's size would normally carry. 0 is silence, 2 is a busy morning.
+    # field would normally carry (atc.fleet: an airport by its size, a
+    # general-aviation field with a tower four to six, an airfield without
+    # one two or three), and how often one starts. 0 is silence, 2 is a busy
+    # morning.
     density: float = 1.0
     # Fixing the seed makes a session repeatable, which is only useful for
     # testing; left at 0 the traffic differs every time.
@@ -438,6 +1153,55 @@ class TrafficConfig:
     # much easier to follow than a frequency of telephony names you have to
     # know.
     callsigns: str = "auto"        # auto | registration
+    # Who flies the traffic: "wilcoatc" (this program: the live flights when
+    # traffic.live is on, and invented ones in the gaps) or "fsltl" (FSLTL,
+    # or whatever else the pilot runs, worked as it is found; nothing live
+    # injected and the feed not asked, because the two together would put a
+    # second copy of every real flight in the sky). The pilot chooses;
+    # nothing is detected. "auto" is fsltl when FSLTL is in the Community
+    # folder, else wilcoatc (integrations/fsltl.traffic_source).
+    source: str = "auto"           # auto | wilcoatc | fsltl
+    # The real aeroplanes round you. See LiveTrafficConfig; off.
+    live: LiveTrafficConfig = field(default_factory=LiveTrafficConfig)
+
+
+describe(
+    TrafficConfig,
+    enabled=Setting("traffic", "traffic", label="set.traffic_on",
+                    help="set.traffic_why"),
+    from_simulator=Setting("traffic", "traffic"),
+    in_simulator=Setting("traffic", "traffic", restart=True),
+    in_simulator_limit=Setting("traffic", "traffic", min=0, max=60,
+                               restart=True),
+    density=Setting("traffic", "traffic", min=0, max=3, step=0.25,
+                    widget="slider", label="set.how_busy"),
+    parked=Setting("traffic", "traffic", min=0, max=80, restart=True),
+    source=Setting("traffic", "traffic",
+                   choices=("auto", "wilcoatc", "fsltl"), restart=True),
+    callsigns=Setting("traffic", "traffic", choices=("auto", "registration"),
+                      choice_keys=("set.callsigns_auto", "set.callsigns_reg"),
+                      restart=True, label="set.traffic_callsigns",
+                      help="set.traffic_callsigns_why"),
+    smooth_motion=Setting("traffic", "traffic", restart=True, advanced=True),
+    fsltl_rules=Setting("traffic", "traffic", kind="path", restart=True,
+                        advanced=True),
+    handling_observed=Setting("traffic", "handling", advanced=True),
+    handling_doors=Setting("traffic", "handling", restart=True,
+                           advanced=True),
+    engines_and_lights=Setting("traffic", "handling", restart=True,
+                               advanced=True),
+    doors_table=Setting("traffic", "handling", kind="path", restart=True,
+                        advanced=True),
+    doors_force_after_s=Setting("traffic", "handling", min=10, max=3600,
+                                unit="s", restart=True, advanced=True),
+    handling_limit=Setting("traffic", "handling", min=0, max=200,
+                           restart=True, advanced=True),
+    seed=Setting("advanced", "debug", min=0, max=2**31 - 1, restart=True,
+                 developer=True),
+    # The old name of traffic.debug.force_types, still read.
+    debug_force_types=Setting("advanced", "debug", restart=True,
+                              developer=True, hidden=True),
+)
 
 
 @dataclass
@@ -446,6 +1210,18 @@ class WeatherConfig:
     prefer_sim: bool = True
     refresh_s: float = 600.0
     station_override: str = ""
+
+
+describe(
+    WeatherConfig,
+    online=Setting("weather_data", "weather", restart=True,
+                   label="set.real_obs", help="set.real_obs_why"),
+    prefer_sim=Setting("weather_data", "weather", label="set.sim_wins",
+                       help="set.sim_wins_why"),
+    refresh_s=Setting("weather_data", "weather", min=60, max=7200, unit="s",
+                      restart=True, advanced=True),
+    station_override=Setting("weather_data", "weather", advanced=True),
+)
 
 
 @dataclass
@@ -464,6 +1240,20 @@ class SimConfig:
     simconnect_dll: str = ""
 
 
+describe(
+    SimConfig,
+    enabled=Setting("weather_data", "simulator", label="set.use_sim",
+                    help="set.use_sim_why"),
+    poll_interval_s=Setting("weather_data", "simulator", min=0.05, max=5,
+                            step=0.05, unit="s", advanced=True),
+    reconnect_interval_s=Setting("weather_data", "simulator", min=1, max=120,
+                                 unit="s", advanced=True),
+    frequencies_from_sim=Setting("weather_data", "simulator", advanced=True),
+    simconnect_dll=Setting("weather_data", "simulator", kind="path",
+                           restart=True, advanced=True),
+)
+
+
 @dataclass
 class FlightConfig:
     """Details the sim cannot tell us, which the pilot supplies."""
@@ -474,6 +1264,32 @@ class FlightConfig:
     destination: str = ""
     cruise_altitude_ft: int = 0
     ifr: bool = True
+    # What kind of flying this is, as the pilot said it (atc.profile):
+    # airliner | general_aviation | helicopter. The cabin, the first
+    # officer's callouts and checklists, the callsign and the stand follow
+    # it; the simulator's aeroplane only questions it. Airliner by default,
+    # which is what every flight was taken for before there was a choice.
+    profile: str = "airliner"
+    # The phraseology region: auto (each controller's own field) or pinned,
+    # faa | icao | uk | fr | de | metric (navdata.db.vfr_region's regions).
+    region: str = "auto"
+
+
+describe(
+    FlightConfig,
+    callsign=Setting("flight", "flight"),
+    aircraft_type=Setting("flight", "flight"),
+    departure=Setting("flight", "flight"),
+    destination=Setting("flight", "flight"),
+    cruise_altitude_ft=Setting("flight", "flight", min=0, max=60000,
+                               step=500, unit="ft"),
+    ifr=Setting("flight", "flight"),
+    profile=Setting("flight", "flight",
+                    choices=("airliner", "general_aviation", "helicopter")),
+    region=Setting("flight", "flight",
+                   choices=("auto", "faa", "icao", "uk", "fr", "de",
+                            "metric")),
+)
 
 
 @dataclass
@@ -499,6 +1315,189 @@ class NetworkConfig:
     use_online_atis: bool = True
 
 
+describe(
+    NetworkConfig,
+    provider=Setting("radio", "network", choices=("none", "vatsim", "ivao"),
+                     restart=True),
+    refresh_s=Setting("radio", "network", min=30, max=1800, unit="s",
+                      restart=True, advanced=True,
+                      when="network.provider!=none"),
+    use_online_atis=Setting("radio", "network",
+                            when="network.provider!=none"),
+)
+
+
+@dataclass
+class ControllerRealismConfig:
+    """What a real controller does that the program's did not: Special VFR,
+    a runway change with the wind, orbits and holds, the conditional
+    clearances, the reporting points chased, a busy frequency, the readback
+    corrected item by item, the circuit in the ATIS (Phase 6 of the VFR
+    plan).
+
+    It sits under ``immersion`` because the plan put it there, and unlike the
+    rest of that section it is on whatever ``immersion.enabled`` says: it is
+    the controller, not the crew. Each switch turns one behaviour back into
+    what it was before.
+    """
+
+    special_vfr: bool = True
+    runway_change: bool = True
+    delays: bool = True
+    conditional_clearances: bool = True
+    reporting_points: bool = True
+    congestion: bool = True
+    readback_items: bool = True
+    atis_briefing: bool = True
+    # The IFR plan, Phase 1. The departure as a controller works it: an
+    # initial altitude of the field's own, the SID read back by name, the
+    # takeoff clearance with the SID's first fix, departure's check-in with
+    # a step and a direct; off, every clearance is 5,000 ft and the climb
+    # goes straight to the cruise, as before.
+    ifr_departure: bool = True
+    # The climb in steps, departure's then each centre's, and the handoff to
+    # the centre where departure's airspace ends.
+    climb_steps: bool = True
+    # "Verify you are on the ... departure", once, to a flight off its SID.
+    sid_watch: bool = True
+    # The IFR plan, Phase 2. The descent cleared before the top of descent,
+    # in the form that fits -- "descend via" the STAR, a crossing
+    # restriction, at pilot's discretion, or plain -- with the QNH; off, the
+    # first descent waits for the old profile, as before.
+    ifr_descent: bool = True
+    # The en route (atc/routing.py): the plan's own step climbs offered by
+    # the centre; a quiet centre's "proceed direct" further down the route
+    # when it saves real miles; "verify you are proceeding direct" to a
+    # flight a minute off its route; weather deviations approved with a fix
+    # to rejoin at. Off, each is what it was: nothing said unasked, and a
+    # deviation request not understood.
+    plan_steps: bool = True
+    shortcuts: bool = True
+    off_route_watch: bool = True
+    deviations: bool = True
+    # The IFR plan, Phase 3. The approach areas (navdata.approach_areas):
+    # departure hands a flight to the centre out of its field's area or
+    # above it, and the centre hands an arrival to approach inside the
+    # destination's area and below its ceiling. Off, or at a field with no
+    # area, 30 nm / 17,000 ft and 60 nm, as before.
+    approach_areas: bool = True
+    # The IFR plan, Phase 4. The approach catalogue (atc/approaches.py):
+    # the chart's letter, the minima the aeroplane can fly against the
+    # weather, the visual in good weather in the US and Canada, a circle to
+    # land where the runway has nothing. Off, the ILS, then an RNAV, then a
+    # non-precision approach, whatever the weather, as before.
+    approach_catalogue: bool = True
+    # The IFR plan, Phase 5 (a). A STAR that runs onto the final: the
+    # approach cleared along it, no level said over a "descend via", and the
+    # handoff to the tower once established about ten miles out. Off, the
+    # clearance waits for the final's cone and the tower takes the flight at
+    # fifteen miles, as before.
+    star_final: bool = True
+    # The IFR plan, Phase 5 (b). Radar vectors onto the final
+    # (atc/vectors.py): straight in, or a downwind, base and intercept, the
+    # levels with the miles and never below the terrain along the heading,
+    # the intercept carrying the clearance and a visual only with the field
+    # in sight. Off, approach clears a flight only in the final's cone.
+    vectors: bool = True
+    # The IFR plan, Phase 5 (c). Speed control while vectoring, with traffic
+    # landing ahead: 210 kt on the pattern, 160 kt to four miles on the
+    # final, lifted when nobody is ahead. Off, no speed is ever given.
+    speed_control: bool = True
+    # The IFR plan, Phase 5 (d). A go-around is re-vectored into the pattern
+    # from where it is, its old vectors and speed forgotten. Off, approach
+    # carries on from the pattern the flight was in before it went round.
+    go_around_vectors: bool = True
+    # The IFR plan, Phase 5 (e). The tower answers an IFR arrival checking
+    # in on the final -- the landing clearance, or "runway NN, continue,
+    # I'll call your clearance" until the runway is free -- and Ground gives
+    # an arrival its taxi in when it reports the runway vacated. Off, the
+    # check-in is not understood and "runway vacated" gets "roger".
+    tower_continue: bool = True
+    # The IFR plan, Phase 6. Holds (atc/holds.py): over the arrival's last
+    # fix, for a queue the runway cannot take, weather below every minima or
+    # the pilot's asking, with an EFC, the sequence when it changes, and
+    # "cleared to leave the hold" when the reason is gone. Off, nobody holds.
+    holds: bool = True
+    # The IFR plan, Phase 6. The pilot's requests answered: a speed, a hold,
+    # a return or a diversion ("cleared to ... via direct"), "request
+    # descent" before it is due ("expect lower in N minutes"), each a
+    # clearance or "unable" with the reason. Off, they are not understood.
+    pilot_requests: bool = True
+
+
+describe(
+    ControllerRealismConfig,
+    **{name: Setting("immersion", "controller") for name in (
+        "special_vfr", "runway_change", "delays", "conditional_clearances",
+        "reporting_points", "congestion", "readback_items", "atis_briefing",
+        "ifr_departure", "climb_steps", "sid_watch", "ifr_descent",
+        "plan_steps", "shortcuts", "off_route_watch", "deviations",
+        "approach_areas", "approach_catalogue", "star_final", "vectors",
+        "speed_control", "go_around_vectors", "tower_continue",
+        "holds", "pilot_requests")},
+)
+
+
+@dataclass
+class FirstOfficerConfig:
+    """The first officer's timing (wilcoatc.atc.checklist and
+    wilcoatc.atc.callouts); the switches are ``copilot``, ``callouts`` and
+    ``checklists`` beside it. A section of its own rather than inside
+    ``copilot``, which is the on/off the panel writes."""
+
+    # How long an item waits for an answer before it is read again, then
+    # held; and how long the radio has to be quiet before an item it talked
+    # over is read again.
+    answer_wait_s: float = 8.0
+    resume_after_s: float = 1.5
+    # Offers: at most one in this long, standing this long, none this soon
+    # after the pilot spoke to the first officer or the flight began, and
+    # none below this height in the air.
+    offer_every_s: float = 120.0
+    offer_answer_s: float = 30.0
+    offer_after_talk_s: float = 30.0
+    offer_settle_s: float = 20.0
+    offer_floor_agl_ft: float = 500.0
+    # A callout the radio held back longer than this is dropped: a late
+    # "rotate" is worse than none.
+    callout_late_s: float = 3.0
+    # Each deviation call (speed, sink rate, bank, altitude) at most once
+    # in this long.
+    deviation_every_s: float = 30.0
+    # 50 / 30 / 10 in the flare, in a light aeroplane.
+    flare_callouts: bool = False
+    # What the first officer notices unasked (wilcoatc.atc.notices): "gear's
+    # still up", the standby transponder, the altimeter. Off on its own,
+    # without the checklists or the callouts.
+    notices: bool = True
+    # Whether the first officer may take the radio for ONE call when the
+    # pilot hands it over in so many words ("you make the call", "call
+    # ground for taxi"). Never by default, never a readback that was not
+    # handed over too.
+    radio: bool = True
+
+
+_FO_TIMING = dict(tab="first_officer", group="fo_timing", advanced=True,
+                  unit="s")
+describe(
+    FirstOfficerConfig,
+    answer_wait_s=Setting(min=2, max=60, **_FO_TIMING),
+    resume_after_s=Setting(min=0, max=10, step=0.5, **_FO_TIMING),
+    offer_every_s=Setting(min=10, max=1800, **_FO_TIMING),
+    offer_answer_s=Setting(min=5, max=300, **_FO_TIMING),
+    offer_after_talk_s=Setting(min=0, max=600, **_FO_TIMING),
+    offer_settle_s=Setting(min=0, max=600, **_FO_TIMING),
+    offer_floor_agl_ft=Setting("first_officer", "fo_timing", min=0,
+                               max=10000, step=100, unit="ft",
+                               advanced=True),
+    callout_late_s=Setting(min=0.5, max=15, step=0.5, **_FO_TIMING),
+    deviation_every_s=Setting(min=5, max=600, **_FO_TIMING),
+    flare_callouts=Setting("first_officer", "first_officer"),
+    notices=Setting("first_officer", "first_officer"),
+    radio=Setting("first_officer", "first_officer"),
+)
+
+
 @dataclass
 class ImmersionConfig:
     """The rest of the aeroplane: the other seat, and the cabin behind you.
@@ -522,6 +1521,9 @@ class ImmersionConfig:
     # aeroplane keeps the same first officer. A voice key pins one.
     copilot_voice: str = "auto"
     copilot_gender: str = "auto"        # auto | m | f
+    # The first officer's timing (see FirstOfficerConfig).
+    first_officer: FirstOfficerConfig = field(
+        default_factory=FirstOfficerConfig)
     # The standard callouts: eighty knots, V1, rotate, positive rate, the
     # thousand-foot calls on the way down, and the rollout calls.
     callouts: bool = True
@@ -618,6 +1620,69 @@ class ImmersionConfig:
     # How much of it there is. "quiet" is the callouts and nothing else;
     # "chatty" adds the small talk a long cruise actually has in it.
     verbosity: str = "normal"          # quiet | normal | chatty
+    # The controller's half (see ControllerRealismConfig).
+    controller: ControllerRealismConfig = field(
+        default_factory=ControllerRealismConfig)
+
+
+#: The languages the crew have scripts in (atc/crew_lines.py), and "auto".
+CREW_LANGUAGES = ("auto", "en", "fr", "de", "nl")
+
+_FO = dict(tab="first_officer", group="first_officer")
+_CABIN = dict(tab="immersion", group="cabin")
+_MANNER = dict(tab="immersion", group="crew_manner")
+describe(
+    ImmersionConfig,
+    enabled=Setting("immersion", "crew", label="set.immersion",
+                    help="set.immersion_why"),
+    copilot=Setting(label="set.copilot", help="set.copilot_why", **_FO),
+    # The picker writes the voice and the sex together: "a woman" is a sex
+    # and clears the voice; a person clears the sex.
+    copilot_voice=Setting(widget="voice", label="set.copilot_voice", **_FO),
+    copilot_gender=Setting(choices=("auto", "m", "f"), hidden=True, **_FO),
+    callouts=Setting(label="set.callouts", help="set.callouts_why", **_FO),
+    confirmations=Setting(label="set.confirmations",
+                          help="set.confirmations_why", **_FO),
+    checklists=Setting(label="set.checklists", help="set.checklists_why",
+                       **_FO),
+    radio_readbacks=Setting(label="set.readbacks", help="set.readbacks_why",
+                            **_FO),
+    cabin=Setting(label="set.cabin_crew", help="set.cabin_crew_why",
+                  **_CABIN),
+    cabin_voice=Setting(widget="voice", label="set.cabin_voice", **_CABIN),
+    cabin_gender=Setting(choices=("auto", "m", "f"), hidden=True, **_CABIN),
+    briefings=Setting(label="set.briefings", help="set.briefings_why",
+                      **_CABIN),
+    announcements=Setting(label="set.announcements",
+                          help="set.announcements_why", **_CABIN),
+    service=Setting(label="set.service", help="set.service_why", **_CABIN),
+    chimes=Setting(label="set.chimes", help="set.chimes_why", **_CABIN),
+    boarding_music=Setting(label="set.boarding_music",
+                           help="set.boarding_music_why", **_CABIN),
+    applause=Setting(label="set.applause", help="set.applause_why",
+                     **_CABIN),
+    realism=Setting(label="set.crew_realism", help="set.crew_realism_why",
+                    advanced=True, **_CABIN),
+    bilingual=Setting(label="set.bilingual", help="set.bilingual_why",
+                      advanced=True, **_CABIN),
+    recordings=Setting("immersion", "recorded", label="set.use_recordings",
+                       help="set.use_recordings_why"),
+    recordings_dir=Setting("immersion", "recorded", kind="path",
+                           label="set.announcements_dir",
+                           help="set.announcements_dir_why"),
+    volume=Setting(min=0, max=1.2, step=0.05, unit="%", scale=100,
+                   widget="slider", label="set.crew_volume", **_MANNER),
+    language=Setting(choices=CREW_LANGUAGES, advanced=True, **_MANNER),
+    airline=Setting(label="set.airline_name", help="set.airline_why",
+                    **_MANNER),
+    captain_name=Setting(label="set.captain_name",
+                         help="set.captain_name_why", **_MANNER),
+    interphone=Setting(label="set.talk_to_crew", help="set.talk_to_crew_why",
+                       **_MANNER),
+    verbosity=Setting(choices=("quiet", "normal", "chatty"),
+                      choice_keys=("set.quiet", "set.normal", "set.chatty"),
+                      label="set.how_much", **_MANNER),
+)
 
 
 @dataclass
@@ -654,6 +1719,27 @@ class LoggingConfig:
     # Anything in the log folder older than this is deleted at startup. Zero
     # keeps everything.
     keep_days: int = 14
+    # The apron, in the log: every door opened and shut, every model
+    # swapped for a nearer or a lighter one. Off, those loggers
+    # (wilcoatc.doors, wilcoatc.lod) say nothing short of a warning.
+    apron: bool = True
+
+
+_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR")
+_LOG = dict(tab="advanced", group="logging")
+describe(
+    LoggingConfig,
+    level=Setting(choices=_LEVELS, **_LOG),
+    console_level=Setting(choices=_LEVELS, **_LOG),
+    directory=Setting(kind="path", restart=True, **_LOG),
+    max_bytes=Setting(min=100_000, max=100_000_000, restart=True, **_LOG),
+    backups=Setting(min=0, max=50, restart=True, **_LOG),
+    structured=Setting(**_LOG),
+    radio=Setting(**_LOG),
+    crew=Setting(restart=True, **_LOG),
+    keep_days=Setting(min=0, max=365, restart=True, **_LOG),
+    apron=Setting(restart=True, **_LOG),
+)
 
 
 @dataclass
@@ -676,27 +1762,180 @@ class Config:
     flight: FlightConfig = field(default_factory=FlightConfig)
     network: NetworkConfig = field(default_factory=NetworkConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
-    # Kept for the config files that already say it. The logging section is
-    # where the level lives now, and takes precedence when it is set.
-    log_level: str = "INFO"
 
     @classmethod
     def load(cls, path: Path | str | None = None) -> "Config":
+        """``config.yaml``, then ``config.local.yaml`` beside it on top.
+
+        The local file is for settings one machine wants and the tracked
+        file must not carry -- a developer testing ``livery: any`` while the
+        tracked file holds what ships. It is never written: :meth:`save`
+        puts the tracked file's own values back for every key it sets.
+        """
         path = Path(path) if path else CONFIG_PATH
         config = cls()
-        if not path.exists():
-            return config
-        raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-        _merge(config, raw)
+        if path.exists():
+            raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+            _merge(config, raw)
+            _read_legacy(config, raw)
+        local = path.with_name(LOCAL_NAME)
+        if local.exists():
+            overlay = yaml.safe_load(local.read_text(encoding="utf-8")) or {}
+            if isinstance(overlay, dict):
+                base = asdict(config)
+                _merge(config, overlay)
+                object.__setattr__(config, "_local_base",
+                                   _leaves(overlay, base))
+        # Where a save goes: the file this was read from, which is the one
+        # --config named, not always the default one.
+        object.__setattr__(config, "_path", path)
+        # What was read, so a save writes only what this run changed.
+        object.__setattr__(config, "_saved", asdict(config))
         return config
 
+    def override(self, path: str, value: Any) -> None:
+        """Set a value for this run only -- a command-line option.
+
+        ``gui --no-sim`` used to be saved with the first setting changed on
+        the screen, and the simulator stayed off for good. The file's own
+        value is what a save writes, until the pilot changes the same setting
+        on the screen (:meth:`release`).
+        """
+        held = self.__dict__.setdefault("_held", {})
+        held.setdefault(path, get_path(self, path))
+        set_path(self, path, value)
+
+    def release(self, path: str) -> None:
+        """The pilot chose this one: a save writes it from now on."""
+        self.__dict__.get("_held", {}).pop(path, None)
+
     def save(self, path: Path | str | None = None) -> Path:
-        path = Path(path) if path else CONFIG_PATH
-        path.write_text(
-            yaml.safe_dump(asdict(self), sort_keys=False, default_flow_style=False),
-            encoding="utf-8",
-        )
+        """Write what this run changed over the file as it is now.
+
+        Only what changed since the file was read (or last saved), when it
+        is the file this was read from: a save used to write back every
+        value the program held, so ``ground_control: true`` written into the
+        file while the program ran was ``false`` again after the next change
+        of accent colour on the screen. Anything else -- a new file, another
+        path, a Config built in code -- is written whole.
+        """
+        path = Path(path) if path else getattr(self, "_path", CONFIG_PATH)
+        data = asdict(self)
+        # What config.local.yaml set stays in config.local.yaml, and what the
+        # command line set stays on the command line.
+        held = [(tuple(key.split(".")), value)
+                for key, value in self.__dict__.get("_held", {}).items()]
+        kept = [*getattr(self, "_local_base", []), *held]
+        for keys, value in kept:
+            where = data
+            for key in keys[:-1]:
+                where = where[key]
+            where[keys[-1]] = value
+        saved = self.__dict__.get("_saved")
+        own_file = Path(path) == Path(getattr(self, "_path", ""))
+        if saved is not None and own_file and path.exists():
+            changed = _changed(data, saved)
+            for keys, _value in kept:
+                changed = _without(changed, keys)
+            _write_keeping_comments(path, changed)
+        else:
+            _write_keeping_comments(path, data)
+        object.__setattr__(self, "_saved", data)
         return path
+
+
+def _changed(now: dict, before: dict) -> dict:
+    """The leaves of ``now`` that differ from ``before``, nested as they are."""
+    out = {}
+    for key, value in now.items():
+        was = before.get(key) if isinstance(before, dict) else None
+        if isinstance(value, dict) and isinstance(was, dict):
+            inner = _changed(value, was)
+            if inner:
+                out[key] = inner
+        elif key not in (before or {}) or value != was:
+            out[key] = value
+    return out
+
+
+def _without(data: dict, keys: tuple) -> dict:
+    """``data`` with one leaf taken out, by its key path."""
+    if not keys or keys[0] not in data:
+        return data
+    out = dict(data)
+    if len(keys) == 1:
+        out.pop(keys[0])
+    elif isinstance(out[keys[0]], dict):
+        inner = _without(out[keys[0]], keys[1:])
+        if inner:
+            out[keys[0]] = inner
+        else:
+            out.pop(keys[0])
+    return out
+
+
+def _write_keeping_comments(path: Path, data: dict) -> None:
+    """Write ``data`` over the file without losing what the pilot wrote.
+
+    ruamel.yaml's round trip keeps comments, key order and the keys this
+    program does not know (an old name, a section of somebody's own); a
+    value that has not changed is not even touched, so its formatting stays
+    as written. PyYAML, which reads the file, cannot do this: its dump is the
+    whole file regenerated, and every comment in it went the first time the
+    panel saved anything.
+    """
+    rt = RoundTripYAML()
+    rt.preserve_quotes = True
+    rt.width = 4096
+    # "null", as the file has always said it; ruamel's default is nothing.
+    rt.representer.add_representer(
+        type(None),
+        lambda dumper, _: dumper.represent_scalar("tag:yaml.org,2002:null",
+                                                  "null"))
+    document = None
+    if path.exists():
+        try:
+            document = rt.load(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            # A file the round trip cannot read is rewritten whole rather
+            # than left unsaved: the setting the pilot just changed matters
+            # more than the formatting of a file that does not parse.
+            import logging
+            logging.getLogger(__name__).warning(
+                "config.yaml could not be read back (%s); writing it afresh",
+                exc)
+    if not isinstance(document, dict):
+        document = CommentedMap()
+    _update_in_place(document, data)
+    buffer = io.StringIO()
+    rt.dump(document, buffer)
+    path.write_text(buffer.getvalue(), encoding="utf-8")
+
+
+def _update_in_place(target, data: dict) -> None:
+    for key, value in data.items():
+        current = target.get(key) if key in target else None
+        if isinstance(value, dict) and isinstance(current, dict):
+            _update_in_place(current, value)
+        elif key not in target or current != value:
+            target[key] = value
+
+
+#: The untracked overlay beside config.yaml (see Config.load).
+LOCAL_NAME = "config.local.yaml"
+
+
+def _leaves(overlay: dict, base: dict, prefix: tuple = ()) -> list:
+    """(key path, the base value) for every setting the overlay changes."""
+    found = []
+    for key, value in overlay.items():
+        if not isinstance(base, dict) or key not in base:
+            continue
+        if isinstance(value, dict) and isinstance(base[key], dict):
+            found += _leaves(value, base[key], prefix + (key,))
+        else:
+            found.append((prefix + (key,), base[key]))
+    return found
 
 
 def _merge(target: Any, values: dict) -> None:
@@ -708,5 +1947,195 @@ def _merge(target: Any, values: dict) -> None:
         current = getattr(target, key)
         if is_dataclass(current) and isinstance(value, dict):
             _merge(current, value)
+        elif (is_dataclass(current) and isinstance(value, bool)
+              and hasattr(current, "enabled")):
+            # A section that used to be a switch: "handling: false".
+            current.enabled = value
         else:
             setattr(target, key, value)
+
+
+def _read_legacy(config: "Config", raw: dict) -> None:
+    """An old name that still means something, read into its new one.
+
+    ``atc.dialect`` pinned FAA or ICAO wording and was never read (only a
+    fallback object nobody asked took it), so a pilot who set it believed
+    the radio was pinned. ``flight.region`` is the pin that works; a region
+    written beside the old name wins, because it is the newer.
+    """
+    if not isinstance(raw, dict):
+        return
+    atc = raw.get("atc")
+    flight = raw.get("flight")
+    dialect = atc.get("dialect") if isinstance(atc, dict) else None
+    if dialect in ("faa", "icao") and not (
+            isinstance(flight, dict) and "region" in flight):
+        config.flight.region = dialect
+
+
+#: Names a config file may still carry that no longer mean anything. They
+#: load -- an unknown key is ignored -- and are listed so that nobody brings
+#: one back meaning something else: each was in the file with no reader
+#: (``audio.sidetone``, ``atc.abbreviate_callsigns``, ``speech.language``),
+#: or was shadowed by the section that replaced it (``log_level`` under
+#: ``logging.level``). ``atc.dialect`` is read once more, into
+#: ``flight.region`` (:func:`_read_legacy`).
+LEGACY_NAMES = ("audio.sidetone", "atc.abbreviate_callsigns",
+                "speech.language", "log_level", "atc.dialect")
+
+
+def _leaf_fields(instance: Any, prefix: str = ""):
+    """(path, field name, owning class, default) for every setting."""
+    for item in fields(instance):
+        value = getattr(instance, item.name)
+        path = prefix + item.name
+        if is_dataclass(value):
+            yield from _leaf_fields(value, path + ".")
+        else:
+            yield path, item.name, type(instance), value
+
+
+#: Every setting, by its dotted path, and what it was by default.
+SETTINGS: dict[str, Setting] = {}
+DEFAULTS: dict[str, Any] = {}
+for _path, _name, _owner, _default in _leaf_fields(Config()):
+    DEFAULTS[_path] = _default
+    _described = getattr(_owner, "__settings__", {}).get(_name)
+    if _described is not None:
+        SETTINGS[_path] = describe_field(_path, _default, _described)
+
+#: The sections a section-sized write can name: "traffic", "traffic.lod".
+SECTIONS = sorted({path.rsplit(".", 1)[0] for path in DEFAULTS if "." in path})
+
+_COLOUR = re.compile(r"#[0-9a-f]{6}")
+_TEXT_LIMIT = 1000
+
+
+def _plain(number: float):
+    return int(number) if float(number).is_integer() else number
+
+
+def check(path: str, value: Any) -> Any:
+    """``value`` as the setting at ``path`` stores it, or SettingRefused.
+
+    What the screen sends is coerced here rather than trusted -- it is a
+    browser's idea of a number -- and a value outside what the setting
+    allows is refused with the reason, so nothing out of range is ever
+    written to the file.
+    """
+    setting = _setting_or_generic(path)
+    if setting is None:
+        raise SettingRefused("cfg.err.unknown",
+                             "There is no setting called {path}.", path=path)
+    default = DEFAULTS[path]
+    value = _coerce(setting, value, default)
+    if setting.readonly and value != default:
+        raise SettingRefused(
+            "cfg.err.readonly",
+            "This one was measured; only its measured value can be put back.")
+    return value
+
+
+def _coerce(setting: Setting, value: Any, default: Any) -> Any:
+    kind = setting.kind
+    if setting.widget in ("input_device", "output_device"):
+        # Nothing chosen is the system's default device, which is not the
+        # same as device zero.
+        if value in (None, "", "default"):
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return str(value)
+    if kind == "toggle":
+        if isinstance(value, str) and value.strip().lower() in (
+                "true", "false", "on", "off", "1", "0"):
+            return value.strip().lower() in ("true", "on", "1")
+        if isinstance(value, (bool, int)) and value in (0, 1):
+            return bool(value)
+        raise SettingRefused("cfg.err.toggle", "This is either on or off.")
+    if kind == "number":
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            number = math.nan
+        if not math.isfinite(number):
+            raise SettingRefused("cfg.err.number", "This has to be a number.")
+        if setting.off is not None and number == setting.off:
+            return type(default)(number)
+        if setting.min is not None and number < setting.min:
+            raise SettingRefused("cfg.err.below", "The lowest it goes is {min}.",
+                                 min=_plain(setting.min))
+        if setting.max is not None and number > setting.max:
+            raise SettingRefused("cfg.err.above",
+                                 "The highest it goes is {max}.",
+                                 max=_plain(setting.max))
+        if isinstance(default, int) and not isinstance(default, bool):
+            if not number.is_integer():
+                raise SettingRefused("cfg.err.whole",
+                                     "This has to be a whole number.")
+            return int(number)
+        return number
+    if kind == "choice":
+        wanted = str(value if value is not None else "").strip().lower()
+        for choice in setting.choices:
+            if str(choice).lower() == wanted:
+                return choice
+        raise SettingRefused("cfg.err.choice",
+                             "That is not one of the choices.")
+    if kind == "colour":
+        colour = str(value or "").strip().lower()
+        if not _COLOUR.fullmatch(colour):
+            raise SettingRefused("cfg.err.colour",
+                                 "A colour is written #rrggbb.")
+        return colour
+    if kind == "list":
+        if isinstance(value, str):
+            value = value.split(",")
+        if not isinstance(value, (list, tuple)):
+            raise SettingRefused("cfg.err.list", "This is a list.")
+        items = [str(item).strip() for item in value if str(item).strip()]
+        if setting.widget == "languages":
+            # Empty is the normal setting: the languages follow the
+            # aeroplane. A pinned set always keeps English, which is worked
+            # everywhere.
+            items = [item.lower()[:2] for item in items]
+            if items and "en" not in items:
+                items.insert(0, "en")
+        return items
+    if kind == "map":
+        if not isinstance(value, dict):
+            raise SettingRefused("cfg.err.map", "This is a table.")
+        return dict(value)
+    text = "" if value is None else str(value).strip()
+    if len(text) > _TEXT_LIMIT:
+        raise SettingRefused("cfg.err.long", "That is too long.")
+    return text
+
+
+def _setting_or_generic(path: str) -> Setting | None:
+    """A field's Setting; a field nobody described yet gets a generic one,
+    so it can still be saved (and the test names it)."""
+    if path in SETTINGS:
+        return SETTINGS[path]
+    if path in DEFAULTS:
+        return describe_field(path, DEFAULTS[path],
+                              Setting(tab="advanced", group="internals",
+                                      developer=True))
+    return None
+
+
+def get_path(config: Config, path: str) -> Any:
+    target = config
+    for step in path.split("."):
+        target = getattr(target, step)
+    return target
+
+
+def set_path(config: Config, path: str, value: Any) -> None:
+    *sections, name = path.split(".")
+    target = config
+    for step in sections:
+        target = getattr(target, step)
+    setattr(target, name, value)
+

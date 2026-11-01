@@ -147,14 +147,17 @@ class SimGround:
 
 
 def ask_facility(dll_path: str, client: bytes, fields, ident: str,
-                 timeout_s: float = 15.0) -> dict[int, list[bytes]] | None:
+                 timeout_s: float = 15.0,
+                 region: str = "") -> dict[int, list[bytes]] | None:
     """Ask the simulator for one airport's facility data.
 
     ``fields`` is the definition, in order, and the answer is the raw blocks
     by facility data type, or None if the simulator could not be asked or
     gave up. Each call opens its own session, so a slow answer never holds
     up the one flying the aeroplane. Shared by the taxiways and the
-    approaches, which ask for different things the same way.
+    approaches, which ask for different things the same way. ``region``
+    is the ICAO region an intersection's ident is unique in; an airport
+    needs none.
     """
     library = find_simconnect(dll_path)
     if library is None:
@@ -182,7 +185,7 @@ def ask_facility(dll_path: str, client: bytes, fields, ident: str,
                 return None
         if dll.SimConnect_RequestFacilityData(
                 handle, _DEF_ID, _REQ_ID, ident.encode("ascii", "ignore"),
-                b"") != 0:
+                region.encode("ascii", "ignore")) != 0:
             return None
         blocks: dict[int, list[bytes]] = {}
         data = ctypes.POINTER(_Recv)()

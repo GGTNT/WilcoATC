@@ -3,11 +3,21 @@
 A button in the simulator's own toolbar, next to GSX and the camera controls,
 that opens WilcoATC without leaving the cockpit view.
 
+`WilcoATC-Setup.exe` installs it into every Community folder it finds, and its
+uninstaller removes it (`wilcoatc/msfs_panel.py` does the copying for both).
+From a checkout:
+
 ```
 python msfs/install_panel.py
 ```
 
-Then restart the simulator. The button is a control tower, in the toolbar.
+Then restart the simulator. The button is the WilcoATC aeroplane, in the
+toolbar.
+
+The panel is the "WilcoATC Toolbar Panel" design -- three tabs, Comms, Flight
+and Settings -- in the glass of the desktop window. The description of the
+single-card layout below is the panel it replaced, kept for the history of
+why the frequency is the largest thing on it.
 
 ## What it shows
 

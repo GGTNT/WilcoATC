@@ -42,6 +42,14 @@ EARTH_M = 6_371_008.8
 PATH_TAXI = 1
 PATH_RUNWAY = 2
 PATH_PARKING = 3
+# The SDK's "PATH", and a taxiway as most of the large default airports
+# describe one: Kennedy has 3114 segments of it and not one of type 1,
+# Heathrow 5449 and none. Madeira, which this was written against, uses
+# type 1, so for a while every big airport was a few stands joined to
+# nothing. 5 is a closed taxiway, 6 and 7 are vehicle lanes and roads.
+PATH_PATH = 4
+PATH_VEHICLE_LANE = 6
+PATH_ROAD = 7
 
 # Which stands are gates, and which are ramps, by the simulator's own numbers.
 # Fuel pads, docks and vehicle parking are not stands.
@@ -67,11 +75,33 @@ HOLD_OFF_CENTRELINE_M = 45.0
 # the end is always preferred.
 ENTRY_SEARCH_M = 900.0
 
-# Taxi speeds, in metres a second. A straight is taken at about fifteen knots,
-# a corner at seven, and a pushback at a walking pace.
-TAXI_MS = 7.7
-TURN_MS = 3.6
+# Taxi speeds, in metres a second. A straight is taken at twenty knots, a
+# corner at ten, and a pushback at a walking pace. They were fifteen and seven,
+# reached and left in an instant, and an airliner went from one to the other
+# at every node -- which, written to the simulator once an engine tick, was a
+# jump of a few metres and a heading snapped round at every corner.
+TAXI_MS = 10.3
+TURN_MS = 5.1
 PUSH_MS = 1.4
+# A turn sharper than this is taken at TURN_MS; one sharper than SHARP_DEG
+# (back along a taxiway, a 180 at a runway end) at walking pace; and the end
+# of a pushback, where it stops and sets off the other way, from a stop.
+TURN_DEG = 30.0
+SHARP_DEG = 100.0
+SHARP_MS = 2.5
+# How fast it gets going and how hard it slows, metres a second squared: an
+# airliner on idle thrust and a gentle brake. BRAKE_HARD_MS2 is the brake for
+# traffic suddenly ahead, a firm but not an emergency stop.
+TAXI_ACCEL_MS2 = 0.6
+TAXI_BRAKE_MS2 = 0.9
+BRAKE_HARD_MS2 = 1.6
+PUSH_ACCEL_MS2 = 0.8
+# Integration slice: a tick may be five seconds, and a corner is closer than
+# that at taxi speed.
+_SLICE_S = 0.25
+# How far ahead a corner is looked for, metres: more than the braking
+# distance from TAXI_MS to a stop.
+_LOOK_M = 120.0
 
 # Runway segments cost this much more than taxiway ones, so a route crosses a
 # runway where it has to and never uses one as a taxiway if there is another
@@ -141,6 +171,10 @@ class Taxiing:
     # is not somebody else's the other way (``cleared``).
     hold_at: int | None = None
     cleared: bool = False
+    # How fast it is going along the route, metres a second; below zero for
+    # a route not yet started, which takes the aeroplane's own speed (an
+    # arrival turning off at thirty knots does not stop to begin its taxi).
+    speed: float = -1.0
 
     @property
     def done(self) -> bool:
@@ -180,11 +214,27 @@ class GroundLayout:
         # node -> [(neighbour, metres, is_runway, taxiway name)]
         self.edges: dict[object, list[tuple[object, float, bool, str]]] = {}
         self.runway_nodes: set[object] = set()
+        # The service roads, a graph of their own: a bus driven across the
+        # apron in a straight line from wherever it was to beside the
+        # aeroplane went over grass and through parked traffic, and the
+        # simulator's own waypoint driver, given the same two ends, drove it
+        # "somewhat haphazardly" and ignored the markings. Kept apart from
+        # ``edges`` so no aeroplane is ever routed down a road. Madeira has
+        # 405 segments of them in five pieces; a stand's nearest is 17-56 m
+        # off, and the last of that is the vehicle's own drive in.
+        self.roads: dict[object, list[tuple[object, float]]] = {}
         for kind, _width, _number, _designator, start, end, name, *_ in paths:
             a = ("p", int(start))
+            if kind in (PATH_VEHICLE_LANE, PATH_ROAD):
+                b = ("p", int(end))
+                if a in self.xy and b in self.xy and a != b:
+                    length = math.dist(self.xy[a], self.xy[b])
+                    self.roads.setdefault(a, []).append((b, length))
+                    self.roads.setdefault(b, []).append((a, length))
+                continue
             if kind == PATH_PARKING:
                 b = ("k", int(end))
-            elif kind in (PATH_TAXI, PATH_RUNWAY):
+            elif kind in (PATH_TAXI, PATH_RUNWAY, PATH_PATH):
                 b = ("p", int(end))
             else:
                 continue
@@ -274,6 +324,82 @@ class GroundLayout:
             path.append(came[path[-1]])
         return path[::-1]
 
+    def road_route(self, start: tuple[float, float],
+                   goal: tuple[float, float],
+                   ending=None) -> list[tuple[float, float]]:
+        """The way along the service roads from one point to another: the
+        road nodes in order, from the one nearest ``start`` to the one
+        nearest ``goal``. [] when there are no roads, or the two nearest are
+        on roads that do not join -- the caller drives straight instead.
+
+        ``ending`` is a test a road end must pass, on its (x, z): the last
+        stretch from the road to a stand is driven straight, so a bus whose
+        nearest road ran behind the aeroplane drove under its wing."""
+        if not self.roads:
+            return []
+        first = self._nearest_road(*start)
+        last = self._nearest_road(*goal, ending=ending)
+        if last is None:
+            return []
+        best = {first: 0.0}
+        came: dict[object, object] = {}
+        queue = [(0.0, 0, first)]
+        count = 0
+        while queue:
+            cost, _, node = heapq.heappop(queue)
+            if node == last:
+                break
+            if cost > best.get(node, math.inf):
+                continue
+            for other, length in self.roads[node]:
+                if cost + length < best.get(other, math.inf):
+                    best[other] = cost + length
+                    came[other] = node
+                    count += 1
+                    heapq.heappush(queue, (cost + length, count, other))
+        if last not in best:
+            return []
+        nodes = [last]
+        while nodes[-1] != first:
+            nodes.append(came[nodes[-1]])
+        return [self.xy[node] for node in reversed(nodes)]
+
+    def road_start(self, goal: tuple[float, float], metres: float,
+                   ending=None) -> tuple[float, float] | None:
+        """Somewhere on the roads that join the one nearest ``goal``, as
+        close to ``metres`` away along them as there is: where a bus comes
+        from, out of sight of the stand rather than appearing beside it.
+        Madeira's roads are five pieces that do not meet, so a point picked
+        by distance alone was as often on a road with no way to the stand.
+        ``ending`` as for :meth:`road_route`."""
+        if not self.roads:
+            return None
+        first = self._nearest_road(*goal, ending=ending)
+        if first is None:
+            return None
+        best = {first: 0.0}
+        queue = [(0.0, 0, first)]
+        count = 0
+        while queue:
+            cost, _, node = heapq.heappop(queue)
+            if cost > best.get(node, math.inf):
+                continue
+            for other, length in self.roads[node]:
+                if cost + length < best.get(other, math.inf):
+                    best[other] = cost + length
+                    count += 1
+                    heapq.heappush(queue, (cost + length, count, other))
+        node = min(best, key=lambda n: abs(best[n] - metres))
+        return self.xy[node]
+
+    def _nearest_road(self, x: float, z: float, ending=None) -> object | None:
+        nodes = [node for node in self.roads
+                 if ending is None or ending(self.xy[node])]
+        if not nodes:
+            return None
+        return min(nodes, key=lambda node: math.hypot(
+            self.xy[node][0] - x, self.xy[node][1] - z))
+
     def names_along(self, nodes: list[object]) -> list[str]:
         """The taxiways a route uses, in order, each once."""
         found: list[str] = []
@@ -301,6 +427,24 @@ class GroundLayout:
 
     # -- stands -----------------------------------------------------------
 
+    def stand_at(self, x: float, z: float) -> Stand | None:
+        """The stand an aeroplane at this point is standing on, if any.
+
+        The nearest gate or ramp whose radius reaches the point, with a
+        little slack: the simulator parks an aeroplane's reference point a
+        few metres off the stand's centre, and an FSLTL aeroplane is parked
+        by the simulator, not by this.
+        """
+        best: Stand | None = None
+        best_distance = float("inf")
+        for stand in self.stands:
+            if stand.kind not in _GATES and stand.kind not in _RAMPS:
+                continue
+            distance = math.hypot(stand.x - x, stand.z - z)
+            if distance <= max(stand.radius, 10.0) + 5.0 and distance < best_distance:
+                best, best_distance = stand, distance
+        return best
+
     def stands_for(self, airliner: bool) -> list[Stand]:
         """Every stand this size of aeroplane fits on and can taxi from."""
         wanted = AIRLINER_RADIUS_M if airliner else LIGHT_RADIUS_M
@@ -319,6 +463,20 @@ class GroundLayout:
         out. ``choose`` picks among the candidates; the first is taken without
         one.
         """
+        candidates = self.free_stands(airliner, occupied, taken)
+        if not candidates:
+            return None
+        return choose(candidates) if choose else candidates[0]
+
+    def free_stands(self, airliner: bool,
+                    occupied: list[tuple[float, float, float]],
+                    taken: set[int]) -> list[Stand]:
+        """Every stand :meth:`free_stand` would choose from, in layout order.
+
+        Public because the pilot's own stand is chosen from the same list
+        (:mod:`wilcoatc.atc.taxi`) and has to try the next one when the first
+        cannot be reached.
+        """
         candidates = []
         for stand in self.stands_for(airliner):
             if stand.index in taken:
@@ -328,14 +486,12 @@ class GroundLayout:
                    for x, z, radius in occupied):
                 continue
             candidates.append(stand)
-        if not candidates:
-            return None
-        if not airliner:
+        if candidates and not airliner:
             # A light aeroplane goes to the light ramp while there is room
             # on it, and takes an airliner's stand only when there is not.
             small = [c for c in candidates if c.radius < AIRLINER_RADIUS_M]
             candidates = small or candidates
-        return choose(candidates) if choose else candidates[0]
+        return candidates
 
     # -- the runway -------------------------------------------------------
 
@@ -355,14 +511,21 @@ class GroundLayout:
         node), nearest the threshold first."""
         found = []
         for node in self.runway_nodes:
-            if not any(not runway for _, _, runway, _ in self.edges[node]):
+            # ``get``: a point on the runway surface is a runway node whether
+            # or not any path reaches it, and Kennedy has one that none does.
+            if not any(not runway
+                       for _, _, runway, _ in self.edges.get(node, ())):
                 continue
             along, across = self.runway_frame(*self.xy[node], threshold,
                                               heading)
             if abs(across) > 40.0 or not -150.0 <= along <= length_m + 150.0:
                 continue
             found.append((along, node))
-        found.sort(key=lambda item: item[0])
+        # The node breaks a tie. ``runway_nodes`` is a set of tuples holding
+        # a string, whose order changes with the interpreter's hash seed, and
+        # two entries the same distance from the threshold would otherwise
+        # give the pilot a different taxi on a different day.
+        found.sort(key=lambda item: (item[0], item[1]))
         return found
 
     def departure(self, stand: Stand | None, start_xy: tuple[float, float],
@@ -500,48 +663,107 @@ def ahead(taxi: Taxiing, x: float, z: float,
     return found
 
 
+def _allowed(taxi: Taxiing, x: float, z: float, brake: float) -> float:
+    """The fastest it may go here and still make every corner ahead, and
+    stop at the end, braking at ``brake``."""
+    pushing = taxi.index < taxi.push
+    best = PUSH_MS if pushing else TAXI_MS
+    px, pz = x, z
+    covered = 0.0
+    previous = None
+    end = len(taxi.points)
+    if (taxi.hold_at is not None and not taxi.cleared
+            and taxi.index <= taxi.hold_at):
+        # An arrival may have to wait clear of the runway (see hold_at):
+        # it comes to that point as to the end of its route.
+        end = taxi.hold_at + 1
+    for position in range(taxi.index, end):
+        tx, tz = taxi.points[position]
+        gap = math.hypot(tx - px, tz - pz)
+        if gap < 0.01:
+            continue
+        leg = _heading(tx - px, tz - pz)
+        if previous is not None:
+            turn = _turn(previous[0], leg)
+            if taxi.push and position == taxi.push:
+                corner = 0.0            # the push ends: stop, then forwards
+            elif turn > SHARP_DEG:
+                corner = SHARP_MS
+            elif turn > TURN_DEG:
+                corner = TURN_MS
+            else:
+                corner = None
+            if corner is not None:
+                best = min(best, math.sqrt(corner * corner
+                                           + 2.0 * brake * previous[1]))
+        covered += gap
+        previous = (leg, covered)
+        if covered > _LOOK_M:
+            break
+        px, pz = tx, tz
+    else:
+        # The route ends within reach: arrive at a creep, not at speed.
+        if previous is not None:
+            best = min(best, max(0.6, math.sqrt(2.0 * brake * previous[1])))
+    return best
+
+
 def advance(taxi: Taxiing, x: float, z: float, heading: float,
-            elapsed: float) -> tuple[float, float, float, float]:
+            elapsed: float, stop: bool = False
+            ) -> tuple[float, float, float, float]:
     """Move along a route for ``elapsed`` seconds.
 
     Returns the new position, heading and speed in metres a second. The
-    speed is chosen by what is coming: a corner within thirty metres slows it
-    to turning pace, and a pushback is slow throughout.
+    speed is carried on the route from one call to the next and changes at
+    an aeroplane's rate: it accelerates on a straight, brakes in time for a
+    corner ahead -- the sharper the corner, the slower -- and creeps to the
+    end of the route. ``stop`` brakes it firmly to a stop where it is going,
+    for traffic suddenly ahead.
     """
-    speed = 0.0
+    if taxi.speed < 0.0:
+        taxi.speed = 0.0
     remaining = elapsed
-    while remaining > 0 and not taxi.done:
+    while remaining > 1e-9 and not taxi.done:
         tx, tz = taxi.points[taxi.index]
         dx, dz = tx - x, tz - z
         gap = math.hypot(dx, dz)
-        pushing = taxi.index < taxi.push
-        if pushing:
-            speed = PUSH_MS
-        else:
-            speed = TAXI_MS
-            if taxi.index + 1 < len(taxi.points):
-                nx, nz = taxi.points[taxi.index + 1]
-                if gap < 30.0 and _turn(_heading(dx, dz),
-                                        _heading(nx - tx, nz - tz)) > 30.0:
-                    speed = TURN_MS
         if gap < 0.01:
             taxi.index += 1
             continue
-        step = speed * remaining
+        pushing = taxi.index < taxi.push
+        dt = min(_SLICE_S, remaining)
+        if stop:
+            wanted = 0.0
+            brake = BRAKE_HARD_MS2
+        else:
+            wanted = _allowed(taxi, x, z, TAXI_BRAKE_MS2)
+            brake = TAXI_BRAKE_MS2
+        accel = PUSH_ACCEL_MS2 if pushing else TAXI_ACCEL_MS2
+        if wanted > taxi.speed:
+            taxi.speed = min(wanted, taxi.speed + accel * dt)
+        else:
+            taxi.speed = max(wanted, taxi.speed - brake * dt)
+        if taxi.speed <= 0.0:
+            taxi.speed = 0.0
+            break
+        step = taxi.speed * dt
         if step >= gap:
             x, z = tx, tz
-            remaining -= gap / speed
+            remaining -= max(gap / taxi.speed, 1e-6)
             taxi.index += 1
         else:
             x, z = x + dx / gap * step, z + dz / gap * step
-            remaining = 0.0
+            remaining -= dt
         # Pushing back, the nose points away from the way it is going.
         moving = _heading(dx, dz)
         heading = (moving + 180.0) % 360.0 if pushing else moving
-    if taxi.done and taxi.face is not None:
-        heading = taxi.face
-    return x, z, heading, speed
+    if taxi.done:
+        taxi.speed = 0.0
+        if taxi.face is not None:
+            heading = taxi.face
+    return x, z, heading, taxi.speed
 
 
 __all__ = ["GroundLayout", "Stand", "Taxiing", "advance", "PATH_TAXI",
-           "PATH_RUNWAY", "PATH_PARKING"]
+           "PATH_RUNWAY", "PATH_PARKING", "PATH_PATH", "PATH_VEHICLE_LANE",
+           "PATH_ROAD"]

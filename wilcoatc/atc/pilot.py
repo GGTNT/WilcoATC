@@ -75,6 +75,10 @@ class PilotBook:
     request_transition: str = ""
     request_flight_following: str = ""
     ready_for_departure_plain: str = ""
+    # A hold read back: the fix and the level (the IFR plan, Phase 6).
+    hold: str = "hold at {fix}, {altitude}"
+    # A diversion or a return read back: where to, and the level.
+    cleared_to: str = "cleared to {airport}, {altitude}"
     # The clearance request with no destination in it, for a flight
     # that has not filed one: naming the call must not leave the
     # preposition dangling ("request IFR clearance to").
@@ -86,7 +90,15 @@ class PilotBook:
     cleared_approach: str = "cleared {approach} approach runway {runway}"
     # Reporting a leg of the circuit, and reading back the option.
     on_leg: str = "turning {leg}"
+    # A circuit report the pilot handed the first officer to make.
+    runway_vacated: str = "runway vacated"
+    # Saying who is ahead on an uncontrolled field ("number two, following
+    # the Cessna"). UNVERIFIED in every language but English.
+    following: str = "number two, following {traffic}"
     option: str = "cleared for the option runway {runway}"
+    # A long taxi cut in two, read back: the taxiway held short of.
+    # UNVERIFIED in every language but English.
+    hold_short_taxiway: str = "hold short {taxiway}"
 
 
 ENGLISH = PilotBook(
@@ -142,6 +154,7 @@ FRENCH = PilotBook(
     traffic_in_sight="trafic en vue",
     taxi="roulage par {route} piste {runway}",
     hold_short="point d'attente piste {runway}",
+    hold_short_taxiway="maintiens avant {taxiway}",
     line_up="alignement piste {runway}",
     takeoff="autorisé décollage piste {runway}",
     land="autorisé atterrissage piste {runway}",
@@ -168,7 +181,11 @@ FRENCH = PilotBook(
     ready_for_departure_plain="prêt au départ",
     pattern_entry="{leg} main {direction} piste {runway}",
     on_leg="en {leg}",
+    runway_vacated="piste dégagée",
+    following="numéro deux, derrière {traffic}",
     option="autorisé option piste {runway}",
+    hold="attente à {fix}, {altitude}",
+    cleared_to="autorisés vers {airport}, {altitude}",
 )
 
 SPANISH = PilotBook(
@@ -185,6 +202,7 @@ SPANISH = PilotBook(
     traffic_in_sight="tráfico a la vista",
     taxi="rodaje por {route} pista {runway}",
     hold_short="punto de espera pista {runway}",
+    hold_short_taxiway="mantengo antes de {taxiway}",
     line_up="alineados y esperando pista {runway}",
     takeoff="autorizado a despegar pista {runway}",
     land="autorizado a aterrizar pista {runway}",
@@ -211,7 +229,10 @@ SPANISH = PilotBook(
     ready_for_departure_plain="listo para salida",
     pattern_entry="{leg} por la {direction} pista {runway}",
     on_leg="en {leg}",
+    following="número dos, detrás de {traffic}",
     option="autorizada la opción pista {runway}",
+    hold="espera sobre {fix}, {altitude}",
+    cleared_to="autorizados a {airport}, {altitude}",
 )
 
 GERMAN = PilotBook(
@@ -228,6 +249,7 @@ GERMAN = PilotBook(
     traffic_in_sight="Verkehr in Sicht",
     taxi="rollen über {route} Piste {runway}",
     hold_short="Rollhalt Piste {runway}",
+    hold_short_taxiway="halte vor {taxiway}",
     line_up="einreihen und warten Piste {runway}",
     takeoff="Start frei Piste {runway}",
     land="Landung frei Piste {runway}",
@@ -254,7 +276,10 @@ GERMAN = PilotBook(
     ready_for_departure_plain="startbereit",
     pattern_entry="{leg} {direction} Piste {runway}",
     on_leg="im {leg}",
+    following="Nummer zwei, hinter {traffic}",
     option="Option genehmigt Piste {runway}",
+    hold="Warteverfahren über {fix}, {altitude}",
+    cleared_to="frei nach {airport}, {altitude}",
 )
 
 ITALIAN = PilotBook(
@@ -271,6 +296,7 @@ ITALIAN = PilotBook(
     traffic_in_sight="traffico in vista",
     taxi="rulliamo via {route} pista {runway}",
     hold_short="punto attesa pista {runway}",
+    hold_short_taxiway="mantengo prima di {taxiway}",
     line_up="allineati e in attesa pista {runway}",
     takeoff="autorizzati al decollo pista {runway}",
     land="autorizzati all'atterraggio pista {runway}",
@@ -297,7 +323,10 @@ ITALIAN = PilotBook(
     ready_for_departure_plain="pronti al decollo",
     pattern_entry="{leg} {direction} pista {runway}",
     on_leg="in {leg}",
+    following="numero due, dietro {traffic}",
     option="autorizzato all'opzione pista {runway}",
+    hold="attesa su {fix}, {altitude}",
+    cleared_to="autorizzati a {airport}, {altitude}",
 )
 
 PORTUGUESE = PilotBook(
@@ -314,6 +343,7 @@ PORTUGUESE = PilotBook(
     traffic_in_sight="tráfego à vista",
     taxi="taxiamos por {route} pista {runway}",
     hold_short="ponto de espera pista {runway}",
+    hold_short_taxiway="mantenho antes de {taxiway}",
     line_up="alinhados e a aguardar pista {runway}",
     takeoff="autorizados a descolar pista {runway}",
     land="autorizados a aterrar pista {runway}",
@@ -340,7 +370,10 @@ PORTUGUESE = PilotBook(
     ready_for_departure_plain="prontos para descolar",
     pattern_entry="{leg} pela {direction} pista {runway}",
     on_leg="na {leg}",
+    following="número dois, atrás de {traffic}",
     option="autorizada a opção pista {runway}",
+    hold="espera sobre {fix}, {altitude}",
+    cleared_to="autorizados para {airport}, {altitude}",
 )
 
 
@@ -460,6 +493,14 @@ class PilotSpeech:
                          frame.format(altitude=self.p.alt(altitude_ft)),
                          greeting=True)
 
+    def maintaining(self, aircraft: Aircraft, station: str,
+                    altitude_ft: float) -> str:
+        """Checking in level: "Maastricht Radar, Speedbird four two one,
+        flight level three five zero" -- the level alone, as a check-in
+        at cruise is said in every language here."""
+        return self.call(aircraft, station, self.p.alt(altitude_ft),
+                         greeting=True)
+
     def established(self, aircraft: Aircraft, runway: str) -> str:
         return self.report(
             aircraft, self.book.established.format(runway=self.p.rwy(runway)))
@@ -490,9 +531,36 @@ class PilotSpeech:
             body += ", " + self.p.pressure(pressure)
         return self.report(aircraft, body)
 
-    def on_leg(self, aircraft: Aircraft, leg: str) -> str:
-        """Reporting a leg of the circuit: "turning base", "en finale"."""
-        return self.report(aircraft, self.book.on_leg.format(leg=leg))
+    def intercept(self, aircraft: Aircraft, heading: float, approach: str,
+                  runway: str, altitude_ft: float = 0.0) -> str:
+        """The last vector read back with its clearance: the heading first,
+        as it was given, then the approach and runway, then the altitude
+        to hold until established."""
+        body = self.book.heading.format(heading=self.p.hdg(heading)) + ", " \
+            + self.book.cleared_approach.format(approach=approach,
+                                                runway=self.p.rwy(runway))
+        if altitude_ft:
+            body += ", " + self.p.alt(altitude_ft)
+        return self.report(aircraft, body)
+
+    def on_leg(self, aircraft: Aircraft, leg: str, following: str = "") -> str:
+        """Reporting a leg of the circuit: "turning base", "en finale"; on a
+        field nobody works, with who is ahead ("number two, following the
+        Cessna")."""
+        body = self.book.on_leg.format(leg=leg)
+        if following:
+            body += ", " + self.book.following.format(traffic=following)
+        return self.report(aircraft, body)
+
+    def circuit_report(self, aircraft: Aircraft, leg: str) -> str:
+        """"Downwind": the report the pilot handed the first officer, the leg
+        on its own as CAP 413 has it. With the runway after it the parser
+        reads the call as a readback ("downwind runway two four" is how a
+        join is read back), so the runway is left to the controller."""
+        return self.report(aircraft, leg)
+
+    def runway_vacated(self, aircraft: Aircraft) -> str:
+        return self.report(aircraft, self.book.runway_vacated)
 
     def option(self, aircraft: Aircraft, runway: str) -> str:
         return self.report(
@@ -503,13 +571,18 @@ class PilotSpeech:
     # ------------------------------------------------------------------
 
     def taxi(self, aircraft: Aircraft, runway: str, route: str = "",
-             hold_short: str = "") -> str:
+             hold_short: str = "", hold_short_taxiway: str = "") -> str:
+        """The readback of a taxi clearance: the taxiways, where it holds,
+        the runway -- not the whole clearance said back."""
         parts = []
         if route:
             parts.append(self.book.taxi.format(route=route,
                                                runway=self.p.rwy(runway)))
         else:
             parts.append(self.book.hold_short.format(runway=self.p.rwy(runway)))
+        if hold_short_taxiway:
+            parts.append(self.book.hold_short_taxiway.format(
+                taxiway=hold_short_taxiway))
         if hold_short:
             parts.append(self.book.hold_short.format(
                 runway=self.p.rwy(hold_short)))
@@ -541,14 +614,36 @@ class PilotSpeech:
                            self.book.squawk.format(code=self.p.d(code)))
 
     def clearance(self, aircraft: Aircraft, destination: str, squawk: str,
-                  initial_altitude: float = 0.0) -> str:
-        """The readback of a departure clearance: limit, altitude, squawk."""
+                  initial_altitude: float = 0.0, sid: str = "") -> str:
+        """The readback of a departure clearance: limit, SID, altitude,
+        squawk. The SID is its name alone, as the controller said it, which
+        reads the same in every language."""
         parts = [destination]
+        if sid:
+            parts.append(self.p.procedure(sid))
         if initial_altitude:
             parts.append(self.book.climb.format(
                 altitude=self.p.alt(initial_altitude)))
         parts.append(self.book.squawk.format(code=self.p.d(squawk)))
         return self.report(aircraft, _join(*parts))
+
+    def cleared_to(self, aircraft: Aircraft, airport: str,
+                   altitude_ft: float) -> str:
+        return self.report(aircraft, self.book.cleared_to.format(
+            airport=airport, altitude=self.p.alt(altitude_ft)))
+
+    def hold(self, aircraft: Aircraft, fix: str, altitude_ft: float) -> str:
+        """A hold read back: where, and at what level."""
+        from .phraseology import fix_name
+
+        return self.report(aircraft, self.book.hold.format(
+            fix=fix_name(fix), altitude=self.p.alt(altitude_ft)))
+
+    def descend_via(self, aircraft: Aircraft, arrival: str) -> str:
+        """The readback of "descend via": the STAR by name, as the
+        controller said it. Only the FAA says it, so only in English."""
+        return self.report(aircraft,
+                           f"descend via the {self.p.procedure(arrival)} arrival")
 
     def level(self, aircraft: Aircraft, altitude_ft: float,
               climbing: bool = True) -> str:

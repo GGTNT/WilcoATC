@@ -28,12 +28,18 @@ burst gets filed by the ear as a second controller.
 The person
 ----------
 
-"Uh", "um" and "er", where people actually say them. The rule is the one the
-prosody and imperfections layers already keep: *a filler never invents a
-boundary*. It goes at the start of the line, after a full stop, or at a
-comma the script already has, and nowhere else -- a filler dropped between
-two words would eventually land inside "flaps one" and turn a callout into a
-stammer.
+"Uh", where people actually say it, shaped the way a recorded one is. It
+goes at the start of the line, after a full stop, at a comma the script
+already has, or right in front of a number -- "we'll be cruising at, uh,
+thirty seven thousand feet" is the captain everybody has heard -- and
+nowhere else: a filler dropped between any two words would eventually land
+inside "flaps one" and turn a callout into a stammer. Part way through, the
+voice stops after it, as it does on the radio (see
+:func:`wilcoatc.audio.imperfections.join`).
+
+There used to be "um" and "er" as well. Nobody in the recording this was
+matched against says them, and read by a synthesiser they come out as the
+words rather than as the sound: "um" was the line that gave the crew away.
 
 How often depends on who is talking, because they are not doing the same
 thing:
@@ -58,6 +64,7 @@ from __future__ import annotations
 import random
 from dataclasses import dataclass, replace
 
+from .imperfections import STALL, value_starts
 from .radio_fx import PROFILE_CABIN, PROFILE_INTERCOM
 
 # The audio panel and a headset. Narrowed rather than squashed: the top comes
@@ -92,16 +99,16 @@ CREW_CABIN = replace(
     speaker_peak_db=7.0,
 )
 
-#: What people actually say when they stall, per language. The first entry is
-#: the commonest and is weighted accordingly.
+#: What people actually say when they stall, per language. No closed-mouth
+#: forms -- "um", "ähm", "hum" -- because a synthesiser reads those as words.
 FILLER_WORDS: dict[str, tuple[str, ...]] = {
-    "en": ("uh", "um", "uh", "er"),
-    "fr": ("euh", "euh", "hum"),
-    "de": ("äh", "ähm", "äh"),
+    "en": ("uh",),
+    "fr": ("euh",),
+    "de": ("äh",),
     "es": ("eh", "este"),
-    "it": ("ehm", "eh"),
-    "pt": ("é", "hum"),
-    "nl": ("eh", "uhm"),
+    "it": ("eh",),
+    "pt": ("é",),
+    "nl": ("eh",),
 }
 
 
@@ -110,14 +117,18 @@ class Manner:
     """How readily one person stalls.
 
     Each chance is per opportunity: the start of the line, each sentence
-    break, each comma. ``most`` is the ceiling for one line, because three
-    fillers in one sentence is somebody who should not be on the address
-    system.
+    break, each comma, each number. ``most`` is the ceiling for one line,
+    because three fillers in one sentence is somebody who should not be on
+    the address system.
     """
 
     head: float = 0.0
     sentence: float = 0.0
     comma: float = 0.0
+    #: In front of a number: somebody working it out, or looking it up, as
+    #: they say it -- which a captain does and a purser reading a card does
+    #: not.
+    value: float = 0.0
     most: int = 1
     #: Lines shorter than this many words are callouts and are left alone.
     shortest: int = 6
@@ -125,23 +136,28 @@ class Manner:
     def scaled(self, factor: float) -> "Manner":
         return replace(self, head=min(1.0, self.head * factor),
                        sentence=min(1.0, self.sentence * factor),
-                       comma=min(1.0, self.comma * factor))
+                       comma=min(1.0, self.comma * factor),
+                       value=min(1.0, self.value * factor))
 
 
 #: Nobody hesitates.
 STEADY = Manner()
 
 #: The captain, thinking aloud to a hundred and fifty people.
-CAPTAIN_PA = Manner(head=0.30, sentence=0.20, comma=0.08, most=2, shortest=5)
+CAPTAIN_PA = Manner(head=0.30, sentence=0.20, comma=0.08, value=0.25, most=2,
+                    shortest=5)
 
 #: The purser, who has read this a thousand times.
-PURSER_PA = Manner(head=0.06, sentence=0.14, comma=0.05, most=2, shortest=8)
+PURSER_PA = Manner(head=0.06, sentence=0.14, comma=0.05, value=0.02, most=2,
+                   shortest=8)
 
 #: The first officer, in conversation rather than calling something out.
-FLIGHT_DECK = Manner(head=0.14, sentence=0.12, comma=0.12, most=1, shortest=6)
+FLIGHT_DECK = Manner(head=0.14, sentence=0.12, comma=0.12, value=0.12, most=1,
+                     shortest=6)
 
 #: Somebody on the ramp with a headset plugged into the nose.
-RAMP = Manner(head=0.22, sentence=0.10, comma=0.12, most=1, shortest=5)
+RAMP = Manner(head=0.22, sentence=0.10, comma=0.12, value=0.12, most=1,
+              shortest=5)
 
 #: How much more often anybody stalls in their second language.
 SECOND_LANGUAGE = 1.3
@@ -154,7 +170,7 @@ def filler(language: str, rng: random.Random) -> str:
 
 def falter(text: str, language: str, manner: Manner,
            rng: random.Random) -> str:
-    """The line with the odd "uh" in it, at boundaries it already had.
+    """The line with the odd "uh" in it, at a boundary or before a number.
 
     Returns the text unchanged when nothing fires, which is most of the time
     for most people.
@@ -173,11 +189,14 @@ def falter(text: str, language: str, manner: Manner,
             spots.append((n + 2, "sentence"))
         elif mark == "," and body[n + 1] == " ":
             spots.append((n + 2, "comma"))
+    spots.extend((at, "value") for at in value_starts(body, language))
+    spots.sort()
 
     chosen: list[int] = []
     head = rng.random() < manner.head
     for at, kind in spots:
-        chance = manner.sentence if kind == "sentence" else manner.comma
+        chance = {"sentence": manner.sentence, "comma": manner.comma,
+                  "value": manner.value}[kind]
         if rng.random() < chance:
             chosen.append(at)
     budget = manner.most - (1 if head else 0)
@@ -196,7 +215,12 @@ def falter(text: str, language: str, manner: Manner,
         word = filler(language, rng)
         if out[at - 2:at - 1] in ".!?":
             word = word[:1].upper() + word[1:]
-        out = f"{out[:at]}{word}, {out[at:]}"
+        if out[at - 2:at - 1] in ".!?,":
+            out = f"{out[:at]}{word},{STALL} {out[at:]}"
+        else:
+            # In front of a number the word before runs into the filler,
+            # as on the radio: see imperfections.hesitate.
+            out = f"{out[:at - 1]} {word},{STALL} {out[at:]}"
     if head:
         word = filler(language, rng)
         out = f"{word[:1].upper()}{word[1:]}, {out}"

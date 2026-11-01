@@ -1,0 +1,123 @@
+{
+  "_comment": "The class flows for a twin turboprop, worded for a King Air; an ATR flies its own SOP, which a type file can hold. The items in English, as the operators' checklists are.",
+  "source": "Beechcraft King Air 350 POH and ATR 72-600 FCOM, normal checklists; FAA Airplane Flying Handbook (FAA-H-8083-3C) chapters 12 and 14.",
+  "checklists": {
+    "before_start": {
+      "title": {"en": "before start", "fr": "avant mise en route"},
+      "items": [
+        {"challenge": "Preflight inspection", "response": "complete", "accept": ["complete", "check"]},
+        {"challenge": {"en": "Parking brake", "fr": "Frein de parc"}, "response": {"en": "set", "fr": "serré"}, "accept": ["set", "on"], "check": {"var": "parking_brake", "op": "eq", "value": true}},
+        {"challenge": "Condition levers", "response": "fuel cut-off", "accept": ["off", "check"]},
+        {"challenge": "Battery", "response": "on", "accept": ["on"], "check": {"var": "battery_master", "op": "eq", "value": true}},
+        {"challenge": "Fuel quantity", "response": "checked", "accept": ["check", "value"]},
+        {"challenge": {"en": "Beacon", "fr": "Feu anticollision"}, "response": {"en": "on", "fr": "allumé"}, "accept": ["on"], "check": {"var": "beacon_light", "op": "eq", "value": true}, "note": "Anti-collision lights on before the engines start: 14 CFR 91.209(b), the FAA Airplane Flying Handbook ch. 2."}
+      ]
+    },
+    "after_start": {
+      "title": {"en": "after start", "fr": "après mise en route"},
+      "items": [
+        {"challenge": "Generators", "response": "on", "accept": ["on", "check"]},
+        {"challenge": "Engine instruments", "response": "checked", "accept": ["check", "green"]},
+        {"challenge": {"en": "Avionics master", "fr": "Interrupteur avionique"}, "response": {"en": "on", "fr": "marche"}, "accept": ["on"], "check": {"var": "avionics_master", "op": "eq", "value": true}},
+        {"challenge": {"en": "Altimeter", "fr": "Altimètre"}, "response": {"en": "set", "fr": "calé"}, "accept": ["set", "value"], "check": {"var": "kohlsman_hpa", "op": "near", "value": "$qnh", "tolerance": 1.0}, "note": "Against the QNH the controller gave, else the field's."},
+        {"challenge": {"en": "Clearance", "fr": "Clairance"}, "response": {"en": "received and set", "fr": "reçue et affichée"}, "accept": ["check", "set", "complete"], "rules": "ifr"},
+        {"challenge": {"en": "Transponder code", "fr": "Code transpondeur"}, "response": {"en": "set", "fr": "affiché"}, "accept": ["set", "value"], "rules": "ifr", "check": {"var": "transponder_code", "op": "eq", "value": "$squawk"}},
+        {"challenge": {"en": "Transponder", "fr": "Transpondeur"}, "response": {"en": "VFR code set", "fr": "code VFR affiché"}, "accept": ["set", "value"], "rules": "vfr", "check": {"var": "transponder_code", "op": "eq", "value": "$squawk"}}
+      ]
+    },
+    "taxi": {
+      "title": {"en": "taxi", "fr": "roulage"},
+      "items": [
+        {"challenge": "Brakes", "response": "checked", "accept": ["check"]},
+        {"challenge": "Flight instruments", "response": "checked", "accept": ["check"]},
+        {"challenge": {"en": "Navigation source", "fr": "Source de navigation"}, "response": {"en": "set", "fr": "sélectionnée"}, "accept": ["set", "check"], "rules": "ifr"}
+      ]
+    },
+    "before_takeoff": {
+      "title": {"en": "before takeoff", "fr": "avant décollage"},
+      "items": [
+        {"challenge": "Flight controls", "response": "checked", "accept": ["check"]},
+        {"challenge": "Trims", "response": "set for takeoff", "accept": ["set", "check"]},
+        {"challenge": "Flaps", "response": "set", "accept": ["set", "up", "value", "check"]},
+        {"challenge": "Autofeather", "response": "armed", "accept": ["on", "set", "check"], "note": "UNVERIFIED: the King Air's; the ATR's ATPCS is armed by its own test."},
+        {"challenge": "Propeller levers", "response": "full forward", "accept": ["set", "check"]},
+        {"challenge": "Ice protection", "response": "as required", "accept": ["check", "on", "off"]},
+        {"challenge": "Pitot heat", "response": "on", "accept": ["on"], "rules": "ifr", "check": {"var": "pitot_heat", "op": "eq", "value": true}},
+        {"challenge": "Cabin", "response": "secure", "accept": ["check"]},
+        {"challenge": {"en": "Clearance", "fr": "Clairance"}, "response": {"en": "confirmed", "fr": "confirmée"}, "accept": ["check", "complete"], "rules": "ifr"},
+        {"challenge": {"en": "Navigation source", "fr": "Source de navigation"}, "response": {"en": "set", "fr": "sélectionnée"}, "accept": ["set", "check"], "rules": "ifr"},
+        {"challenge": {"en": "Transponder", "fr": "Transpondeur"}, "response": {"en": "VFR code set", "fr": "code VFR affiché"}, "accept": ["set", "value"], "rules": "vfr", "check": {"var": "transponder_code", "op": "eq", "value": "$squawk"}},
+        {"challenge": {"en": "Circuit height", "fr": "Hauteur du tour de piste"}, "response": {"en": "set", "fr": "affichée"}, "accept": ["set", "value"], "rules": "vfr", "note": "Set on the altimeter bug; nothing reads the bug."},
+        {"challenge": {"en": "Transponder", "fr": "Transpondeur"}, "response": {"en": "ALT", "fr": "ALT"}, "accept": ["on", "set"], "check": {"var": "transponder_state", "op": "in", "value": [3, 4]}, "note": "UNVERIFIED: TRANSPONDER STATE is defined by this program and not yet measured on a running 2024; without an answer nothing is checked."},
+        {"challenge": {"en": "Strobes", "fr": "Feux à éclats"}, "response": {"en": "on", "fr": "allumés"}, "accept": ["on"], "check": {"var": "strobe_light", "op": "eq", "value": true}},
+        {"challenge": {"en": "Landing light", "fr": "Phare d'atterrissage"}, "response": {"en": "on", "fr": "allumé"}, "accept": ["on"], "check": {"var": "landing_light", "op": "eq", "value": true}, "note": "FAA Airplane Flying Handbook: lights on in the terminal area ('operation lights on')."}
+      ]
+    },
+    "after_takeoff": {
+      "title": {"en": "after takeoff", "fr": "après décollage"},
+      "items": [
+        {"challenge": {"en": "Landing gear", "fr": "Train d'atterrissage"}, "response": {"en": "up", "fr": "rentré"}, "accept": ["up", "check"], "check": {"var": "gear_down", "op": "eq", "value": false}},
+        {"challenge": {"en": "Flaps", "fr": "Volets"}, "response": {"en": "up", "fr": "rentrés"}, "accept": ["up", "check"], "check": {"var": "flaps_index", "op": "eq", "value": 0}},
+        {"challenge": "Yaw damper", "response": "on", "accept": ["on", "check"]},
+        {"challenge": "Climb power", "response": "set", "accept": ["set", "check"]}
+      ]
+    },
+    "cruise": {
+      "title": {"en": "cruise", "fr": "croisière"},
+      "items": [
+        {"challenge": "Power", "response": "set", "accept": ["set", "check"]},
+        {"challenge": "Pressurisation", "response": "checked", "accept": ["check"]},
+        {"challenge": "Fuel", "response": "checked", "accept": ["check", "value"]}
+      ]
+    },
+    "descent": {
+      "title": {"en": "descent", "fr": "descente"},
+      "items": [
+        {"challenge": "Pressurisation", "response": "set", "accept": ["set", "check"]},
+        {"challenge": {"en": "Altimeter", "fr": "Altimètre"}, "response": {"en": "set", "fr": "calé"}, "accept": ["set", "value"], "check": {"var": "kohlsman_hpa", "op": "near", "value": "$qnh", "tolerance": 1.0}, "note": "Against the QNH the controller gave, else the field's."},
+        {"challenge": {"en": "Next frequency", "fr": "Fréquence suivante"}, "response": {"en": "set", "fr": "affichée"}, "accept": ["set", "value"], "rules": "vfr", "check": {"var": "com1_standby", "op": "eq", "value": "$frequency"}, "note": "Against the frequency the controller gave; with none given, nothing is checked."},
+        {"challenge": {"en": "Navigation source", "fr": "Source de navigation"}, "response": {"en": "set", "fr": "sélectionnée"}, "accept": ["set", "check"], "rules": "ifr"},
+        {"challenge": {"en": "Approach briefing", "fr": "Briefing approche"}, "response": {"en": "complete", "fr": "effectué"}, "accept": ["complete", "check"], "rules": "ifr"}
+      ]
+    },
+    "approach": {
+      "title": {"en": "approach", "fr": "approche"},
+      "items": [
+        {"challenge": {"en": "Approach briefing", "fr": "Briefing approche"}, "response": {"en": "complete", "fr": "effectué"}, "accept": ["complete", "check"], "rules": "ifr"},
+        {"challenge": {"en": "Minimums", "fr": "Minima"}, "response": {"en": "set", "fr": "affichés"}, "accept": ["set", "value"], "rules": "ifr", "note": "Not checked: DECISION HEIGHT is the model's design figure on most aeroplanes, not the bug the pilot sets."},
+        {"challenge": {"en": "Navigation source", "fr": "Source de navigation"}, "response": {"en": "set", "fr": "sélectionnée"}, "accept": ["set", "check"], "rules": "ifr"},
+        {"challenge": {"en": "Altimeter", "fr": "Altimètre"}, "response": {"en": "set", "fr": "calé"}, "accept": ["set", "value"], "check": {"var": "kohlsman_hpa", "op": "near", "value": "$qnh", "tolerance": 1.0}, "note": "Against the QNH the controller gave, else the field's."},
+        {"challenge": {"en": "Circuit height", "fr": "Hauteur du tour de piste"}, "response": {"en": "set", "fr": "affichée"}, "accept": ["set", "value"], "rules": "vfr", "note": "Set on the altimeter bug; nothing reads the bug."},
+        {"challenge": {"en": "Circuit joining", "fr": "Intégration"}, "response": {"en": "briefed", "fr": "briefée"}, "accept": ["complete", "check"], "rules": "vfr"}
+      ]
+    },
+    "before_landing": {
+      "title": {"en": "before landing", "fr": "avant atterrissage"},
+      "items": [
+        {"challenge": {"en": "Landing gear", "fr": "Train d'atterrissage"}, "response": {"en": "down, three green", "fr": "sorti, trois vertes"}, "accept": ["down", "green", "check"], "check": {"var": "gear_down", "op": "eq", "value": true}},
+        {"challenge": "Flaps", "response": "as required", "accept": ["set", "value", "check"]},
+        {"challenge": "Propeller levers", "response": "full forward", "accept": ["set", "check"]},
+        {"challenge": {"en": "Landing light", "fr": "Phare d'atterrissage"}, "response": {"en": "on", "fr": "allumé"}, "accept": ["on"], "check": {"var": "landing_light", "op": "eq", "value": true}, "note": "FAA Airplane Flying Handbook: lights on in the terminal area ('operation lights on')."},
+        {"challenge": {"en": "Autopilot", "fr": "Pilote automatique"}, "response": {"en": "off", "fr": "déconnecté"}, "accept": ["off", "check"], "rules": "vfr", "check": {"var": "autopilot", "op": "eq", "value": false}},
+        {"challenge": {"en": "Autopilot", "fr": "Pilote automatique"}, "response": {"en": "as required", "fr": "selon besoin"}, "accept": ["check", "on", "off", "set"], "rules": "ifr"}
+      ]
+    },
+    "after_landing": {
+      "title": {"en": "after landing", "fr": "après atterrissage"},
+      "items": [
+        {"challenge": {"en": "Flaps", "fr": "Volets"}, "response": {"en": "up", "fr": "rentrés"}, "accept": ["up", "check"], "check": {"var": "flaps_index", "op": "eq", "value": 0}},
+        {"challenge": {"en": "Strobes", "fr": "Feux à éclats"}, "response": {"en": "off", "fr": "éteints"}, "accept": ["off"], "check": {"var": "strobe_light", "op": "eq", "value": false}, "note": "Off on the ground so as not to dazzle (AIM 4-3-23)."},
+        {"challenge": "Ice protection", "response": "off", "accept": ["off", "check"]}
+      ]
+    },
+    "shutdown": {
+      "title": {"en": "shutdown", "fr": "arrêt moteur"},
+      "items": [
+        {"challenge": {"en": "Parking brake", "fr": "Frein de parc"}, "response": {"en": "set", "fr": "serré"}, "accept": ["set", "on"], "check": {"var": "parking_brake", "op": "eq", "value": true}},
+        {"challenge": {"en": "Avionics master", "fr": "Interrupteur avionique"}, "response": {"en": "off", "fr": "arrêt"}, "accept": ["off"], "check": {"var": "avionics_master", "op": "eq", "value": false}},
+        {"challenge": "Condition levers", "response": "fuel cut-off", "accept": ["off", "check"]},
+        {"challenge": "Battery", "response": "off", "accept": ["off"], "check": {"var": "battery_master", "op": "eq", "value": false}}
+      ]
+    }
+  }
+}

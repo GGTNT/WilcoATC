@@ -1,0 +1,176 @@
+# Area control frequencies per FIR, typed by hand from the states' AIPs.
+#
+# WHY THIS FILE EXISTS
+#
+# The FIR outlines (Boundaries.geojson) name every FIR in the world and give
+# no frequency; OurAirports files a centre frequency at a field for only some
+# of them. Without a frequency, the controller of a FIR could not be handed
+# to, and the flight went silent at the boundary. A FIR not listed here
+# borrows a centre row filed at a field that names it, else gets a frequency
+# invented for it and logged as invented (wilcoatc/atc/enroute.py).
+#
+# FORMAT
+#
+#   fir         the four-letter ICAO code of the FIR or UIR
+#   callsign    as published, e.g. "Singapore Radar", "Maastricht Radar"
+#   mhz         the frequency; for kind hf, the HF frequency in kHz (8879)
+#   floor_fl    lowest flight level the row is worked from, empty for all
+#   ceiling_fl  highest flight level (exclusive), empty for no limit; an upper
+#               centre above a FIR is a row of that FIR with a floor
+#   kind        radar, oceanic, fis or hf
+#   sector      the AIP's sector name, if it gives one
+#   source      the AIP section and where it was read
+#   airac       the AIRAC effective date of what was read
+#
+# The first row of a FIR at a level is the one a handoff gives; the others
+# with the same callsign answer too.
+#
+fir,callsign,mhz,floor_fl,ceiling_fl,kind,sector,source,airac
+WSJC,Singapore Radar,134.400,,370,radar,Primary; Singapore FIR and Jakarta FIR delegated area (SFC-FL370),AIP Singapore ENR 2.1 https://aim-sg.caas.gov.sg/aim-content/uploads/aip/15-OCT-2026/AIP/2026-09-03-000000/html/eAIP/SG-ENR-2.1-en-GB.html,2026-09-03
+WSJC,Singapore Radar,134.200,,370,radar,Primary; Singapore FIR and Jakarta FIR delegated area (SFC-FL370),AIP Singapore ENR 2.1 https://aim-sg.caas.gov.sg/aim-content/uploads/aip/15-OCT-2026/AIP/2026-09-03-000000/html/eAIP/SG-ENR-2.1-en-GB.html,2026-09-03
+WSJC,Singapore Radar,134.900,,,radar,Primary; Singapore FIR,AIP Singapore ENR 2.1 https://aim-sg.caas.gov.sg/aim-content/uploads/aip/15-OCT-2026/AIP/2026-09-03-000000/html/eAIP/SG-ENR-2.1-en-GB.html,2026-09-03
+WSJC,Singapore Radar,134.700,,,radar,Primary; Singapore FIR,AIP Singapore ENR 2.1 https://aim-sg.caas.gov.sg/aim-content/uploads/aip/15-OCT-2026/AIP/2026-09-03-000000/html/eAIP/SG-ENR-2.1-en-GB.html,2026-09-03
+WSJC,Singapore Radar,135.050,,,radar,Primary; Singapore FIR,AIP Singapore ENR 2.1 https://aim-sg.caas.gov.sg/aim-content/uploads/aip/15-OCT-2026/AIP/2026-09-03-000000/html/eAIP/SG-ENR-2.1-en-GB.html,2026-09-03
+WSJC,Singapore Radar,133.250,,,radar,Primary; KL FIR Sector 1 / Jakarta FIR delegated area / airways,"AIP Singapore ENR 2.1 (Singapore FIR, Sector 1, delegated areas) https://aim-sg.caas.gov.sg/aim-content/uploads/aip/15-OCT-2026/AIP/2026-09-03-000000/html/eAIP/SG-ENR-2.1-en-GB.html",2026-09-03
+WSJC,Singapore Radar,123.700,,,radar,Primary; KL FIR Sector 2 / Singapore-Johor complex,AIP Singapore ENR 2.1 https://aim-sg.caas.gov.sg/aim-content/uploads/aip/15-OCT-2026/AIP/2026-09-03-000000/html/eAIP/SG-ENR-2.1-en-GB.html,2026-09-03
+WSJC,Singapore Radar,133.800,,,radar,Primary; KL FIR Sector 2 / Singapore-Johor complex,AIP Singapore ENR 2.1 https://aim-sg.caas.gov.sg/aim-content/uploads/aip/15-OCT-2026/AIP/2026-09-03-000000/html/eAIP/SG-ENR-2.1-en-GB.html,2026-09-03
+WSJC,Singapore Radar,6556,,,hf,SEA 1 (also SEA 3),AIP Singapore ENR 2.1 (SSB) https://aim-sg.caas.gov.sg/aim-content/uploads/aip/15-OCT-2026/AIP/2026-09-03-000000/html/eAIP/SG-ENR-2.1-en-GB.html,2026-09-03
+WSJC,Singapore Radar,11297,,,hf,SEA 1,AIP Singapore ENR 2.1 (SSB) https://aim-sg.caas.gov.sg/aim-content/uploads/aip/15-OCT-2026/AIP/2026-09-03-000000/html/eAIP/SG-ENR-2.1-en-GB.html,2026-09-03
+WSJC,Singapore Radar,5655,,,hf,SEA 2,AIP Singapore ENR 2.1 (SSB) https://aim-sg.caas.gov.sg/aim-content/uploads/aip/15-OCT-2026/AIP/2026-09-03-000000/html/eAIP/SG-ENR-2.1-en-GB.html,2026-09-03
+WSJC,Singapore Radar,8942,,,hf,SEA 2,AIP Singapore ENR 2.1 (SSB) https://aim-sg.caas.gov.sg/aim-content/uploads/aip/15-OCT-2026/AIP/2026-09-03-000000/html/eAIP/SG-ENR-2.1-en-GB.html,2026-09-03
+WSJC,Singapore Radar,11396,,,hf,SEA 2,AIP Singapore ENR 2.1 (SSB) https://aim-sg.caas.gov.sg/aim-content/uploads/aip/15-OCT-2026/AIP/2026-09-03-000000/html/eAIP/SG-ENR-2.1-en-GB.html,2026-09-03
+EBBU,Brussels Control,129.575,,245,radar,East Low,AIP Belgium ENR 2.1 para 3 Frequencies of ATS units https://ops.skeyes.be/html/belgocontrol_static/eaip/eAIP_Main/html/eAIP/EB-ENR-2.1-en-GB.html,2026-10-01
+EBBU,Brussels Control,128.450,,245,radar,East High,AIP Belgium ENR 2.1 para 3 https://ops.skeyes.be/html/belgocontrol_static/eaip/eAIP_Main/html/eAIP/EB-ENR-2.1-en-GB.html,2026-10-01
+EBBU,Brussels Control,128.805,,245,radar,North Low,AIP Belgium ENR 2.1 para 3 https://ops.skeyes.be/html/belgocontrol_static/eaip/eAIP_Main/html/eAIP/EB-ENR-2.1-en-GB.html,2026-10-01
+EBBU,Brussels Control,131.100,,245,radar,West Low,AIP Belgium ENR 2.1 para 3 https://ops.skeyes.be/html/belgocontrol_static/eaip/eAIP_Main/html/eAIP/EB-ENR-2.1-en-GB.html,2026-10-01
+EBBU,Brussels Control,127.230,,245,radar,West High,AIP Belgium ENR 2.1 para 3 https://ops.skeyes.be/html/belgocontrol_static/eaip/eAIP_Main/html/eAIP/EB-ENR-2.1-en-GB.html,2026-10-01
+EBBU,Brussels Control,128.200,,245,radar,Huldenberg,AIP Belgium ENR 2.1 para 3 https://ops.skeyes.be/html/belgocontrol_static/eaip/eAIP_Main/html/eAIP/EB-ENR-2.1-en-GB.html,2026-10-01
+EBBU,Brussels Information,126.900,,,fis,Brussels FIC,AIP Belgium ENR 2.1 para 3 https://ops.skeyes.be/html/belgocontrol_static/eaip/eAIP_Main/html/eAIP/EB-ENR-2.1-en-GB.html,2026-10-01
+EDYY,Maastricht Radar,132.205,245,,radar,Koksy Low Sector (Belgium),AIP Belgium ENR 2.1 para 3 https://ops.skeyes.be/html/belgocontrol_static/eaip/eAIP_Main/html/eAIP/EB-ENR-2.1-en-GB.html,2026-10-01
+EDYY,Maastricht Radar,132.755,355,,radar,Koksy High / Nicky High Sector (ABV FL355),AIP Belgium ENR 2.1 para 3 https://ops.skeyes.be/html/belgocontrol_static/eaip/eAIP_Main/html/eAIP/EB-ENR-2.1-en-GB.html,2026-10-01
+EDYY,Maastricht Radar,133.355,245,,radar,Lux Low Sector,AIP Belgium ENR 2.1 para 3 https://ops.skeyes.be/html/belgocontrol_static/eaip/eAIP_Main/html/eAIP/EB-ENR-2.1-en-GB.html,2026-10-01
+EDYY,Maastricht Radar,132.855,245,,radar,Olno Low Sector,AIP Belgium ENR 2.1 para 3 https://ops.skeyes.be/html/belgocontrol_static/eaip/eAIP_Main/html/eAIP/EB-ENR-2.1-en-GB.html,2026-10-01
+EDYY,Maastricht Radar,135.960,245,,radar,Delta Low Sector (Netherlands),AIP Belgium ENR 2.1 para 3 https://ops.skeyes.be/html/belgocontrol_static/eaip/eAIP_Main/html/eAIP/EB-ENR-2.1-en-GB.html,2026-10-01
+EDYY,Maastricht Radar,135.510,335,365,radar,Delta Middle Sector,AIP Belgium ENR 2.1 para 3 https://ops.skeyes.be/html/belgocontrol_static/eaip/eAIP_Main/html/eAIP/EB-ENR-2.1-en-GB.html,2026-10-01
+EDYY,Maastricht Radar,132.085,365,,radar,Delta High Sector (ABV FL365),AIP Belgium ENR 2.1 para 3 https://ops.skeyes.be/html/belgocontrol_static/eaip/eAIP_Main/html/eAIP/EB-ENR-2.1-en-GB.html,2026-10-01
+EDYY,Maastricht Radar,128.790,245,,radar,Ruhr Low Sector,AIP Belgium ENR 2.1 para 3 https://ops.skeyes.be/html/belgocontrol_static/eaip/eAIP_Main/html/eAIP/EB-ENR-2.1-en-GB.html,2026-10-01
+EHAA,Amsterdam Radar,123.705,,245,radar,Amsterdam ACC (below FL245),AIP Netherlands ENR 2.1 Amsterdam FIR/CTA https://eaip.lvnl.nl/AIRAC%20AMDT%2010-2026_2026_10_01/eAIP/EH-ENR%202.1-en-GB.html,2026-10-01
+EHAA,Amsterdam Radar,123.850,,245,radar,Amsterdam ACC (below FL245),AIP Netherlands ENR 2.1 https://eaip.lvnl.nl/AIRAC%20AMDT%2010-2026_2026_10_01/eAIP/EH-ENR%202.1-en-GB.html,2026-10-01
+EHAA,Amsterdam Radar,124.880,,245,radar,Amsterdam ACC (below FL245),AIP Netherlands ENR 2.1 https://eaip.lvnl.nl/AIRAC%20AMDT%2010-2026_2026_10_01/eAIP/EH-ENR%202.1-en-GB.html,2026-10-01
+EHAA,Amsterdam Radar,134.375,,245,radar,Amsterdam ACC (below FL245),AIP Netherlands ENR 2.1 https://eaip.lvnl.nl/AIRAC%20AMDT%2010-2026_2026_10_01/eAIP/EH-ENR%202.1-en-GB.html,2026-10-01
+EHAA,Amsterdam Information,124.300,,,fis,Amsterdam FIC (below controlled airspace),AIP Netherlands ENR 2.1 https://eaip.lvnl.nl/AIRAC%20AMDT%2010-2026_2026_10_01/eAIP/EH-ENR%202.1-en-GB.html,2026-10-01
+EHAA,Amsterdam Information,119.175,,,fis,Amsterdam FIC (below controlled airspace),AIP Netherlands ENR 2.1 https://eaip.lvnl.nl/AIRAC%20AMDT%2010-2026_2026_10_01/eAIP/EH-ENR%202.1-en-GB.html,2026-10-01
+EGTT,London Control,127.430,,,radar,,UK AIP ENR 2.1 London FIR (London ACC; no sector names published) https://www.aurora.nats.co.uk/htmlAIP/Publications/2026-10-01-AIRAC/html/eAIP/EG-ENR-2.1-en-GB.html,2026-10-01
+EGTT,London Control,128.130,,,radar,,UK AIP ENR 2.1 London FIR https://www.aurora.nats.co.uk/htmlAIP/Publications/2026-10-01-AIRAC/html/eAIP/EG-ENR-2.1-en-GB.html,2026-10-01
+EGTT,London Control,132.840,,,radar,,UK AIP ENR 2.1 London FIR https://www.aurora.nats.co.uk/htmlAIP/Publications/2026-10-01-AIRAC/html/eAIP/EG-ENR-2.1-en-GB.html,2026-10-01
+EGTT,London Control,133.600,,,radar,,UK AIP ENR 2.1 London FIR https://www.aurora.nats.co.uk/htmlAIP/Publications/2026-10-01-AIRAC/html/eAIP/EG-ENR-2.1-en-GB.html,2026-10-01
+EGTT,London Control,134.250,,,radar,,UK AIP ENR 2.1 London FIR https://www.aurora.nats.co.uk/htmlAIP/Publications/2026-10-01-AIRAC/html/eAIP/EG-ENR-2.1-en-GB.html,2026-10-01
+EGTT,London Control,118.480,,,radar,,UK AIP ENR 2.1 London FIR https://www.aurora.nats.co.uk/htmlAIP/Publications/2026-10-01-AIRAC/html/eAIP/EG-ENR-2.1-en-GB.html,2026-10-01
+EGTT,London Information,124.600,,195,fis,London FIS (Class G SFC-FL195),UK AIP ENR 2.1 London FIR https://www.aurora.nats.co.uk/htmlAIP/Publications/2026-10-01-AIRAC/html/eAIP/EG-ENR-2.1-en-GB.html,2026-10-01
+EGTT,London Information,124.750,,195,fis,London FIS (Class G SFC-FL195),UK AIP ENR 2.1 London FIR https://www.aurora.nats.co.uk/htmlAIP/Publications/2026-10-01-AIRAC/html/eAIP/EG-ENR-2.1-en-GB.html,2026-10-01
+EGTT,London Information,125.475,,195,fis,London FIS (Class G SFC-FL195),UK AIP ENR 2.1 London FIR https://www.aurora.nats.co.uk/htmlAIP/Publications/2026-10-01-AIRAC/html/eAIP/EG-ENR-2.1-en-GB.html,2026-10-01
+EGPX,Scottish Control,124.825,,,radar,,UK AIP ENR 2.1 Scottish FIR (Scottish ACC) https://www.aurora.nats.co.uk/htmlAIP/Publications/2026-10-01-AIRAC/html/eAIP/EG-ENR-2.1-en-GB.html,2026-10-01
+EGPX,Scottish Control,125.950,,,radar,,UK AIP ENR 2.1 Scottish FIR https://www.aurora.nats.co.uk/htmlAIP/Publications/2026-10-01-AIRAC/html/eAIP/EG-ENR-2.1-en-GB.html,2026-10-01
+EGPX,Scottish Control,126.300,,,radar,,UK AIP ENR 2.1 Scottish FIR https://www.aurora.nats.co.uk/htmlAIP/Publications/2026-10-01-AIRAC/html/eAIP/EG-ENR-2.1-en-GB.html,2026-10-01
+EGPX,Scottish Control,133.875,,,radar,,UK AIP ENR 2.1 Scottish FIR https://www.aurora.nats.co.uk/htmlAIP/Publications/2026-10-01-AIRAC/html/eAIP/EG-ENR-2.1-en-GB.html,2026-10-01
+EGPX,Scottish Control,121.375,,,radar,,UK AIP ENR 2.1 Scottish FIR https://www.aurora.nats.co.uk/htmlAIP/Publications/2026-10-01-AIRAC/html/eAIP/EG-ENR-2.1-en-GB.html,2026-10-01
+EGPX,Scottish Information,119.875,,195,fis,Scottish FIS (0800-2000 when directed by ATC),UK AIP ENR 2.1 Scottish FIR https://www.aurora.nats.co.uk/htmlAIP/Publications/2026-10-01-AIRAC/html/eAIP/EG-ENR-2.1-en-GB.html,2026-10-01
+EGPX,Scottish Information,127.275,,195,fis,Scottish FIS,UK AIP ENR 2.1 Scottish FIR https://www.aurora.nats.co.uk/htmlAIP/Publications/2026-10-01-AIRAC/html/eAIP/EG-ENR-2.1-en-GB.html,2026-10-01
+EGGX,Shanwick Oceanic,123.950,,,oceanic,Shanwick OAC VHF,UK AIP ENR 2.1 Shanwick Oceanic FIR https://www.aurora.nats.co.uk/htmlAIP/Publications/2026-10-01-AIRAC/html/eAIP/EG-ENR-2.1-en-GB.html,2026-10-01
+EGGX,Shanwick Radio,5616,,,hf,NAT Family B (47N-64N),UK AIP ENR 2.2 para 3.9.12 https://www.aurora.nats.co.uk/htmlAIP/Publications/2026-10-01-AIRAC/html/eAIP/EG-ENR-2.2-en-GB.html,2026-10-01
+EGGX,Shanwick Radio,8864,,,hf,NAT Family B (47N-64N),UK AIP ENR 2.2 para 3.9.12 https://www.aurora.nats.co.uk/htmlAIP/Publications/2026-10-01-AIRAC/html/eAIP/EG-ENR-2.2-en-GB.html,2026-10-01
+EGGX,Shanwick Radio,13291,,,hf,NAT Family B (47N-64N),UK AIP ENR 2.2 para 3.9.12 https://www.aurora.nats.co.uk/htmlAIP/Publications/2026-10-01-AIRAC/html/eAIP/EG-ENR-2.2-en-GB.html,2026-10-01
+EGGX,Shanwick Radio,8906,,,hf,NAT Family A (43N-47N),UK AIP ENR 2.2 para 3.9.12 https://www.aurora.nats.co.uk/htmlAIP/Publications/2026-10-01-AIRAC/html/eAIP/EG-ENR-2.2-en-GB.html,2026-10-01
+EGGX,Shanwick Radio,5649,,,hf,NAT Family C (47N-64N),UK AIP ENR 2.2 para 3.9.12 https://www.aurora.nats.co.uk/htmlAIP/Publications/2026-10-01-AIRAC/html/eAIP/EG-ENR-2.2-en-GB.html,2026-10-01
+EGGX,Shanwick Radio,8879,,,hf,NAT Family C (47N-64N),UK AIP ENR 2.2 para 3.9.12 https://www.aurora.nats.co.uk/htmlAIP/Publications/2026-10-01-AIRAC/html/eAIP/EG-ENR-2.2-en-GB.html,2026-10-01
+LKAA,Praha Radar,120.275,95,660,radar,CTA 1 Praha,"AIP Czech Republic ENR 2.1 (CTA 1 Praha FL95-FL660, Praha ACC; no per-frequency sector names) https://aim.rlp.cz/eaip/html/eAIP/LK-ENR-2.1-en-GB.html",2026-10-01
+LKAA,Praha Radar,127.125,95,660,radar,CTA 1 Praha,"AIP Czech Republic ENR 2.1 (CTA 1 Praha FL95-FL660, Praha ACC; no per-frequency sector names) https://aim.rlp.cz/eaip/html/eAIP/LK-ENR-2.1-en-GB.html",2026-10-01
+LKAA,Praha Radar,127.825,95,660,radar,CTA 1 Praha,"AIP Czech Republic ENR 2.1 (CTA 1 Praha FL95-FL660, Praha ACC; no per-frequency sector names) https://aim.rlp.cz/eaip/html/eAIP/LK-ENR-2.1-en-GB.html",2026-10-01
+LKAA,Praha Radar,132.065,95,660,radar,CTA 1 Praha,"AIP Czech Republic ENR 2.1 (CTA 1 Praha FL95-FL660, Praha ACC; no per-frequency sector names) https://aim.rlp.cz/eaip/html/eAIP/LK-ENR-2.1-en-GB.html",2026-10-01
+LKAA,Praha Radar,133.390,95,660,radar,CTA 1 Praha,"AIP Czech Republic ENR 2.1 (CTA 1 Praha FL95-FL660, Praha ACC; no per-frequency sector names) https://aim.rlp.cz/eaip/html/eAIP/LK-ENR-2.1-en-GB.html",2026-10-01
+LKAA,Praha Radar,134.590,95,660,radar,CTA 1 Praha,"AIP Czech Republic ENR 2.1 (CTA 1 Praha FL95-FL660, Praha ACC; no per-frequency sector names) https://aim.rlp.cz/eaip/html/eAIP/LK-ENR-2.1-en-GB.html",2026-10-01
+LKAA,Praha Information,126.100,,,fis,Praha FIC,"AIP Czech Republic ENR 2.1 (CTA 1 Praha FL95-FL660, Praha ACC; no per-frequency sector names) https://aim.rlp.cz/eaip/html/eAIP/LK-ENR-2.1-en-GB.html",2026-10-01
+LKAA,Praha Information,136.175,,,fis,Praha FIC,"AIP Czech Republic ENR 2.1 (CTA 1 Praha FL95-FL660, Praha ACC; no per-frequency sector names) https://aim.rlp.cz/eaip/html/eAIP/LK-ENR-2.1-en-GB.html",2026-10-01
+LKAA,Praha Information,136.275,,,fis,Praha FIC,"AIP Czech Republic ENR 2.1 (CTA 1 Praha FL95-FL660, Praha ACC; no per-frequency sector names) https://aim.rlp.cz/eaip/html/eAIP/LK-ENR-2.1-en-GB.html",2026-10-01
+ESAA,Sweden Control,124.155,,,radar,Sweden FIR,AIP Sweden ENR 2.1 para 1 List of FIR (Malmo ACC / Stockholm ACC; ACC not attributed per frequency in the table) https://www.aro.lfv.se/content/eaip/AIP%20AMDT%201-2026_2026_08_07/documents/PDF/ES-ENR%202.1.pdf,2026-05-14
+ESAA,Sweden Control,127.755,,,radar,Sweden FIR,AIP Sweden ENR 2.1 para 1 List of FIR (Malmo ACC / Stockholm ACC; ACC not attributed per frequency in the table) https://www.aro.lfv.se/content/eaip/AIP%20AMDT%201-2026_2026_08_07/documents/PDF/ES-ENR%202.1.pdf,2026-05-14
+ESAA,Sweden Control,128.180,,,radar,Sweden FIR,AIP Sweden ENR 2.1 para 1 List of FIR (Malmo ACC / Stockholm ACC; ACC not attributed per frequency in the table) https://www.aro.lfv.se/content/eaip/AIP%20AMDT%201-2026_2026_08_07/documents/PDF/ES-ENR%202.1.pdf,2026-05-14
+ESAA,Sweden Control,133.260,,,radar,Sweden FIR,AIP Sweden ENR 2.1 para 1 List of FIR (Malmo ACC / Stockholm ACC; ACC not attributed per frequency in the table) https://www.aro.lfv.se/content/eaip/AIP%20AMDT%201-2026_2026_08_07/documents/PDF/ES-ENR%202.1.pdf,2026-05-14
+ESAA,Sweden Control,134.455,,,radar,Sweden FIR,AIP Sweden ENR 2.1 para 1 List of FIR (Malmo ACC / Stockholm ACC; ACC not attributed per frequency in the table) https://www.aro.lfv.se/content/eaip/AIP%20AMDT%201-2026_2026_08_07/documents/PDF/ES-ENR%202.1.pdf,2026-05-14
+ESAA,Sweden Control,135.805,,,radar,Sweden FIR,AIP Sweden ENR 2.1 para 1 List of FIR (Malmo ACC / Stockholm ACC; ACC not attributed per frequency in the table) https://www.aro.lfv.se/content/eaip/AIP%20AMDT%201-2026_2026_08_07/documents/PDF/ES-ENR%202.1.pdf,2026-05-14
+LOVV,Wien Radar,125.785,,,radar,ACC Wien,AIP Austria ENR 2.1 para 2 ATS frequencies (ACC Wien; page AIRAC AMDT 296) https://eaip.austrocontrol.at/lo/261002/PART_2/LO_ENR_2_1_en.pdf,2026-10-02
+LOVV,Wien Radar,128.700,,,radar,ACC Wien,AIP Austria ENR 2.1 para 2 ATS frequencies (ACC Wien; page AIRAC AMDT 296) https://eaip.austrocontrol.at/lo/261002/PART_2/LO_ENR_2_1_en.pdf,2026-10-02
+LOVV,Wien Radar,129.200,,,radar,ACC Wien,AIP Austria ENR 2.1 para 2 ATS frequencies (ACC Wien; page AIRAC AMDT 296) https://eaip.austrocontrol.at/lo/261002/PART_2/LO_ENR_2_1_en.pdf,2026-10-02
+LOVV,Wien Radar,132.600,,,radar,ACC Wien,AIP Austria ENR 2.1 para 2 ATS frequencies (ACC Wien; page AIRAC AMDT 296) https://eaip.austrocontrol.at/lo/261002/PART_2/LO_ENR_2_1_en.pdf,2026-10-02
+LOVV,Wien Radar,133.800,,,radar,ACC Wien,AIP Austria ENR 2.1 para 2 ATS frequencies (ACC Wien; page AIRAC AMDT 296) https://eaip.austrocontrol.at/lo/261002/PART_2/LO_ENR_2_1_en.pdf,2026-10-02
+LOVV,Wien Radar,134.350,,,radar,ACC Wien,AIP Austria ENR 2.1 para 2 ATS frequencies (ACC Wien; page AIRAC AMDT 296) https://eaip.austrocontrol.at/lo/261002/PART_2/LO_ENR_2_1_en.pdf,2026-10-02
+LOVV,Wien Information,134.625,,,fis,FIC Wien,AIP Austria ENR 2.1 para 2 ATS frequencies (ACC Wien; page AIRAC AMDT 296) https://eaip.austrocontrol.at/lo/261002/PART_2/LO_ENR_2_1_en.pdf,2026-10-02
+LOVV,Wien Information,124.400,,,fis,FIC Wien,AIP Austria ENR 2.1 para 2 ATS frequencies (ACC Wien; page AIRAC AMDT 296) https://eaip.austrocontrol.at/lo/261002/PART_2/LO_ENR_2_1_en.pdf,2026-10-02
+EPWW,Warszawa Radar,130.675,365,660,radar,EPWW B (HIGH) / D (HIGH),AIP Poland ENR 2.1.2 Sectors of Warszawa ACC https://docs.pansa.pl/ais/eaipifr/AIRAC%20AMDT%2010-26_2026_10_01/eAIP/ENR%202.1.2-en-GB.html,2026-10-01
+EPWW,Warszawa Radar,127.025,95,365,radar,EPWW B (MID+LOW),AIP Poland ENR 2.1.2 Sectors of Warszawa ACC https://docs.pansa.pl/ais/eaipifr/AIRAC%20AMDT%2010-26_2026_10_01/eAIP/ENR%202.1.2-en-GB.html,2026-10-01
+EPWW,Warszawa Radar,134.875,95,365,radar,EPWW C (MID+LOW),AIP Poland ENR 2.1.2 Sectors of Warszawa ACC https://docs.pansa.pl/ais/eaipifr/AIRAC%20AMDT%2010-26_2026_10_01/eAIP/ENR%202.1.2-en-GB.html,2026-10-01
+EPWW,Warszawa Radar,123.625,365,660,radar,EPWW E / J / R (HIGH),AIP Poland ENR 2.1.2 Sectors of Warszawa ACC https://docs.pansa.pl/ais/eaipifr/AIRAC%20AMDT%2010-26_2026_10_01/eAIP/ENR%202.1.2-en-GB.html,2026-10-01
+EPWW,Warszawa Radar,124.275,365,660,radar,EPWW F / G / N (HIGH),AIP Poland ENR 2.1.2 Sectors of Warszawa ACC https://docs.pansa.pl/ais/eaipifr/AIRAC%20AMDT%2010-26_2026_10_01/eAIP/ENR%202.1.2-en-GB.html,2026-10-01
+EPWW,Warszawa Radar,129.075,95,365,radar,EPWW F / G (MID+LOW),AIP Poland ENR 2.1.2 Sectors of Warszawa ACC https://docs.pansa.pl/ais/eaipifr/AIRAC%20AMDT%2010-26_2026_10_01/eAIP/ENR%202.1.2-en-GB.html,2026-10-01
+VTBB,Bangkok Control,124.500,,460,radar,Sector 1N,AIP Thailand ENR 2.1 Bangkok ACC sector organization https://aip.caat.or.th/2026-10-01-AIRAC/html/eAIP/VT-ENR-2.1-en-GB.html,2026-10-01
+VTBB,Bangkok Control,128.100,,460,radar,Sector 3N,AIP Thailand ENR 2.1 Bangkok ACC sector organization https://aip.caat.or.th/2026-10-01-AIRAC/html/eAIP/VT-ENR-2.1-en-GB.html,2026-10-01
+VTBB,Bangkok Control,132.100,,460,radar,Sector 5N,AIP Thailand ENR 2.1 Bangkok ACC sector organization https://aip.caat.or.th/2026-10-01-AIRAC/html/eAIP/VT-ENR-2.1-en-GB.html,2026-10-01
+VTBB,Bangkok Control,133.100,,460,radar,Sector 6N,AIP Thailand ENR 2.1 Bangkok ACC sector organization https://aip.caat.or.th/2026-10-01-AIRAC/html/eAIP/VT-ENR-2.1-en-GB.html,2026-10-01
+VTBB,Bangkok Control,120.500,,460,radar,Sector 1S,AIP Thailand ENR 2.1 Bangkok ACC sector organization https://aip.caat.or.th/2026-10-01-AIRAC/html/eAIP/VT-ENR-2.1-en-GB.html,2026-10-01
+VTBB,Bangkok Control,118.350,270,460,radar,Sector 2S (FL270-FL460),AIP Thailand ENR 2.1 Bangkok ACC sector organization https://aip.caat.or.th/2026-10-01-AIRAC/html/eAIP/VT-ENR-2.1-en-GB.html,2026-10-01
+WMFC,Lumpur Radar,132.800,,,radar,Kuala Lumpur ACC (PRI),"AIP Malaysia ENR 2.1 Kuala Lumpur FIR (Kuala Lumpur ACC; PRI frequencies, not attributed to named sectors) https://aip.caam.gov.my/aip/eAIP/2026-08-11/html/eAIP/WM-ENR-2.1-en-MS.html",2026-08-11
+WMFC,Lumpur Radar,132.750,,,radar,Kuala Lumpur ACC (PRI),"AIP Malaysia ENR 2.1 Kuala Lumpur FIR (Kuala Lumpur ACC; PRI frequencies, not attributed to named sectors) https://aip.caam.gov.my/aip/eAIP/2026-08-11/html/eAIP/WM-ENR-2.1-en-MS.html",2026-08-11
+WMFC,Lumpur Radar,132.600,,,radar,Kuala Lumpur ACC (PRI),"AIP Malaysia ENR 2.1 Kuala Lumpur FIR (Kuala Lumpur ACC; PRI frequencies, not attributed to named sectors) https://aip.caam.gov.my/aip/eAIP/2026-08-11/html/eAIP/WM-ENR-2.1-en-MS.html",2026-08-11
+WMFC,Lumpur Radar,133.400,,,radar,Kuala Lumpur ACC (PRI),"AIP Malaysia ENR 2.1 Kuala Lumpur FIR (Kuala Lumpur ACC; PRI frequencies, not attributed to named sectors) https://aip.caam.gov.my/aip/eAIP/2026-08-11/html/eAIP/WM-ENR-2.1-en-MS.html",2026-08-11
+WMFC,Lumpur Radar,125.325,,,radar,Kuala Lumpur ACC (PRI),"AIP Malaysia ENR 2.1 Kuala Lumpur FIR (Kuala Lumpur ACC; PRI frequencies, not attributed to named sectors) https://aip.caam.gov.my/aip/eAIP/2026-08-11/html/eAIP/WM-ENR-2.1-en-MS.html",2026-08-11
+WMFC,Lumpur Radar,133.700,,,radar,Kuala Lumpur ACC (PRI),"AIP Malaysia ENR 2.1 Kuala Lumpur FIR (Kuala Lumpur ACC; PRI frequencies, not attributed to named sectors) https://aip.caam.gov.my/aip/eAIP/2026-08-11/html/eAIP/WM-ENR-2.1-en-MS.html",2026-08-11
+WMFC,Lumpur Information,134.650,,,fis,Lumpur Information North,"AIP Malaysia ENR 2.1 Kuala Lumpur FIR (Kuala Lumpur ACC; PRI frequencies, not attributed to named sectors) https://aip.caam.gov.my/aip/eAIP/2026-08-11/html/eAIP/WM-ENR-2.1-en-MS.html",2026-08-11
+WMFC,Lumpur Information,126.100,,,fis,Lumpur Information South,"AIP Malaysia ENR 2.1 Kuala Lumpur FIR (Kuala Lumpur ACC; PRI frequencies, not attributed to named sectors) https://aip.caam.gov.my/aip/eAIP/2026-08-11/html/eAIP/WM-ENR-2.1-en-MS.html",2026-08-11
+WMFC,Lumpur Radio,6556,,,hf,AMS SEA 1-1B,"AIP Malaysia ENR 2.1 Kuala Lumpur FIR (Kuala Lumpur ACC; PRI frequencies, not attributed to named sectors) https://aip.caam.gov.my/aip/eAIP/2026-08-11/html/eAIP/WM-ENR-2.1-en-MS.html",2026-08-11
+WMFC,Lumpur Radio,11285,,,hf,AMS SEA 1-1B,"AIP Malaysia ENR 2.1 Kuala Lumpur FIR (Kuala Lumpur ACC; PRI frequencies, not attributed to named sectors) https://aip.caam.gov.my/aip/eAIP/2026-08-11/html/eAIP/WM-ENR-2.1-en-MS.html",2026-08-11
+WMFC,Lumpur Radio,8942,,,hf,AMS SEA 2,"AIP Malaysia ENR 2.1 Kuala Lumpur FIR (Kuala Lumpur ACC; PRI frequencies, not attributed to named sectors) https://aip.caam.gov.my/aip/eAIP/2026-08-11/html/eAIP/WM-ENR-2.1-en-MS.html",2026-08-11
+RKRR,Incheon Control,126.175,,255,radar,Incheon ACC Gunsan Low Sector,AIP Korea ENR 2.1 Incheon FIR (primary frequency per sector) https://aim.koca.go.kr/eaipPub/Package/2026-10-15/html/eAIP/KR-ENR-2.1-en-GB.html,2026-05-13
+RKRR,Incheon Control,132.150,,,radar,Incheon ACC Gunsan High Sector,AIP Korea ENR 2.1 Incheon FIR (primary frequency per sector) https://aim.koca.go.kr/eaipPub/Package/2026-10-15/html/eAIP/KR-ENR-2.1-en-GB.html,2026-05-13
+RKRR,Incheon Control,120.725,,255,radar,Incheon ACC Gwangju Low Sector,AIP Korea ENR 2.1 Incheon FIR (primary frequency per sector) https://aim.koca.go.kr/eaipPub/Package/2026-10-15/html/eAIP/KR-ENR-2.1-en-GB.html,2026-05-13
+RKRR,Incheon Control,123.725,255,600,radar,Incheon ACC Gwangju High Sector,AIP Korea ENR 2.1 Incheon FIR (primary frequency per sector) https://aim.koca.go.kr/eaipPub/Package/2026-10-15/html/eAIP/KR-ENR-2.1-en-GB.html,2026-05-13
+RKRR,Incheon Control,124.525,,,radar,Incheon ACC Jeju North Sector,AIP Korea ENR 2.1 Incheon FIR (primary frequency per sector) https://aim.koca.go.kr/eaipPub/Package/2026-10-15/html/eAIP/KR-ENR-2.1-en-GB.html,2026-05-13
+RKRR,Daegu Control,132.800,,,radar,Daegu ACC West-sea High Sector,AIP Korea ENR 2.1 Incheon FIR (primary frequency per sector) https://aim.koca.go.kr/eaipPub/Package/2026-10-15/html/eAIP/KR-ENR-2.1-en-GB.html,2026-05-13
+RKRR,Daegu Control,128.700,,,radar,Daegu ACC West-sea Low Sector,AIP Korea ENR 2.1 Incheon FIR (primary frequency per sector) https://aim.koca.go.kr/eaipPub/Package/2026-10-15/html/eAIP/KR-ENR-2.1-en-GB.html,2026-05-13
+RKRR,Daegu Control,125.375,,,radar,Daegu ACC Daegu Sector,AIP Korea ENR 2.1 Incheon FIR (primary frequency per sector) https://aim.koca.go.kr/eaipPub/Package/2026-10-15/html/eAIP/KR-ENR-2.1-en-GB.html,2026-05-13
+RKRR,Daegu Information,126.900,,,fis,Daegu FIC,AIP Korea ENR 2.1 Incheon FIR (primary frequency per sector) https://aim.koca.go.kr/eaipPub/Package/2026-10-15/html/eAIP/KR-ENR-2.1-en-GB.html,2026-05-13
+RKRR,Seoul Radio,8903,,,hf,Seoul Radio,AIP Korea ENR 2.1 Incheon FIR (primary frequency per sector) https://aim.koca.go.kr/eaipPub/Package/2026-10-15/html/eAIP/KR-ENR-2.1-en-GB.html,2026-05-13
+RKRR,Seoul Radio,13300,,,hf,Seoul Radio,AIP Korea ENR 2.1 Incheon FIR (primary frequency per sector) https://aim.koca.go.kr/eaipPub/Package/2026-10-15/html/eAIP/KR-ENR-2.1-en-GB.html,2026-05-13
+LECM,Madrid Control,118.275,,,radar,Madrid ACC (UIR),AIP Espana ENR 2.1 item 2.1 Frequencies FIR/UIR (AIRAC AMDT 09/26; not attributed to sectors) https://aip.enaire.es/AIP/contenido_AIP/ENR/LE_ENR_2_1_en.pdf,2026-10-01
+LECM,Madrid Control,124.875,,,radar,Madrid ACC (UIR),AIP Espana ENR 2.1 item 2.1 Frequencies FIR/UIR (AIRAC AMDT 09/26; not attributed to sectors) https://aip.enaire.es/AIP/contenido_AIP/ENR/LE_ENR_2_1_en.pdf,2026-10-01
+LECM,Madrid Control,125.750,,,radar,Madrid ACC (UIR),AIP Espana ENR 2.1 item 2.1 Frequencies FIR/UIR (AIRAC AMDT 09/26; not attributed to sectors) https://aip.enaire.es/AIP/contenido_AIP/ENR/LE_ENR_2_1_en.pdf,2026-10-01
+LECM,Madrid Control,126.675,,,radar,Madrid ACC (UIR),AIP Espana ENR 2.1 item 2.1 Frequencies FIR/UIR (AIRAC AMDT 09/26; not attributed to sectors) https://aip.enaire.es/AIP/contenido_AIP/ENR/LE_ENR_2_1_en.pdf,2026-10-01
+LECM,Madrid Control,132.980,,,radar,Madrid ACC (UIR),AIP Espana ENR 2.1 item 2.1 Frequencies FIR/UIR (AIRAC AMDT 09/26; not attributed to sectors) https://aip.enaire.es/AIP/contenido_AIP/ENR/LE_ENR_2_1_en.pdf,2026-10-01
+LECM,Madrid Control,133.850,,,radar,Madrid ACC (UIR),AIP Espana ENR 2.1 item 2.1 Frequencies FIR/UIR (AIRAC AMDT 09/26; not attributed to sectors) https://aip.enaire.es/AIP/contenido_AIP/ENR/LE_ENR_2_1_en.pdf,2026-10-01
+LECB,Barcelona Control,118.035,,,radar,Barcelona ACC (FIR/UIR),AIP Espana ENR 2.1 item 2.1 Frequencies FIR/UIR (AIRAC AMDT 09/26; not attributed to sectors) https://aip.enaire.es/AIP/contenido_AIP/ENR/LE_ENR_2_1_en.pdf,2026-10-01
+LECB,Barcelona Control,120.535,,,radar,Barcelona ACC (FIR/UIR),AIP Espana ENR 2.1 item 2.1 Frequencies FIR/UIR (AIRAC AMDT 09/26; not attributed to sectors) https://aip.enaire.es/AIP/contenido_AIP/ENR/LE_ENR_2_1_en.pdf,2026-10-01
+LECB,Barcelona Control,125.730,,,radar,Barcelona ACC (FIR/UIR),AIP Espana ENR 2.1 item 2.1 Frequencies FIR/UIR (AIRAC AMDT 09/26; not attributed to sectors) https://aip.enaire.es/AIP/contenido_AIP/ENR/LE_ENR_2_1_en.pdf,2026-10-01
+LECB,Barcelona Control,126.650,,,radar,Barcelona ACC (FIR/UIR),AIP Espana ENR 2.1 item 2.1 Frequencies FIR/UIR (AIRAC AMDT 09/26; not attributed to sectors) https://aip.enaire.es/AIP/contenido_AIP/ENR/LE_ENR_2_1_en.pdf,2026-10-01
+LECB,Barcelona Control,132.355,,,radar,Barcelona ACC (FIR/UIR),AIP Espana ENR 2.1 item 2.1 Frequencies FIR/UIR (AIRAC AMDT 09/26; not attributed to sectors) https://aip.enaire.es/AIP/contenido_AIP/ENR/LE_ENR_2_1_en.pdf,2026-10-01
+LECB,Barcelona Control,134.680,,,radar,Barcelona ACC (FIR/UIR),AIP Espana ENR 2.1 item 2.1 Frequencies FIR/UIR (AIRAC AMDT 09/26; not attributed to sectors) https://aip.enaire.es/AIP/contenido_AIP/ENR/LE_ENR_2_1_en.pdf,2026-10-01
+OMAE,UAE Centre,118.925,,,radar,Emirates ACC (FIR),"UAE AIP ENR 2.1 Emirates FIR (Emirates ACC; published call sign U.A.E. CENTRE / RADAR; all listed as Primary, no sector names) https://www.gcaa.gov.ae/en/ais/AIPHtmlFiles/AIP/Current/AIRACs/2026-P08/html/eAIP/ENR-2.1-en-GB.html",2026-09-03
+OMAE,UAE Centre,119.300,,,radar,Emirates ACC (FIR),"UAE AIP ENR 2.1 Emirates FIR (Emirates ACC; published call sign U.A.E. CENTRE / RADAR; all listed as Primary, no sector names) https://www.gcaa.gov.ae/en/ais/AIPHtmlFiles/AIP/Current/AIRACs/2026-P08/html/eAIP/ENR-2.1-en-GB.html",2026-09-03
+OMAE,UAE Centre,124.375,,,radar,Emirates ACC (FIR),"UAE AIP ENR 2.1 Emirates FIR (Emirates ACC; published call sign U.A.E. CENTRE / RADAR; all listed as Primary, no sector names) https://www.gcaa.gov.ae/en/ais/AIPHtmlFiles/AIP/Current/AIRACs/2026-P08/html/eAIP/ENR-2.1-en-GB.html",2026-09-03
+OMAE,UAE Centre,125.375,,,radar,Emirates ACC (FIR),"UAE AIP ENR 2.1 Emirates FIR (Emirates ACC; published call sign U.A.E. CENTRE / RADAR; all listed as Primary, no sector names) https://www.gcaa.gov.ae/en/ais/AIPHtmlFiles/AIP/Current/AIRACs/2026-P08/html/eAIP/ENR-2.1-en-GB.html",2026-09-03
+OMAE,UAE Centre,128.250,,,radar,Emirates ACC (FIR),"UAE AIP ENR 2.1 Emirates FIR (Emirates ACC; published call sign U.A.E. CENTRE / RADAR; all listed as Primary, no sector names) https://www.gcaa.gov.ae/en/ais/AIPHtmlFiles/AIP/Current/AIRACs/2026-P08/html/eAIP/ENR-2.1-en-GB.html",2026-09-03
+OMAE,UAE Centre,132.150,,,radar,Emirates ACC (FIR),"UAE AIP ENR 2.1 Emirates FIR (Emirates ACC; published call sign U.A.E. CENTRE / RADAR; all listed as Primary, no sector names) https://www.gcaa.gov.ae/en/ais/AIPHtmlFiles/AIP/Current/AIRACs/2026-P08/html/eAIP/ENR-2.1-en-GB.html",2026-09-03
+OMAE,UAE Centre,132.550,,,radar,Emirates ACC (UIR only),"UAE AIP ENR 2.1 Emirates FIR (Emirates ACC; published call sign U.A.E. CENTRE / RADAR; all listed as Primary, no sector names) https://www.gcaa.gov.ae/en/ais/AIPHtmlFiles/AIP/Current/AIRACs/2026-P08/html/eAIP/ENR-2.1-en-GB.html",2026-09-03
+EKDK,Copenhagen Control,135.290,,,radar,Kobenhavn ACC,"AIP Denmark ENR 2.1 Kobenhavn FIR (Kobenhavn ACC; remarks column gives antenna sites per sector, frequencies not mapped to sectors) https://aim.naviair.dk/media/files/mokmsekwigw/EK_ENR_2_1_en.pdf",AIRAC AMDT 06/25
+EKDK,Copenhagen Control,119.555,,,radar,Kobenhavn ACC,"AIP Denmark ENR 2.1 Kobenhavn FIR (Kobenhavn ACC; remarks column gives antenna sites per sector, frequencies not mapped to sectors) https://aim.naviair.dk/media/files/mokmsekwigw/EK_ENR_2_1_en.pdf",AIRAC AMDT 06/25
+EKDK,Copenhagen Control,128.215,,,radar,Kobenhavn ACC,"AIP Denmark ENR 2.1 Kobenhavn FIR (Kobenhavn ACC; remarks column gives antenna sites per sector, frequencies not mapped to sectors) https://aim.naviair.dk/media/files/mokmsekwigw/EK_ENR_2_1_en.pdf",AIRAC AMDT 06/25
+EKDK,Copenhagen Control,133.155,,,radar,Kobenhavn ACC,"AIP Denmark ENR 2.1 Kobenhavn FIR (Kobenhavn ACC; remarks column gives antenna sites per sector, frequencies not mapped to sectors) https://aim.naviair.dk/media/files/mokmsekwigw/EK_ENR_2_1_en.pdf",AIRAC AMDT 06/25
+EKDK,Copenhagen Control,124.555,,,radar,Kobenhavn ACC,"AIP Denmark ENR 2.1 Kobenhavn FIR (Kobenhavn ACC; remarks column gives antenna sites per sector, frequencies not mapped to sectors) https://aim.naviair.dk/media/files/mokmsekwigw/EK_ENR_2_1_en.pdf",AIRAC AMDT 06/25
+EKDK,Copenhagen Control,136.485,,,radar,Kobenhavn ACC,"AIP Denmark ENR 2.1 Kobenhavn FIR (Kobenhavn ACC; remarks column gives antenna sites per sector, frequencies not mapped to sectors) https://aim.naviair.dk/media/files/mokmsekwigw/EK_ENR_2_1_en.pdf",AIRAC AMDT 06/25
+EKDK,Copenhagen Information,127.080,,,fis,Kobenhavn FIS,"AIP Denmark ENR 2.1 Kobenhavn FIR (Kobenhavn ACC; remarks column gives antenna sites per sector, frequencies not mapped to sectors) https://aim.naviair.dk/media/files/mokmsekwigw/EK_ENR_2_1_en.pdf",AIRAC AMDT 06/25
+EKDK,Copenhagen Information,129.475,,,fis,Kobenhavn FIS,"AIP Denmark ENR 2.1 Kobenhavn FIR (Kobenhavn ACC; remarks column gives antenna sites per sector, frequencies not mapped to sectors) https://aim.naviair.dk/media/files/mokmsekwigw/EK_ENR_2_1_en.pdf",AIRAC AMDT 06/25
+EBBU,Maastricht Radar,132.205,245,,radar,Koksy Low Sector (Belgium),"AIP Belgium ENR 2.1 para 3 https://ops.skeyes.be/html/belgocontrol_static/eaip/eAIP_Main/html/eAIP/EB-ENR-2.1-en-GB.html (Maastricht UAC, listed under EDYY; worked over EBBU)",2026-10-01
+EBBU,Maastricht Radar,132.755,355,,radar,Koksy High / Nicky High Sector (ABV FL355),"AIP Belgium ENR 2.1 para 3 https://ops.skeyes.be/html/belgocontrol_static/eaip/eAIP_Main/html/eAIP/EB-ENR-2.1-en-GB.html (Maastricht UAC, listed under EDYY; worked over EBBU)",2026-10-01
+EBBU,Maastricht Radar,133.355,245,,radar,Lux Low Sector,"AIP Belgium ENR 2.1 para 3 https://ops.skeyes.be/html/belgocontrol_static/eaip/eAIP_Main/html/eAIP/EB-ENR-2.1-en-GB.html (Maastricht UAC, listed under EDYY; worked over EBBU)",2026-10-01
+EBBU,Maastricht Radar,132.855,245,,radar,Olno Low Sector,"AIP Belgium ENR 2.1 para 3 https://ops.skeyes.be/html/belgocontrol_static/eaip/eAIP_Main/html/eAIP/EB-ENR-2.1-en-GB.html (Maastricht UAC, listed under EDYY; worked over EBBU)",2026-10-01
+EHAA,Maastricht Radar,135.960,245,,radar,Delta Low Sector (Netherlands),"AIP Belgium ENR 2.1 para 3 https://ops.skeyes.be/html/belgocontrol_static/eaip/eAIP_Main/html/eAIP/EB-ENR-2.1-en-GB.html (Maastricht UAC, listed under EDYY; worked over EHAA)",2026-10-01
+EHAA,Maastricht Radar,135.510,335,365,radar,Delta Middle Sector,"AIP Belgium ENR 2.1 para 3 https://ops.skeyes.be/html/belgocontrol_static/eaip/eAIP_Main/html/eAIP/EB-ENR-2.1-en-GB.html (Maastricht UAC, listed under EDYY; worked over EHAA)",2026-10-01
+EHAA,Maastricht Radar,132.085,365,,radar,Delta High Sector (ABV FL365),"AIP Belgium ENR 2.1 para 3 https://ops.skeyes.be/html/belgocontrol_static/eaip/eAIP_Main/html/eAIP/EB-ENR-2.1-en-GB.html (Maastricht UAC, listed under EDYY; worked over EHAA)",2026-10-01

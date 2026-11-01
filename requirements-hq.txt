@@ -1,0 +1,39 @@
+# The HQ build's extra half: torch and Chatterbox, the cloned voices.
+#
+#   .\build.ps1 -HQ        installs this into .venv-hq and builds dist\WilcoATC-HQ
+#
+# By hand, in a venv that already has requirements.txt:
+#
+#   python -m pip install -r requirements-hq.txt
+#   python -m pip install --no-deps chatterbox-tts==0.1.7 chatterbox-flash==0.1.0
+#
+# chatterbox-tts goes in with --no-deps because its declared pins contradict
+# the rest of the program: numpy<2 on Python 3.12, where Kokoro needs 2.x,
+# plus exact librosa and safetensors versions and gradio for a demo page this
+# program never opens. Measured on 2026-10-19: with numpy 2.5 and the versions
+# below it renders, and the whole test suite passes beside it. What it needs
+# at runtime is listed here instead, pinned to what was measured.
+#
+# CPU torch. The CUDA wheels are 2.5 GB more, and the card is the simulator's.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.6.0+cpu
+torchaudio==2.6.0+cpu
+
+transformers==5.2.0
+diffusers==0.29.0
+conformer==0.3.2
+s3tokenizer==0.3.0
+resemble-perth==1.0.1
+safetensors==0.8.0
+omegaconf==2.4.0
+pyloudnorm==0.2.0
+einops==0.8.2
+librosa==1.0.0
+# resemble-perth, the watermarker, still imports pkg_resources.
+setuptools<80
+
+# chatterbox-flash (voice.hq_model: flash) goes in with --no-deps as well --
+# it requires chatterbox-tts, whose pins are the problem -- and adds these
+# two for its text normaliser.
+inflect==7.5.0
+Unidecode==1.4.0

@@ -173,12 +173,6 @@ def run(
         api.stop()
         raise RuntimeError("the local interface did not start")
 
-    if engine is not None:
-        engine.warm()
-        engine.start(connect_sim=connect_sim)
-    if on_ready is not None:
-        on_ready(engine, api)
-
     window = webview.create_window(
         "WilcoATC",
         api.url,
@@ -203,8 +197,24 @@ def run(
 
     window.events.closing += lambda: shutdown()
 
+    # The window first, the models after. Loading the recogniser and the
+    # voices takes seconds -- and in the HQ build torch and Chatterbox
+    # behind them, longer -- and doing it before the window existed left a
+    # pilot looking at nothing after a double-click, then double-clicking
+    # again and starting a second copy. The panel is served already, so it
+    # opens at once and says "Loading speech recognition...", then "Ready."
+    def bring_up() -> None:
+        if engine is not None:
+            try:
+                engine.warm()
+            except Exception:
+                log.exception("warming the engine failed")
+            engine.start(connect_sim=connect_sim)
+        if on_ready is not None:
+            on_ready(engine, api)
+
     try:
-        webview.start(**_icon(webview))
+        webview.start(bring_up, **_icon(webview))
     except Exception as exc:                       # pragma: no cover - GUI path
         shutdown()
         raise RuntimeError(_explain(exc)) from exc

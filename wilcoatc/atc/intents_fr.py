@@ -327,8 +327,16 @@ def extract_speed_fr(text: str) -> int | None:
 
 
 def extract_qnh_fr(text: str) -> float | None:
-    """``QNH mille treize`` -- a whole number, never digits."""
+    """``QNH un zéro un trois`` or ``QNH mille treize``.
+
+    The controller reads it digit by digit; pilots read it back both ways,
+    and only the whole number used to be understood -- so a correct
+    readback of the controller's own words was refused.
+    """
     norm = normalize_fr(text)
+    m = re.search(r"\bqnh\s+(\d{3,4})\b", digit_runs_fr(norm))
+    if m and 900 <= int(m.group(1)) <= 1100:
+        return float(m.group(1))
     value = number_after(norm, "qnh")
     if value is not None and 900 <= value <= 1100:
         return float(value)
@@ -417,11 +425,32 @@ RULES_FR: list[tuple[str, str]] = [
     ("say_again", r"\b(repetez|je n\s?ai pas compris|pas compris|"
                   r"vous etes inaudible|repetition)\b"),
     ("radio_check", r"\b(essai radio|comment (me|nous|vous) recevez|controle radio|test radio)\b"),
+    # Les services d'information.
+    ("request_qdm", r"\b(demande (un |le )?qdm|qdm)\b"),
+    ("request_qdr", r"\b(demande (un |le )?qdr|qdr)\b"),
+    ("request_position", r"\b(demande (ma |notre |une )?position|"
+                         r"(je suis|nous sommes) (perdus?|egares?)|"
+                         r"incertains? de (ma|notre) position)\b"),
+    ("open_flight_plan", r"\b(ouv\w+|activ\w+) (mon |notre |le )?plan de vol\b"),
+    ("close_flight_plan", r"\b(clo\w+|ferm\w+|annul\w+) (mon |notre |le )?"
+                          r"plan de vol\b"),
+    ("request_weather", r"\b(demande (la )?meteo|derniere meteo|"
+                        r"demande (le )?metar)\b"),
+    # Pas "alignez-vous et attendez" collationne.
+    ("report_lined_up", r"\b(aligne(e|s|es)?(?! et attend)|"
+                        r"en bout de piste pret)\b"),
+    ("report_leaving", r"\b(quitt(ons|e|ez|ant) (la |le )?"
+                       r"(zone|ctr|atz|circuit|tour de piste|frequence))\b"),
 
     # A French VFR flight asks for the same thing an IFR one does -- "demande
     # l'autorisation" -- and says which rules it is flying under in the same
     # breath: "pour un vol VFR à destination de Saint-Nazaire". The VFR
     # mention is the only thing that tells the two apart, so it is read first.
+    # UNVERIFIED: "VFR spécial" as the pilot asks for it.
+    ("request_special_vfr", r"\b(vfr special|svfr)\b"),
+    # UNVERIFIED: the runway left, as a French pilot says it.
+    ("report_runway_vacated", r"\b(piste degagee|degage de la piste|"
+                              r"piste liberee)\b"),
     ("request_vfr_departure", r"\b(vol vfr|depart vfr|demande (un )?depart vfr|"
                               r"vfr vers|autorisation vfr)\b"),
     # The article is dropped as often as it is said on frequency, so both
@@ -448,6 +477,7 @@ RULES_FR: list[tuple[str, str]] = [
      r"reste(r|)? (dans le|en) (circuit|tour de piste)|passage bas)\b"),
     ("request_transition", r"\b(demande (la )?traversee|traversee de (la )?(ctr|cta|tma|zone)|"
                            r"demande a traverser|transit(er)? (la|votre) (ctr|zone)|"
+                           r"demande (un |le )?transit|"
                            r"survol (du|le) terrain)\b"),
     ("request_flight_following",
      r"\b(service d\s?information|information de vol|demande le suivi radar|"
@@ -463,7 +493,11 @@ RULES_FR: list[tuple[str, str]] = [
     ("cancel_ifr", r"\b(annul(e|ation) (de l\s?)?ifr)\b"),
 
     ("report_field_in_sight", r"\b((terrain|piste|aerodrome) en vue)\b"),
+    ("report_traffic_not_in_sight", r"\b(pas en vue|trafic non en vue|"
+                                    r"negatif (contact|trafic))\b"),
     ("report_traffic_in_sight", r"\b(trafic en vue|j\s?ai le trafic)\b"),
+    ("report_traffic_looking", r"\b(je cherche|on cherche|nous cherchons|"
+                               r"recherche (du |le )?trafic)\b"),
     ("report_established", r"\b(etabli(s|e)? sur (le|l\s?)\s*(loc|localizer|ils|axe)|"
                            r"nous sommes etablis)\b"),
 
@@ -473,6 +507,14 @@ RULES_FR: list[tuple[str, str]] = [
     ("request_landing", r"\b(pour (l\s?)?atterrissage|demande l\s?atterrissage|"
                         r"demande (l\s?)?autorisation d\s?atterr\w+|"
                         r"en finale|complet|en vent arriere pour)\b"),
+    ("request_diversion", r"\b(demande (un )?deroutement|demande a derouter|"
+                          r"nous nous deroutons)\b"),
+    ("request_return", r"\b(demande (le |un )?retour|demande a retourner|"
+                       r"demande a revenir)\b"),
+    ("request_hold", r"\b(demande (une |l )?attente|demande a attendre)\b"),
+    ("request_speed", r"\b(demande (la |notre )?vitesse|demande \w+ (\w+ )?noeuds)\b"),
+    ("request_deviation", r"\b(demande (une )?(deviation|evitement)|"
+                          r"demande a (devier|eviter))\b"),
     ("request_direct", r"\b(demande direct|direct sur)\b"),
     ("request_descent", r"\b(demande (la )?descente|demande (a|de) descendre|"
                         r"demande (un )?niveau(?:devol)? inferieur)\b"),
@@ -487,6 +529,8 @@ RULES_FR: list[tuple[str, str]] = [
     ("check_in", r"\b(bonjour|bonsoir|on vous ecoute|a vous|"
                  r"(?<!montez )(?<!descendez )(?<!maintenez )"
                  r"(en (montee|descente)|stable|passons|passant|maintenons))\b"),
+    # UNVERIFIED: the end of an orbit, as a French pilot says it.
+    ("position_report", r"\b(tour complet termine|orbite terminee|360 termine)\b"),
     ("position_report", r"\b((?:{number}) (milles?|nautiques?) "
                         r"(au )?(nord|sud|est|ouest)|"
                         r"verticale du terrain|en (vent arriere|base|finale|"
@@ -579,7 +623,9 @@ def values_fr(text: str) -> dict[str, Any]:
         values["pattern_direction"] = "right"
     for french, english in (("vent arriere", "downwind"), ("base", "base"),
                             ("finale", "final"), ("montee initiale", "upwind"),
-                            ("etape de base", "base")):
+                            ("etape de base", "base"),
+                            ("verticale", "overhead"),
+                            ("cote non engage", "deadside")):
         if re.search(rf"\b{french}\b", norm):
             values["pattern_leg"] = english
             break

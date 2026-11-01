@@ -69,6 +69,9 @@ SESSION_ID = uuid.uuid4().hex[:12]
 #: How many records the panel can look back over without touching the disk.
 RING_SIZE = 500
 
+#: The loggers ``logging.apron`` switches: the doors and the traffic models.
+APRON_LOGGERS = ("wilcoatc.doors", "wilcoatc.lod", "wilcoatc.systems")
+
 log = logging.getLogger(__name__)
 
 
@@ -408,7 +411,7 @@ def configure(config=None, *, force: bool = False) -> Path:
 
     settings = getattr(config, "logging", None)
     level = _level(getattr(settings, "level", None)
-                   or getattr(config, "log_level", "INFO"))
+                   or "INFO")
     console_level = _level(getattr(settings, "console_level", "WARNING"))
     folder = log_dir()
     if getattr(settings, "directory", ""):
@@ -466,6 +469,13 @@ def configure(config=None, *, force: bool = False) -> Path:
 
     CREW.path = folder / "crew.jsonl"
     CREW.enabled = bool(getattr(settings, "crew", True))
+
+    # The apron's own loggers: every door and every model swap at INFO is
+    # the record somebody debugging a turnaround wants and nobody else
+    # does, so one switch takes them down to warnings.
+    apron = logging.WARNING if not getattr(settings, "apron", True) else logging.NOTSET
+    for name in APRON_LOGGERS:
+        logging.getLogger(name).setLevel(apron)
 
     _install_hooks()
     _prune(folder, int(getattr(settings, "keep_days", 14) or 0))
@@ -551,8 +561,8 @@ def diagnostics() -> dict[str, Any]:
 
         found, why = JoystickPushToTalk.scan()
         controllers = {
-            "connected": [{"index": i, "name": n, "buttons": b}
-                          for i, n, b in found],
+            "connected": [{"id": c.id, "index": c.index, "name": c.name,
+                           "buttons": c.buttons} for c in found],
             "reason": why,
             "remembered": JoystickPushToTalk.remembered(),
         }

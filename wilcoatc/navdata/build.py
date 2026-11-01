@@ -22,6 +22,7 @@ import csv
 import json
 import math
 import re
+import os
 import sqlite3
 import sys
 import unicodedata
@@ -323,7 +324,7 @@ CREATE INDEX idx_navaids_pos   ON navaids(lat, lon);
 
 DROP TABLE IF EXISTS boundaries;
 CREATE TABLE boundaries (
-    id       TEXT PRIMARY KEY,
+    id       TEXT NOT NULL,
     oceanic  INTEGER,
     min_lat  REAL, max_lat REAL, min_lon REAL, max_lon REAL,
     polygon  TEXT NOT NULL
@@ -386,10 +387,38 @@ def _rows(path: Path):
         yield from csv.DictReader(fh)
 
 
+def pending_path(db_path: Path = DB_PATH) -> Path:
+    """Where a database built while the old one was in use waits."""
+    return Path(db_path).with_name(Path(db_path).name + ".new")
+
+
+def put_in_place(db_path: Path = DB_PATH) -> bool:
+    """Move a waiting database over the one in use, if it can be.
+
+    Windows will not delete or replace a file another connection has open,
+    and the running engine keeps this one open for the whole session: a
+    rebuild from the panel (VatGlasses ticked, or "check again") used to die
+    on deleting the old file before writing a byte. So the new one is built
+    beside it and swapped in here, at once when nothing holds the old one,
+    otherwise when the next launch opens the database. Returns whether
+    nothing is left waiting.
+    """
+    new = pending_path(db_path)
+    if not new.exists():
+        return True
+    try:
+        os.replace(new, db_path)
+    except PermissionError:
+        return False
+    return True
+
+
 def build(data_dir: Path = DATA_DIR, db_path: Path = DB_PATH) -> Path:
-    if db_path.exists():
-        db_path.unlink()
-    conn = sqlite3.connect(db_path)
+    db_path = Path(db_path)
+    target = pending_path(db_path)
+    if target.exists():
+        target.unlink()
+    conn = sqlite3.connect(target)
     conn.executescript(SCHEMA)
 
     # ---------------- airports ----------------
@@ -512,8 +541,11 @@ def build(data_dir: Path = DATA_DIR, db_path: Path = DB_PATH) -> Path:
     conn.commit()
     conn.execute("VACUUM")
     conn.close()
-    size = db_path.stat().st_size / 1e6
-    print(f"  -> {db_path}  ({size:.1f} MB)")
+    size = target.stat().st_size / 1e6
+    if put_in_place(db_path):
+        print(f"  -> {db_path}  ({size:.1f} MB)")
+    else:
+        print(f"  -> {target}  ({size:.1f} MB), in use: swapped in at the next start")
     return db_path
 
 
@@ -634,7 +666,12 @@ def _load_boundaries(conn: sqlite3.Connection, data_dir: Path) -> None:
     with geo.open(encoding="utf-8") as fh:
         collection = json.load(fh)
 
-    batch = []
+    # One id can be several features: New York's domestic ARTCC and its
+    # oceanic FIR are both KZNY, Beijing's FIR is two polygons under ZBAA.
+    # Keyed on the id alone, the second replaced the first and a flight
+    # climbing out of Kennedy was in no FIR. Pieces of one kind are one row;
+    # a domestic and an oceanic half stay two, because they are worked apart.
+    pieces: dict[tuple[str, int], list] = {}
     for feature in collection.get("features", []):
         props = feature.get("properties", {})
         fid = str(props.get("id") or props.get("ID") or "").upper()
@@ -643,16 +680,20 @@ def _load_boundaries(conn: sqlite3.Connection, data_dir: Path) -> None:
         rings = _all_rings(feature.get("geometry") or {})
         if not rings:
             continue
+        oceanic = int(props.get("oceanic", 0) or 0)
+        pieces.setdefault((fid, oceanic), []).extend(rings)
+    batch = []
+    for (fid, oceanic), rings in pieces.items():
         lats = [p[1] for ring in rings for p in ring]
         lons = [p[0] for ring in rings for p in ring]
         batch.append(
             (
-                fid, int(props.get("oceanic", 0) or 0),
+                fid, oceanic,
                 min(lats), max(lats), min(lons), max(lons),
                 json.dumps(rings, separators=(",", ":")),
             )
         )
-    conn.executemany("INSERT OR REPLACE INTO boundaries VALUES (?,?,?,?,?,?,?)", batch)
+    conn.executemany("INSERT INTO boundaries VALUES (?,?,?,?,?,?,?)", batch)
     print(f"  boundaries    {len(batch):>7}")
 
     if not dat.exists():

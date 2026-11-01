@@ -327,11 +327,9 @@ REGISTRATION_PREFIX: tuple[tuple[tuple[str, ...], str], ...] = (
     (("SA",), "LV-"),
 )
 
-# The light types that fill a general aviation field.
-LIGHT_FLEET: tuple[str, ...] = (
-    "C172", "C152", "C182", "PA28", "PA34", "DA40", "DA42", "SR22", "BE36",
-    "P28A", "AT3", "TB20", "R44", "C25A", "PC12", "TBM9",
-)
+# The light types that fill a general aviation field, as one list; which of
+# them a field gets, and how often, is wilcoatc.atc.fleet's.
+from .fleet import GA_TYPES as LIGHT_FLEET  # noqa: E402
 
 
 def registration_prefix(ident: str) -> str:

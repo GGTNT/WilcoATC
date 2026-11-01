@@ -32,8 +32,8 @@ import csv
 import sqlite3
 from pathlib import Path
 
-from .build import DB_PATH
-from .channels import is_valid_channel, snap
+from .build import DB_PATH, _clean_facility
+from .channels import carrier, is_valid_channel, snap
 
 OVERRIDES = Path(DB_PATH).parent / "overrides.csv"
 
@@ -51,6 +51,10 @@ LOCAL = "local"         # written down by the pilot
 # Sort order, and therefore which frequency a controller is reached on first.
 # The pilot's own entry beats the simulator, which beats the published data.
 PRIORITY = {LOCAL: -2, FROM_SIM: -1, PUBLISHED: 0}
+
+# The positions a terminal or en-route room answers on, which are often not
+# named after the field they are filed under.
+_RADAR = ("APP", "DEP", "CTR")
 
 
 class Rejected(Exception):
@@ -166,8 +170,11 @@ def replace_airport(ident: str, frequencies, db_path=None) -> tuple[int, int]:
         # "TWR (RWY 07R/25L and 01)" -- which the simulator's list does not
         # carry. Without them a split tower could not be told apart, and the
         # handoff named whichever came first (see station_for_runway).
+        # By carrier, as the simulator's rows are now stored: a published
+        # 120.78 is the 120.775 the simulator's 120.780 becomes.
         runway_notes = {
-            (row["position"], round(float(row["mhz"]), 3)): row["description"]
+            (row["position"], round(carrier(float(row["mhz"])), 3)):
+                row["description"]
             for row in conn.execute(
                 "SELECT position, mhz, description FROM frequencies "
                 "WHERE ident = ? AND description LIKE '%RWY%'", (ident,))
@@ -211,20 +218,33 @@ def replace_airport(ident: str, frequencies, db_path=None) -> tuple[int, int]:
         # would outweigh how far away the airport is. The first entry for a
         # position leads; the rest sort by frequency, as the published data
         # does.
+        field_names = {names[""], airport["spoken"], airport["name"]}
         seen: set[str] = set()
         rows = []
         for _, entry in ordered:
             position = entry.position
             primary = position not in seen
             seen.add(position)
-            mhz = round(float(entry.mhz), 3)
+            # The carrier, not the 8.33 name the simulator gives for it:
+            # 118.505 is Heathrow Tower's 118.500 (navdata.channels).
+            mhz = round(carrier(float(entry.mhz)), 3)
             description = " ".join((entry.name or "").split()) or "from the simulator"
             note = runway_notes.get((position, mhz))
             if note:
                 description = f"{description} ({note})"
+            facility = names.get(position) or names[""]
+            listed = " ".join((entry.name or "").split()).upper()
+            if (position in _RADAR and listed and listed not in (main, ident)
+                    and facility in field_names):
+                # A radar room the simulator files under another name than
+                # the field's: Centennial's DEP is DENVER, published as
+                # Denver App/Dep. With no name of its own it took the
+                # field's, "contact Centennial Departure", and every later
+                # import read that back as the published one.
+                facility = _clean_facility(entry.name, facility, position)
             rows.append((
                 ident, position, mhz,
-                names.get(position) or names[""],
+                facility,
                 description,
                 PRIORITY[FROM_SIM] if primary else PRIORITY[PUBLISHED],
                 FROM_SIM,

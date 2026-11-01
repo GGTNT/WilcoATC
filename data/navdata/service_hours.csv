@@ -1,0 +1,31 @@
+# When an information service or a small tower is staffed.
+#
+# WHY THIS FILE EXISTS
+#
+# AFIS units and small towers close: at night, at weekends, out of season.
+# Outside their hours the frequency is unattended -- the aerodrome traffic
+# frequency, with the pilots announcing themselves -- while the ATIS or AWOS
+# keeps broadcasting. Neither the open dataset this program is built from
+# (OurAirports) nor the simulator's facility data carries opening hours, so
+# without a row here a frequency is treated as open. That is the safe
+# default: a closed unit treated as open answers a pilot who expected
+# silence; an open one treated as closed leaves a pilot unanswered.
+#
+# FORMAT
+#
+#   ident     the field's ICAO identifier
+#   position  INFO, TWR, GND, DEL or APP
+#   hours     H24, HJ (sunrise to sunset at the field), HN (sunset to
+#             sunrise), or UTC sessions such as 0800-1700 or
+#             0700-1200,1300-1800, each optionally behind days
+#             ("MON-FRI 0715-1100; SAT 0800-1200": a day not named is
+#             closed) and followed by SUM-1 where the AIP says its times are
+#             an hour earlier in European summer time (France: HOR ETE -1HR).
+#             Quote the field when it contains a comma.
+#   source    where the hours came from: the AIP section, and its date
+#
+# Lines starting with # are ignored. Hours are AIP data: copy them from the
+# state's AIP (AD 2.18 for the frequencies, AD 2.3 for the hours) and say
+# which edition in the source column.
+ident,position,hours,source
+LFAV,INFO,"MON-FRI 0715-1100,1215-1600 SUM-1","SIA eAIP France, AIRAC 2610 (01 OCT 2026), AD 2.LFAV item AD 2.3 ATS (section valid from 06 AUG 2026); HOR ETE -1HR per the AIP header"

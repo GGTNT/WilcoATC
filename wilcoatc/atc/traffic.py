@@ -37,13 +37,22 @@ import random
 from dataclasses import dataclass, field
 
 from ..navdata.build import project
+from ..navdata.channels import same_channel
 from ..navdata.db import (NavDB, Station, bearing_deg, dialect_for,
                           haversine_nm, normalize_runway)
 from .callsigns import every_language
+from . import fleet as fleets
+from . import live as livemod
+from ..logs import decision
+from . import circuit as circuitry
+from .circuit import (CIRCUIT_BASE_NM, CIRCUIT_CENTRELINE_NM,
+                      CIRCUIT_UPWIND_NM, CIRCUIT_WIDTH_NM)
 from . import ground as groundwork
-from .flying import (AIRLINER, Command, Performance, Target, glide_altitude,
+from .flying import (AIRLINER, OWN_DECISIONS, Command, Performance, Target, glide_altitude,
                      offset_from_track, performance_for)
 from .flying import step as fly_step
+from .flying import FLARE_FPM, FLARE_FT, LIFTOFF_AFTER_S
+from .flying import LIGHT as LIGHT_PERFORMANCE
 from .language import phraseology_for, reply_language
 from .operators import (LIGHT_FLEET, Operator, by_icao, registration_prefix,
                         roster_for)
@@ -123,6 +132,10 @@ class Flight:
     # and after that it is on a taxiway, and there is no taxiway data to fly
     # it along, so it is placed rather than flown.
     airborne_model: bool = False
+    # When the nose came up on the takeoff roll (the model's clock), or None:
+    # the wheels leave flying.LIFTOFF_AFTER_S later, and the injector's
+    # follower pitches the drawn aeroplane from it.
+    rotate_at: float | None = None
 
     # What it can do, and what it is currently trying to do.
     performance: Performance = AIRLINER
@@ -160,6 +173,26 @@ class Flight:
     # between polls. A callsign is not enough: FSLTL reuses one the moment a
     # flight number turns round.
     observed_id: int = 0
+    # Where an observed one comes from: "simulator" (FSLTL, AIG, the
+    # simulator's own) or "live" (the ADS-B feed, atc/live.py).
+    source: str = ""
+    # airline, cargo or ga (atc/live.py): what it counts against in the
+    # field's density. Set when invented; worked out for an observed one.
+    category: str = ""
+    # An invented flight whose callsign a real one has turned up with: it
+    # finishes what it is doing and goes at its next gate.
+    retire: bool = False
+    # A live one (atc/live.py): its address, how far its lead (where the
+    # real one is now) has to run, and whether our tower is holding it.
+    # A long taxi cut in two (atc.taxi.split_route): the taxiways still to
+    # be given, and where (layout metres) it was told to hold short.
+    taxi_rest: list = field(default_factory=list)
+    taxi_split_xy: tuple | None = None
+    hex: str = ""
+    lead_distance_nm: float = 0.0
+    lead_at: tuple | None = None   # (lat, lon) of the real one now
+    live_held: str = ""          # "" | "runway" | "give way"
+    cleared: bool = False        # delivery has given it its clearance
 
     # On the ground, at an airport whose taxiways the simulator has given us
     # (see wilcoatc.atc.ground). ``stand`` is the one it is on or going to;
@@ -171,6 +204,17 @@ class Flight:
     line_up: object | None = None
     planned: object | None = None
     parked_at: float = 0.0
+    # The schedule (traffic.lod.mode: schedule). An arrival's stand, held
+    # from the moment it is invented so its model can be chosen for where
+    # it will turn round; and a parked aeroplane booked as a departure:
+    # when its boarding starts, and whether it has.
+    planned_stand: int | None = None
+    boarding_at: float = 0.0
+    boarding: bool = False
+    # Boarded with the test button (traffic.debug.triggers): its model is
+    # changed in front of the pilot if need be, because seeing its doors is
+    # what the button was pressed for.
+    by_hand: bool = False
     # A departure that has been handed on and is flying away out of sight,
     # rather than vanishing a mile off the end of the runway.
     handed_off: bool = False
@@ -183,6 +227,18 @@ class Flight:
     # Whether the simulator has drawn it, for a static aeroplane, which does
     # not wait to be drawn before it exists the way a moving one does.
     drawn: bool = False
+    # The watchdog's (TrafficInjector._watchdog): where it last moved from
+    # and since when it has stood there, whether it has been given its one
+    # recovery, and whether it is stuck -- out of the controller's picture
+    # from then on, and taken away if the recovery does not move it.
+    still_at: tuple | None = None
+    still_since: float = 0.0
+    recovered: bool = False
+    stuck: bool = False
+    # Asked to be drawn again from scratch, at the same spot, as the
+    # recovery for one the simulator may have lost: left out of the next
+    # positions() so the object is removed and then created again.
+    redraw: bool = False
 
     @property
     def positioned(self) -> bool:
@@ -209,7 +265,11 @@ class Flight:
             "spoken": self.aircraft.for_language(self.language).spoken_short,
             "type": self.type_code,
             "ifr": self.ifr,
-            "operator": self.operator.icao if self.operator else "",
+            "operator": (self.operator.icao if self.operator
+                         else self.written[:3]
+                         if self.source == "live"
+                         and self.category in (livemod.AIRLINE, livemod.CARGO)
+                         else ""),
             "language": self.language,
             "phase": self.phase,
             "arriving": self.arriving,
@@ -223,6 +283,8 @@ class Flight:
             "ground_speed_kt": round(self.ground_speed_kt),
             "on_ground": self.on_ground,
             "observed": self.observed,
+            "source": self.source or ("simulator" if self.observed
+                                      else "invented"),
             "static": self.static,
             "vertical_rate_fpm": round(self.vertical_rate_fpm),
             "distance_nm": round(self.distance_nm, 1),
@@ -380,14 +442,10 @@ _POSITION_OF_PHASE: dict[str, str] = {
 # The legs of a circuit, which are flown rather than timed.
 _CIRCUIT_PHASES = frozenset({"upwind", "crosswind", "downwind", "base"})
 
-# The shape of that circuit, in miles from the threshold: how far out before
-# the crosswind turn, how far to the side the downwind is flown, how far past
-# the threshold before turning base, and how close to the centreline counts as
-# established on final.
-CIRCUIT_UPWIND_NM = 1.6
-CIRCUIT_WIDTH_NM = 1.1
-CIRCUIT_BASE_NM = 1.4
-CIRCUIT_CENTRELINE_NM = 0.2
+# The shape of that circuit lives in :mod:`wilcoatc.atc.circuit`, where the
+# tower reads the user's position against the same numbers these aeroplanes
+# fly: how far out before the crosswind turn, how wide the downwind, how far
+# past the threshold before base, how close to the centreline is final.
 
 def _turn_radius_nm(speed_kt: float, bank_deg: float = 25.0) -> float:
     """How wide a rate-limited turn is at this speed, in nautical miles."""
@@ -415,6 +473,9 @@ BASE_LOOKAHEAD_NM = 0.8
 # Where a departure is heading before anybody has said otherwise: the initial
 # climb in the clearance, and the level it settles at on the way out.
 INITIAL_CLIMB_FT = 3000.0
+# Climbing out, the speed is held at V2 plus a little to this height above the
+# runway, and only then allowed to build to the climb speed.
+ACCELERATE_AT_FT = 1000.0
 CLIMB_TO_FT = 5000.0
 
 # --------------------------------------------------------------------------
@@ -427,6 +488,41 @@ CLIMB_TO_FT = 5000.0
 # thirty thousand feet over the top is the fastest way to make the traffic list
 # useless.
 
+# The live ones on the scenery (TrafficInjector._live_pose). The centreline
+# is the pilot's figure (30 Oct 2026); the rest UNVERIFIED, chosen: a
+# heading this close to the runway's is lined up with it, the final is this
+# long, a runway with no published length this long, and a taxiway this
+# close is the one it is on.
+LIVE_CENTRELINE_M = 40.0
+LIVE_ALIGNED_DEG = 15.0
+LIVE_FINAL_M = 3.0 * 1852.0
+LIVE_RUNWAY_M = 3000.0
+LIVE_TAXIWAY_M = 40.0
+# Rolled onto a stand (after LocalTC): within 150 m, ahead, at taxi speed,
+# at a walking pace, for 45 minutes at most.
+LIVE_STAND_M = 150.0
+LIVE_AHEAD_DEG = 70.0
+LIVE_TAXI_IN_KT = 30.0
+LIVE_ROLL_MS = 1.5
+LIVE_PARKED_S = 45 * 60.0
+M_PER_DEG = 111_320.0
+# A hectopascal of QNH near the ground, in feet (ISA: 8.3 m).
+FT_PER_HPA = 27.3
+# The pilot's runway against the live ones (after LocalTC): the pilot on a
+# final inside 4 nm counts as using it; a live arrival this close to the
+# threshold with the pilot on the runway, or this little behind the pilot
+# on the same final, is sent round; held departures go 90 s apart; a hold
+# short is said once a minute at most; on the ground one taxiing gives way
+# to the pilot this close in front. UNVERIFIED: the 2 and 2.5 nm and the
+# 150 m / 45 degrees, chosen.
+PILOT_FINAL_NM = 4.0
+LIVE_GO_AROUND_NM = 2.0
+LIVE_BEHIND_NM = 2.5
+RELEASE_GAP_S = 90.0
+HOLD_SHORT_EVERY_S = 60.0
+GIVE_WAY_M = 150.0
+GIVE_WAY_DEG = 45.0
+
 #: How far from the field an observed aeroplane still counts as working it.
 OBSERVED_RANGE_NM = 30.0
 #: And how far above it. An airliner in the cruise over the top is not an
@@ -435,6 +531,9 @@ OBSERVED_CEILING_FT = 12_000.0
 #: Rolling rather than taxiing, and moving rather than parked.
 ROLLING_KT = 40.0
 TAXIING_KT = 3.0
+# Pushed back: slow, and moving the other way from the nose (atc/live.py).
+PUSHBACK_KT = 8.0
+PUSHBACK_DEG = 120.0
 # How far from the field's reference point somebody else's parked aeroplane
 # can be and still be standing on one of its stands.
 PARKED_RANGE_NM = 3.0
@@ -471,7 +570,9 @@ _FLYING_PHASES = frozenset({
 }) | _CIRCUIT_PHASES
 
 # Every phase a flight can be in, which is what the panel needs a label for.
-PHASES: frozenset[str] = frozenset(_SPEED) | _FLYING_PHASES
+# "parked" is the apron: this program's aeroplanes at the gates and FSLTL's,
+# which are on the map and never on a strip.
+PHASES: frozenset[str] = frozenset(_SPEED) | _FLYING_PHASES | {"parked"}
 
 # Three degrees, in feet per nautical mile.
 GLIDE_FT_PER_NM = 318.0
@@ -482,6 +583,14 @@ APPROACH_SPEED_KT = 140.0
 ARRIVAL_SPEED_KT = 250.0
 SLOWING_FROM_NM = 15.0
 STABLE_BY_NM = 4.0
+
+
+def _squawk(code: str) -> str:
+    """The real one's code where it is a code, the conspicuity one else."""
+    code = (code or "").strip()
+    if len(code) == 4 and all(ch in "01234567" for ch in code):
+        return code
+    return "2000"
 
 
 def observed_type(raw: str) -> str:
@@ -502,13 +611,28 @@ def observed_type(raw: str) -> str:
     text = text.strip("_. ").split(".", 1)[0].strip("_ ")
     # "A350-900" and "A320 neo" are a designator with something after it, and
     # the something is not part of it. A name with no designator in it at all
-    # -- "Cherokee", "737" -- comes back empty rather than truncated.
+    # -- "Cherokee" -- comes back empty rather than truncated.
     head = text.replace("-", " ").split()
     text = "".join(c for c in (head[0] if head else "") if c.isalnum())
+    # FSLTL's models say what they are the way a ramp agent would: "737",
+    # "ATR76". Read off a running 2024 at Madeira, and each is one type.
+    text = _MODEL_NAMES.get(text, text)
     if 3 <= len(text) <= 4 and text[0].isalpha() and any(
             c.isdigit() for c in text):
         return text
     return ""
+
+
+#: What FSLTL writes in ATC MODEL for the types it does not give a designator
+#: for, and the designator. A bare Boeing number is the variant FSLTL's base
+#: model of it is.
+_MODEL_NAMES: dict[str, str] = {
+    "737": "B738", "738": "B738", "739": "B739", "747": "B744", "748": "B748",
+    "757": "B752", "767": "B763", "777": "B77W", "787": "B789",
+    "ATR72": "AT76", "ATR75": "AT75", "ATR76": "AT76", "ATR42": "AT46",
+    "ATR45": "AT45", "ATR46": "AT46", "A320NEO": "A20N", "A321NEO": "A21N",
+    "A319NEO": "A19N", "A330NEO": "A339",
+}
 
 
 def approach_speed(distance_nm: float,
@@ -552,6 +676,85 @@ class Call:
     # the frequency is missing transmissions, which it is. Zero for a call
     # that is not part of an exchange at all.
     exchange: int = 0
+    # The channel it is said on, where known: what decides who hears it.
+    mhz: float = 0.0
+
+
+#: How big a parked aeroplane is taken to be when it is standing nowhere the
+#: layout calls a stand: the radius the simulator gives an airliner's gate,
+#: and a light aircraft's tie-down.
+AIRLINER_FOOTPRINT_M = 18.0
+LIGHT_FOOTPRINT_M = 6.0
+
+
+@dataclass
+class ParkedObserved:
+    """Somebody else's aeroplane standing on this airport.
+
+    Not a :class:`Flight`: it is on no frequency and in no sequence. It is
+    on the map, and the ground handling calls on it.
+    """
+
+    object_id: int
+    callsign: str
+    registration: str = ""
+    type_code: str = ""
+    # The simulator title, for the door table.
+    title: str = ""
+    since: float = 0.0
+    # A live flight (atc/live.py): it holds its stand and counts against the
+    # parked ones, but nothing in the simulator is it yet, so nothing is
+    # sent to it -- no vehicles, no doors.
+    live: bool = False
+    category: str = ""
+    # A live one's airline, for its model and livery; and when it was put
+    # on the stand, for how long it stays when the feed no longer hears it.
+    operator: str = ""
+    parked_at: float = 0.0
+    latitude: float = 0.0
+    longitude: float = 0.0
+    heading: float = 0.0
+    altitude_ft: float = 0.0
+
+    @property
+    def key(self) -> str:
+        """What the handling knows it by. FSLTL's parked aeroplanes carry
+        made-up callsigns that can repeat; the object id cannot."""
+        return f"{self.callsign or 'AI'}#{self.object_id}"
+
+    def snapshot(self, field) -> dict:
+        """The shape :meth:`Flight.snapshot` has, as far as the map reads it."""
+        return {
+            "callsign": self.callsign or self.registration or "AI",
+            "spoken": "",
+            "type": self.type_code,
+            "ifr": True,
+            "operator": self.operator,
+            "language": "",
+            "phase": "parked",
+            "arriving": False,
+            "runway": "",
+            "sequence": 0,
+            "position": "",
+            "lat": round(self.latitude, 6),
+            "lon": round(self.longitude, 6),
+            "altitude_ft": round(self.altitude_ft),
+            "heading": round(self.heading),
+            "ground_speed_kt": 0,
+            "on_ground": True,
+            "observed": True,
+            "source": "live" if self.live else "simulator",
+            "static": True,
+            "vertical_rate_fpm": 0,
+            "distance_nm": round(haversine_nm(
+                field.latitude, field.longitude,
+                self.latitude, self.longitude), 1) if field else 0.0,
+            "order": {"kind": "", "detail": ""},
+            "intent": "parked",
+            "assigned_heading": None,
+            "assigned_altitude_ft": None,
+            "assigned_speed_kt": None,
+        }
 
 
 @dataclass
@@ -630,12 +833,20 @@ class _Field:
     ident: str = ""
     name: str = ""
     size_rank: int = 3
+    # Airline field or airfield, and why (wilcoatc.atc.fleet). Logged as a
+    # "fleet" row when the field is set.
+    kind: fleets.FieldKind | None = None
     departure_runway: str = ""
     arrival_runway: str = ""
     weather: Weather | None = None
     # The traffic frequency, where a field has one. Set when the field has no
     # controllers at all, which is what makes it an uncontrolled one.
     advisory: Station | None = None
+    # The field's own aerodrome information service (an AFIS, or a UK air/
+    # ground "Radio"), where it has one and no controller. Kortrijk has
+    # nothing else, and with neither this nor a traffic frequency the
+    # injector worked it as a towered field with no tower.
+    afis: Station | None = None
     stations: dict[str, Station] = field(default_factory=dict)
     # Where the field is, and where its runway thresholds are, so an aeroplane
     # can be put on a centreline rather than merely near an airport.
@@ -688,7 +899,12 @@ class TrafficInjector:
         # When the flights were last moved, so they travel at their own speed
         # rather than at the rate the caller happens to poll.
         self._flown_at = 0.0
-        self._phraseology: dict[str, object] = {}
+        self._phraseology: dict[tuple[str, str], object] = {}
+        # The pilot's profile: a pinned region is the controller's words to
+        # the traffic as well as to the pilot, on the same frequency.
+        from .profile import DEFAULT as DEFAULT_PROFILE
+
+        self.profile = DEFAULT_PROFILE
         self._pilots: dict[str, PilotSpeech] = {}
         # The aeroplane the person is flying, when the engine has told us
         # about it. None means the traffic works the field as though it were
@@ -733,6 +949,12 @@ class TrafficInjector:
         # is given the types it is painted for, so an Air France flight is
         # an Air France aeroplane out of the window rather than a white one.
         self.has_livery = None
+        # Whether an aeroplane may push: its doors read shut. Set by the
+        # engine from the door layer; None means nobody is reading doors
+        # and nothing waits. A departure that is not ready does not ask for
+        # taxi -- a real crew does not call for push with a door open -- and
+        # tries again a few seconds later.
+        self.can_push = None
 
         # The aeroplanes standing at the gates, going nowhere yet. Kept off
         # ``flights`` because nothing about them is the radio's business:
@@ -740,13 +962,55 @@ class TrafficInjector:
         # a taxiway. ``parked`` is how many there should be, and 0 -- the
         # default, which the tests of the moving traffic want -- is none.
         self.statics: list[Flight] = []
+        # The schedule: departures board on their stands before they call,
+        # and arrivals hold their stand from the start. Off, a departure
+        # is a parked aeroplane chosen the moment it is wanted, as always.
+        self.schedule = False
+        self.boarding_s = 240.0
+        self.boarding_lead_s = 120.0
         self.parked = 0
         self._parked_at = 0.0
         self._stands_filled = False
+        # Whether to wait, before setting the stands out, for the simulator
+        # to have reported what is already standing on them. The first fill
+        # used to go on the first tick, two seconds before FSLTL's parked
+        # aeroplanes had been read, and put an aeroplane on every stand one
+        # of theirs was already on.
+        self.await_observed = False
+        self._observed_read = False
+        self._first_poll: float | None = None
+        # Invent only these types (ICAO codes), for testing a model: empty
+        # is the airlines' real fleets.
+        self.force_types: tuple[str, ...] = ()
         # Where somebody else's parked aeroplanes are -- FSLTL, AIG, the
         # simulator's own -- which are not worked (see _works_here) but are
         # standing on stands nothing here may be put on.
         self._parked_seen: list[tuple[float, float]] = []
+        # And what they are, by simulator object, for the map and the ground
+        # handling: an FSLTL apron is forty aeroplanes going nowhere, and the
+        # map is about the window. ``since`` is when one stopped, if it was
+        # seen moving first, else 0 for "it was there when we looked".
+        self._parked_observed: dict[int, ParkedObserved] = {}
+        # The live ones (atc/live.py): rolled onto a stand and held there,
+        # let go to move again, and seen in the air (so taxiing in).
+        self._live_stands: dict[int, dict] = {}
+        self._live_moving: set[int] = set()
+        self._live_flew: set[str] = set()
+        # The pilot's runway (_protect_the_pilot): how a live one is held and
+        # let go (LiveRoster.hold, handed in by the engine), the ones sent
+        # around and flown by us, and when a hold short was last said and a
+        # held departure last let go.
+        self.hold_live = None
+        self._taken_over: set[int] = set()
+        # The one we fly for each taken over, and since when it has been
+        # parked, waiting for the feed to hear the real one again.
+        self._flown_for: dict[int, Flight] = {}
+        self._parked_since: dict[int, float] = {}
+        self._hold_short_said = -math.inf
+        self._last_release = -math.inf
+        # What each live one was last put on (runway, taxiway, stand, or
+        # nothing), for traffic --live --dry-run and the status line.
+        self.live_snapped: dict[str, str] = {}
 
     # ------------------------------------------------------------------
     # the field
@@ -754,7 +1018,8 @@ class TrafficInjector:
 
     def set_field(self, ident: str, departure_runway: str = "",
                   arrival_runway: str = "", weather: Weather | None = None,
-                  size_rank: int | None = None) -> None:
+                  size_rank: int | None = None,
+                  tuned: Station | None = None) -> None:
         """Point the injector at an airport, or move it to a new one.
 
         Moving fields clears the roster: the aeroplanes at the last airport are
@@ -772,6 +1037,7 @@ class TrafficInjector:
             self.statics.clear()
             self._stands_filled = False
             self._parked_seen = []
+            self._parked_observed.clear()
             self.pending.clear()
             self._used_callsigns.clear()
             self._phraseology.clear()
@@ -810,12 +1076,30 @@ class TrafficInjector:
                 and not _is_enroute_standin(station, position)
             }
             self.field.advisory = self.navdb.station_for(ident, "CTAF")
+            self.field.afis = self._aerodrome_information(ident)
+            self.field.kind = fleets.classify(self.navdb, ident, size_rank)
+            decision("fleet", airport=ident, **self.field.kind.log_fields(),
+                     density=self.density,
+                     in_play_scaled=self._in_play(self.field.kind),
+                     movement_gap_scaled_s=round(
+                         self._movement_gap_s(self.field.kind)),
+                     parked=fleets.parked_for(self.field.kind, self.parked))
             if airport is not None:
                 self.field.latitude = airport.lat
                 self.field.longitude = airport.lon
                 self.field.elevation_ft = airport.elev_ft
             self.field.thresholds = self._thresholds(ident)
             self.field.surfaces = self._surfaces(ident)
+        # A field that publishes several frequencies for one position --
+        # Brussels has four Grounds -- had its traffic on the one the lookup
+        # ranked first while the pilot sat on another, and since a call is
+        # heard by its channel (engine._on_this_channel) the pilot heard
+        # nobody at all, for a day, at every such field. The traffic works
+        # the position on the frequency the pilot is tuned to.
+        if (tuned is not None and (tuned.ident or "").upper() == ident
+                and tuned.position in self.field.stations
+                and tuned.is_controller):
+            self.field.stations[tuned.position] = tuned
         if weather is not None:
             self.field.weather = weather
         self.field.departure_runway = departure_runway or self.field.departure_runway
@@ -1057,6 +1341,8 @@ class TrafficInjector:
         target = flight.target
         target.hold = False
         target.turn = ""
+        target.accel_kt_s = None
+        target.max_descent_fpm = None
         end = self._threshold(flight.runway)
         heading = end[2] if end is not None else flight.heading
         elevation = self.field.elevation_ft
@@ -1077,10 +1363,17 @@ class TrafficInjector:
             target.speed_kt = performance.climb_kt
             if flight.on_ground:
                 target.altitude_ft = surface
+                target.accel_kt_s = performance.takeoff_kt_s
                 target.intent = "rolling"
             else:
                 target.altitude_ft = elevation + INITIAL_CLIMB_FT
                 target.intent = "climbing out"
+                if flight.altitude_ft < surface + ACCELERATE_AT_FT:
+                    # V2 plus a little to the acceleration height, nose high,
+                    # rather than flattening out to gather speed off the
+                    # runway.
+                    target.speed_kt = min(performance.climb_kt,
+                                          performance.rotate_kt + 20.0)
         elif phase == "departed":
             target.heading = heading
             target.speed_kt = performance.cruise_kt
@@ -1105,6 +1398,18 @@ class TrafficInjector:
                 self._threshold_ft(flight.runway), flight.distance_nm,
                 GLIDE_FT_PER_NM)
             target.intent = "on approach" if phase == "inbound" else "on final"
+            height = flight.altitude_ft - surface
+            if phase == "final" and height < FLARE_FT:
+                # The flare: the descent eased off from the glide path's rate
+                # to a gentle touchdown over the last forty feet.
+                glide_fpm = flight.ground_speed_kt * GLIDE_FT_PER_NM / 60.0
+                target.max_descent_fpm = max(
+                    FLARE_FPM, glide_fpm * max(0.0, height) / FLARE_FT)
+                # Down to the runway under it, not to the threshold's
+                # height: the flare carries it past the threshold, and on a
+                # runway that falls away (Madeira's 23 drops 45 ft) it held
+                # the threshold's altitude above the slope for ever.
+                target.altitude_ft = surface
         elif phase == "landed":
             target.heading = heading
             target.altitude_ft = surface
@@ -1205,10 +1510,8 @@ class TrafficInjector:
         end = self._threshold(flight.runway)
         if end is None:
             return None
-        side = -1.0 if flight.pattern_direction != "right" else 1.0
-        lat, lon = project(end[0], end[1], runway_heading, CIRCUIT_UPWIND_NM)
-        return project(lat, lon, (runway_heading + 90.0 * side) % 360.0,
-                       CIRCUIT_WIDTH_NM)
+        return circuitry.join_point(end[0], end[1], runway_heading,
+                                    flight.pattern_direction)
 
     def _bearing_to_join(self, flight: Flight, runway_heading: float) -> float:
         """Which way to point to get to the start of the downwind."""
@@ -1251,8 +1554,8 @@ class TrafficInjector:
         end = self._threshold(flight.runway)
         if end is None:
             return 0.0, 0.0
-        return offset_from_track(flight.latitude, flight.longitude,
-                                 end[0], end[1], runway_heading)
+        return circuitry.runway_frame(flight.latitude, flight.longitude,
+                                      end[0], end[1], runway_heading)
 
     def _after_flying(self, flight: Flight) -> None:
         """Read back off the aeroplane whatever the rest of the module asks it.
@@ -1272,14 +1575,25 @@ class TrafficInjector:
 
         performance = flight.performance
         if flight.phase == "takeoff":
-            flight.on_ground = flight.ground_speed_kt < performance.rotate_kt
+            if not flight.on_ground:
+                pass                     # once off, it stays off
+            elif flight.ground_speed_kt < performance.rotate_kt:
+                flight.rotate_at = None
+            else:
+                now = self._flown_at
+                if flight.rotate_at is None:
+                    flight.rotate_at = now
+                # Rotated, and off once the nose is high enough.
+                if now - flight.rotate_at >= LIFTOFF_AFTER_S:
+                    flight.on_ground = False
         elif flight.phase in ("lineup", "landed"):
             flight.on_ground = True
         else:
             flight.on_ground = (flight.altitude_ft
                                 <= self._surface_ft(flight) + 3.0)
 
-    def positions(self, invented_only: bool = False) -> list[dict]:
+    def positions(self, invented_only: bool = False,
+                  parked: bool = False) -> list[dict]:
         """Where every live aeroplane is, for the map and the simulator.
 
         ``invented_only`` leaves out the ones the simulator is already
@@ -1287,10 +1601,33 @@ class TrafficInjector:
         -- and the injector in :mod:`wilcoatc.integrations.aitraffic` wants
         only the ones it is responsible for, or it would create a second copy
         of every FSLTL aeroplane a foot away from the first.
+
+        ``parked`` adds the aeroplanes standing at the gates, this program's
+        and everybody else's. The map wants those too; the strips do not,
+        because a dozen aeroplanes that will say nothing would bury the
+        three that will.
         """
+        # The live ones (atc/live.py) are observed -- nobody instructs them --
+        # but this program draws them, so they go to the injector with the
+        # invented ones; FSLTL's and the simulator's never do.
         found = [f.snapshot() for f in self.flights
                  if not f.done and f.positioned
-                 and not (invented_only and f.observed)]
+                 and not (invented_only and f.observed and f.source != "live")
+                 and not (invented_only and f.redraw)]
+        if invented_only:
+            # A recovery's redraw (``_recover``): left out of the simulator's
+            # list once, so its object is removed, and created again on the
+            # next tick at the same spot.
+            for flight in self.flights:
+                flight.redraw = False
+        if parked and not invented_only:
+            # The apron as well: this program's own parked aeroplanes, and
+            # the ones FSLTL and the simulator stood there. Neither is on
+            # the radio, both are out of the window.
+            found += [f.snapshot() for f in self.statics
+                      if f.positioned and (f.drawn or not self.requires_sim)]
+            found += [one.snapshot(self.field) for one in
+                      self._parked_observed.values()]
         if not invented_only:
             # The map also wants where each one is going: the rest of its
             # route, as the aeroplane itself would fly it. The simulator does
@@ -1311,7 +1648,203 @@ class TrafficInjector:
             # of the traffic on the frequency, and a dozen aeroplanes that
             # will say nothing would bury the three that will.
             found += [f.snapshot() for f in self.statics if f.positioned]
+            # And the live ones standing at the gates, which this program
+            # draws as well.
+            found += [one.snapshot(self.field) for one in
+                      self._parked_observed.values() if one.live]
+            # And how each is moving, unrounded, with the way ahead on the
+            # ground: the simulator draws them between ticks from this
+            # (wilcoatc.atc.follow), rather than jumping once a tick.
+            by_callsign = {f.written: f for f in self.flights}
+            by_callsign.update({f.written: f for f in self._materialising})
+            by_callsign.update({f.written: f for f in self.statics})
+            for snapshot in found:
+                flight = by_callsign.get(snapshot["callsign"])
+                if flight is not None:
+                    snapshot["motion"] = self.motion_of(flight)
+            # The simulator draws the first traffic.in_simulator_limit of
+            # these: the ones that matter to the pilot first (the pilot's
+            # rule, 30 Oct 2026) -- the runway and the final, then the rest
+            # of the air, then the taxiways, then the parked ones nearest
+            # first. An aeroplane on final is never left out for one parked
+            # across the airport.
+            found.sort(key=self._relevance)
         return found
+
+    def _relevance(self, snapshot: dict) -> tuple:
+        phase = snapshot.get("phase", "")
+        on_ground = bool(snapshot.get("on_ground"))
+        if phase in ("final", "takeoff", "lineup", "landed", "go_around") \
+                or (not on_ground and phase in ("departed", "circuit")):
+            rank = 0
+        elif not on_ground:
+            rank = 1
+        elif phase not in ("parked",) and (
+                snapshot.get("ground_speed_kt", 0) >= TAXIING_KT
+                or phase in ("taxi", "taxi_in", "pushback", "holding")):
+            rank = 2
+        else:
+            rank = 3
+        user = self.user
+        if user is not None and user.has_position:
+            here = (user.latitude, user.longitude)
+        else:
+            here = (self.field.latitude, self.field.longitude)
+        far = haversine_nm(here[0], here[1], snapshot.get("lat", here[0]),
+                           snapshot.get("lon", here[1]))
+        return rank, far
+
+    #: The most route points handed to the injector's follower: a few
+    #: hundred metres of taxiway, all it can draw ahead within a tick.
+    MOTION_POINTS = 12
+
+    def motion_of(self, flight: Flight) -> dict:
+        """How an aeroplane is moving, for drawing it between ticks."""
+        motion = {
+            "t": self._flown_at or 0.0,
+            "lat": flight.latitude, "lon": flight.longitude,
+            "alt": flight.altitude_ft, "heading": flight.heading,
+            "gs": flight.ground_speed_kt, "vs": flight.vertical_rate_fpm,
+            "on_ground": bool(flight.on_ground),
+            "arriving": bool(flight.arriving),
+            # A light aircraft rotates less and climbs flatter.
+            "light": flight.performance.climb_fpm <= LIGHT_PERFORMANCE.climb_fpm,
+            "rotate_at": flight.rotate_at,
+            "surface_ft": (self._surface_ft(flight) if flight.runway
+                           else self.field.elevation_ft),
+            "route": [], "push": 0,
+        }
+        taxi = flight.taxi
+        layout = self.ground
+        if (taxi is not None and layout is not None and not taxi.done
+                and not flight.airborne_model):
+            ahead = taxi.points[taxi.index:taxi.index + self.MOTION_POINTS]
+            motion["route"] = [layout.to_latlon(x, z) for x, z in ahead]
+            # And the two points behind it, so a corner it is half way round
+            # is the same curve from one tick to the next.
+            motion["behind"] = [layout.to_latlon(x, z) for x, z in
+                                taxi.points[max(0, taxi.index - 2):taxi.index]]
+            motion["push"] = max(0, taxi.push - taxi.index)
+            if taxi.face is not None and taxi.index + len(ahead) >= len(taxi.points):
+                motion["face"] = taxi.face
+        return motion
+
+    def standing(self) -> list:
+        """Every invented aeroplane on a stand, for the ground handling.
+
+        The ones set out at the gates, an arrival that has just stopped on
+        its stand, and a departure boarded and waiting for its push: each
+        with its stand's geometry and which of those it is, in the shape
+        :class:`wilcoatc.atc.handling.Standing` wants. Somebody else's
+        aeroplanes are never in it -- the simulator handles its own -- and
+        neither is anything that has started to move.
+        """
+        from .handling import (ARRIVED, BOARDING, DEPARTING, PARKED, Standing,
+                               is_light)
+
+        if self.ground is None:
+            return []
+        found: list = []
+
+        def add(flight: Flight, status: str) -> None:
+            if flight.stand is None or not flight.positioned:
+                return
+            if not 0 <= flight.stand < len(self.ground.stands):
+                return
+            stand = self.ground.stands[flight.stand]
+            x, z = self.ground.to_xy(flight.latitude, flight.longitude)
+            # Boarding, its doors close when the boarding does: the holds
+            # first, and the bags must be on by then.
+            closes = (flight.boarding_at + self.boarding_s
+                      if status == BOARDING and flight.boarding_at else None)
+            found.append(Standing(
+                callsign=flight.written, x=x, z=z, heading=flight.heading,
+                radius=stand.radius, status=status, since=flight.parked_at,
+                light=is_light(flight.type_code, flight.operator is None),
+                gate=stand.gate, type_code=flight.type_code,
+                operator=flight.operator.icao if flight.operator else "",
+                closes_at=closes))
+
+        for flight in self.statics:
+            if flight.drawn or not self.requires_sim:
+                add(flight, BOARDING if flight.boarding else PARKED)
+        for one in self._parked_observed.values():
+            # On the stand it is nearest, if it is on one; otherwise on its
+            # own footprint, which is all the geometry a vehicle needs.
+            x, z = self.ground.to_xy(one.latitude, one.longitude)
+            stand = self.ground.stand_at(x, z)
+            light = is_light(one.type_code, not one.type_code)
+            # A live one is drawn by this program, so it is handled as one of
+            # ours: found by its callsign, not by somebody else's object.
+            found.append(Standing(
+                callsign=one.callsign if one.live else one.key,
+                x=x, z=z, heading=one.heading,
+                radius=(stand.radius if stand is not None
+                        else (LIGHT_FOOTPRINT_M if light
+                              else AIRLINER_FOOTPRINT_M)),
+                status=ARRIVED if one.since else PARKED, since=one.since,
+                light=light, gate=stand.gate if stand is not None else False,
+                type_code=one.type_code, observed=not one.live,
+                object_id=0 if one.live else one.object_id, title=one.title))
+        for flight in self.flights:
+            if flight.observed or flight.done or flight.static:
+                continue
+            if not flight.on_ground or flight.ground_speed_kt > 0.5:
+                continue
+            if flight.taxi is not None:
+                continue
+            if flight.arriving:
+                if flight.parked_at:
+                    add(flight, ARRIVED)
+            else:
+                add(flight, DEPARTING)
+        return found
+
+    def flight_named(self, callsign: str) -> Flight | None:
+        """One of this program's aeroplanes by callsign, wherever it is."""
+        for flight in (self.statics + self.flights + self._materialising
+                       + self._asked_for):
+            if flight.written == callsign and not flight.done:
+                return flight
+        return None
+
+    def apron_state(self, callsign: str
+                    ) -> tuple[str, tuple[float, float] | None]:
+        """Where one of this program's aeroplanes is in its day, for the
+        schedule's choice of model, and the stand it turns round on.
+
+        One of "static" (standing on its stand), "booked" (to depart,
+        boarding not started), "boarding", "departing" (boarded, on its
+        stand, not yet moving), "arrived" (blocked in, still on the
+        radio), "arriving" (on its way to a stand it holds) or "moving".
+        The stand is in the layout's metres, or None.
+        """
+        def stand_xy(index: int | None) -> tuple[float, float] | None:
+            if (index is None or self.ground is None
+                    or not 0 <= index < len(self.ground.stands)):
+                return None
+            stand = self.ground.stands[index]
+            return stand.x, stand.z
+
+        for flight in self.statics:
+            if flight.written == callsign:
+                kind = ("boarding" if flight.boarding
+                        else "booked" if flight.boarding_at else "static")
+                return kind, stand_xy(flight.stand)
+        for flight in self.flights + self._materialising + self._asked_for:
+            if flight.written != callsign or flight.done:
+                continue
+            still = flight.on_ground and flight.ground_speed_kt <= 0.5
+            if flight.arriving:
+                if flight.parked_at and still:
+                    return "arrived", stand_xy(flight.stand)
+                return "arriving", stand_xy(flight.planned_stand
+                                            if flight.planned_stand is not None
+                                            else flight.stand)
+            if still and flight.taxi is None and flight.stand is not None:
+                return "departing", stand_xy(flight.stand)
+            return "moving", None
+        return "moving", None
 
     # How long the simulator has to produce an invented aeroplane before it
     # is dropped. Long enough for a refused title and a second one to be
@@ -1427,16 +1960,24 @@ class TrafficInjector:
         self.pending = [c for c in self.pending if c.at > now]
         self.flights = [f for f in self.flights if not f.done]
 
-    def poll(self, now: float, listening_on: str = "") -> list[Call]:
+    def poll(self, now: float, listening_on: str = "",
+             mhz: float = 0.0) -> list[Call]:
         """Advance every flight and return what is due on this frequency.
 
         ``listening_on`` is the position the user is tuned to. Transmissions on
         any other frequency still happen -- the flights keep moving -- but the
         user does not hear them, exactly as on a real radio.
+
+        ``mhz`` is the channel tuned, when known, and then decides instead:
+        a call is heard when it is said on the same channel. Ground and
+        Tower sharing one are both heard; a field's second Approach
+        frequency does not hear the first's.
         """
         if self.quiet:
             return []
 
+        if self._first_poll is None:
+            self._first_poll = now
         self._spawn(now)
         self._advance(now)
 
@@ -1445,13 +1986,22 @@ class TrafficInjector:
         for call in self.pending:
             if call.at > now:
                 keep.append(call)
-            elif not listening_on or call.position == listening_on:
+            elif self._heard_on(call, listening_on, mhz):
                 due.append(call)
             # A call on another frequency is simply dropped: it happened, the
             # user was not listening to it.
         self.pending = keep
         self.flights = [f for f in self.flights if not f.done]
         return due
+
+    def _heard_on(self, call: Call, listening_on: str, mhz: float) -> bool:
+        if not listening_on and not mhz:
+            return True
+        if not call.mhz:
+            call.mhz = self._freq(call.position)
+        if mhz and call.mhz:
+            return same_channel(call.mhz, mhz, 0)
+        return not listening_on or call.position == listening_on
 
     def traffic_ahead(self, arriving: bool = True) -> list[Flight]:
         """The flights in front of the user, nearest first.
@@ -1462,11 +2012,12 @@ class TrafficInjector:
         """
         if arriving:
             found = [f for f in self.flights
-                     if f.arriving and f.phase in ("inbound", "final")]
+                     if f.arriving and not f.stuck
+                     and f.phase in ("inbound", "final")]
             found.sort(key=lambda f: f.distance_nm)
         else:
             found = [f for f in self.flights
-                     if not f.arriving
+                     if not f.arriving and not f.stuck
                      and f.phase in ("holding", "ready", "waiting", "lineup")]
             found.sort(key=lambda f: f.sequence)
         return found
@@ -1482,17 +2033,86 @@ class TrafficInjector:
     def _wanted(self) -> int:
         """How many invented aeroplanes this field should have.
 
-        Less whatever somebody else has already put there. A pilot running
-        FSLTL has a full airport and does not want a second one invented on
-        top of it -- but a field with two real aeroplanes on it is still a
-        quiet field, so the invented traffic fills the rest rather than
-        standing down the moment anything is seen.
+        Less whatever somebody else has already put there -- FSLTL's, or the
+        real ones from the live feed -- counted in its own category only
+        (:meth:`_room`). A pilot running FSLTL has a full airport and does
+        not want a second one invented on top of it; but a field with two
+        real aeroplanes on it is still a quiet field, so the invented traffic
+        fills the rest rather than standing down the moment anything is seen.
         """
-        base = CONCURRENT_BY_RANK.get(self.field.size_rank, 3)
-        wanted = int(round(base * self.density))
+        wanted = sum(self._room().values())
         if self.max_invented is not None:
             wanted = min(wanted, self.max_invented)
-        return max(0, wanted - self.observed_count)
+        return wanted
+
+    def _density_by_category(self) -> dict[str, int]:
+        """The field's in-play figure, split into the categories its invented
+        traffic is made of (airline and cargo, or light aircraft)."""
+        kind = self.field.kind
+        roster = ()
+        if kind is None or kind.airline:
+            key = (self.field.ident, self.field.size_rank)
+            if getattr(self, "_roster_for", None) != key:
+                self._roster_for = key
+                self._roster = roster_for(self.field.ident,
+                                          self.field.size_rank)
+            roster = self._roster
+        return livemod.wanted_by_category(kind, self._in_play(kind), roster)
+
+    def _observed_by_category(self) -> dict[str, int]:
+        """The aeroplanes somebody else flies that work this field, by
+        category. What is overflying never had a strip (_works_here)."""
+        counted = {c: 0 for c in livemod.CATEGORIES}
+        for f in self.flights:
+            if f.observed and not f.done and not f.stuck:
+                counted[livemod.flight_category(f)] += 1
+        return counted
+
+    def _room(self) -> dict[str, int]:
+        """How many invented aeroplanes each category still has room for:
+        the field's density in that category less the real ones in it. A
+        real Cessna crossing a big airport's zone takes nothing from its
+        airliners, and a real airliner nothing from an airfield's Cessnas."""
+        return livemod.room(self._density_by_category(),
+                            self._observed_by_category())
+
+    def _invented_by_category(self) -> dict[str, int]:
+        counted = {c: 0 for c in livemod.CATEGORIES}
+        for f in (self.flights + self._materialising
+                  + [s for s in self.statics if s.boarding_at]):
+            if not f.observed and not f.done:
+                counted[livemod.flight_category(f)] += 1
+        return counted
+
+    def _steer(self) -> str | None:
+        """The category the next invented aeroplane should be, when real ones
+        have filled the others; None leaves the draw as it always was."""
+        if not any(self._observed_by_category().values()):
+            return None
+        room = self._room()
+        invented = self._invented_by_category()
+        short = [c for c in livemod.CATEGORIES if room[c] - invented[c] > 0]
+        return short[0] if len(short) == 1 else None
+
+    def _in_play(self, kind: "fleets.FieldKind | None") -> int:
+        """Aeroplanes in play at once at this field, scaled by the density:
+        the field's kind for a general-aviation field (fleet.classify), the
+        size rank's for an airport, as it always was."""
+        base = (kind.in_play if kind is not None and kind.in_play
+                else CONCURRENT_BY_RANK.get(self.field.size_rank, 3))
+        return int(round(base * self.density))
+
+    def _movement_gap_s(self, kind: "fleets.FieldKind | None") -> float:
+        """Seconds between one aeroplane starting and the next."""
+        base = (kind.movement_gap_s if kind is not None and kind.movement_gap_s
+                else 55.0)
+        return base / max(0.25, self.density)
+
+    def _booked(self) -> int:
+        """Departures booked off the apron, not yet moving. They are in play
+        already: counted only once they moved, two booked on top of two in
+        the air made four at Kortrijk."""
+        return sum(1 for f in self.statics if f.boarding_at)
 
     def _spawn(self, now: float) -> None:
         if self.requires_sim and not self.can_invent:
@@ -1502,15 +2122,22 @@ class TrafficInjector:
             asked, self._asked_for = self._asked_for, []
             for flight in asked:
                 self._admit(flight, now)
+        if self.schedule or any(f.boarding_at for f in self.statics):
+            # Without the schedule only the board button ever books one.
+            self._work_the_boarding(now)
         self._fill_stands(now)
-        if (len(self.flights) + len(self._materialising) >= self._wanted()
-                or now < self._spawn_at):
+        self._retire_at_gate()
+        self._say_the_blend()
+        invented = (sum(1 for f in self.flights if not f.observed)
+                    + len(self._materialising) + self._booked())
+        if invented >= self._wanted() or now < self._spawn_at:
             return
-        flight = self._new_flight(now)
+        flight = self._new_flight(now, category=self._steer())
         if flight is not None:
             self._admit(flight, now)
-        # Spacing between arrivals, scaled by how busy the field is.
-        gap = 55.0 / max(0.25, self.density)
+        # Spacing between one starting and the next: the field's own, scaled
+        # by how busy the pilot asked for it to be.
+        gap = self._movement_gap_s(self.field.kind)
         self._spawn_at = now + self.random.uniform(gap * 0.6, gap * 1.4)
 
     # ------------------------------------------------------------------
@@ -1522,6 +2149,9 @@ class TrafficInjector:
     # appears on the next stand is a conjuring trick, one that appears
     # across the apron is one that was towed there while nobody looked.
     RESTOCK_S = 90.0
+    # How long the first fill waits for the simulator's own aeroplanes to
+    # have been read, when a reader is attached. Two polls and a margin.
+    OBSERVED_GRACE_S = 8.0
     RESTOCK_CLEAR_M = 150.0
 
     def _parked_wanted(self) -> int:
@@ -1534,10 +2164,20 @@ class TrafficInjector:
         """
         if self.ground is None or self.parked <= 0:
             return 0
-        airline_field = self.field.size_rank >= AIRLINE_RANK
+        airline_field = self._airline_field
         stands = len(self.ground.stands_for(airliner=airline_field))
         spare = CONCURRENT_BY_RANK.get(self.field.size_rank, 3) + 2
-        return max(0, min(self.parked, stands - spare))
+        # The field's share of ``traffic.parked``, which is an airport's:
+        # twelve Cessnas stood at Kortrijk.
+        wanted = fleets.parked_for(self.field.kind, self.parked)
+        # Less the real ones standing here in the categories this field
+        # parks: a live airliner at the gate is one fewer to invent, a light
+        # aeroplane on the grass at a big airport is none fewer.
+        mine = livemod.field_categories(self.field.kind)
+        wanted -= sum(1 for one in self._parked_observed.values()
+                      if (one.category or livemod.category_of(
+                          one.callsign, one.type_code)) in mine)
+        return max(0, min(wanted, stands - spare))
 
     def _fill_stands(self, now: float) -> None:
         """Set the apron out, then keep it about as full as it was.
@@ -1549,6 +2189,10 @@ class TrafficInjector:
         """
         if now < self._parked_at:
             return
+        if (self.await_observed and not self._observed_read
+                and self._first_poll is not None
+                and now - self._first_poll < self.OBSERVED_GRACE_S):
+            return                     # the simulator has not said yet
         wanted = self._parked_wanted()
         first = not self._stands_filled
         while len(self.statics) < wanted:
@@ -1595,19 +2239,61 @@ class TrafficInjector:
         flight.doing = None
         flight.commands.clear()
 
-    def _board_static(self, now: float) -> Flight | None:
+    # How many parked aeroplanes may be booked or boarding at once, under
+    # the schedule. A departure asked for while that many are in hand is
+    # one already on its way.
+    MAX_BOARDING = 2
+
+    def _book_boarding(self, now: float) -> bool:
+        """The schedule's departure: book a parked aeroplane to board.
+
+        It boards after ``boarding_lead_s`` -- the minutes in which its model
+        can be changed with every door shut -- for ``boarding_s``, and only
+        then calls for its clearance (:meth:`_work_the_boarding`). True when
+        the departure is in hand, booked now or already; False when there is
+        nobody parked to book, and a departure has to be found another way.
+        """
+        booked = [f for f in self.statics if f.boarding_at]
+        if len(booked) >= self.MAX_BOARDING:
+            return True
+        ready = [f for f in self.statics
+                 if (f.drawn or not self.requires_sim) and not f.boarding_at]
+        if not ready:
+            return bool(booked)
+        flight = self.random.choice(ready)
+        flight.boarding_at = now + self.boarding_lead_s
+        return True
+
+    def _work_the_boarding(self, now: float) -> None:
+        """Start the boarding that is due, and send the boarded off."""
+        for flight in list(self.statics):
+            if not flight.boarding_at:
+                continue
+            if not flight.boarding and now >= flight.boarding_at:
+                flight.boarding = True
+            if flight.boarding and now >= flight.boarding_at + self.boarding_s:
+                boarded = self._board_static(now, flight)
+                if boarded is not None:
+                    self._admit(boarded, now)
+
+    def _board_static(self, now: float,
+                      flight: Flight | None = None) -> Flight | None:
         """A departure from an aeroplane already standing at a gate.
 
         The same aeroplane, in the same simulator object, so nothing
         appears: the one the pilot has been parked beside is the one that
-        calls for its clearance and pushes back.
+        calls for its clearance and pushes back. ``flight`` is the one the
+        schedule booked; without it, one is chosen now.
         """
-        ready = [f for f in self.statics
-                 if f.drawn or not self.requires_sim]
-        if not ready:
-            return None
-        flight = self.random.choice(ready)
+        if flight is None:
+            ready = [f for f in self.statics
+                     if f.drawn or not self.requires_sim]
+            if not ready:
+                return None
+            flight = self.random.choice(ready)
         self.statics.remove(flight)
+        flight.boarding_at = 0.0
+        flight.boarding = False
         flight.static = False
         flight.arriving = False
         flight.runway = self.field.departure_runway
@@ -1717,6 +2403,97 @@ class TrafficInjector:
         self._asked_for.append(flight)
         return flight, ""
 
+    # -- test tools (traffic.debug.triggers) ------------------------------
+
+    # How long a departure boarded by hand stands booked before its boarding
+    # starts: long enough for its model to be swapped with the doors shut.
+    BOARD_NOW_LEAD_S = 10.0
+    # Where an arrival asked for by hand is put: on final, this far out.
+    SHORT_FINAL_NM = 4.0
+
+    def _nearest_to_user(self, options, xy_of):
+        user = self.user
+        if user is None or not user.has_position or self.ground is None:
+            return None
+        ux, uz = self.ground.to_xy(user.latitude, user.longitude)
+        return min(options, key=lambda one: math.hypot(xy_of(one)[0] - ux,
+                                                       xy_of(one)[1] - uz))
+
+    def board_nearest(self, now: float) -> tuple[Flight | None, str]:
+        """Board the parked aeroplane nearest the pilot, now.
+
+        With the schedule it is booked to start boarding in
+        :attr:`BOARD_NOW_LEAD_S` -- that much pre-boarding so its model can
+        change with every door shut -- and departs once it has boarded, as
+        any booked departure does. Without it, it is a departure at once.
+        Returns the flight and "", or None and a reason key.
+        """
+        if self.ground is None:
+            return None, "no_stands"
+        user = self.user
+        if user is None or not user.has_position:
+            return None, "no_position"
+        ready = [f for f in self.statics
+                 if (f.drawn or not self.requires_sim) and not f.boarding]
+        if not ready:
+            return None, "nobody_parked"
+        flight = self._nearest_to_user(
+            ready, lambda f: self.ground.to_xy(f.latitude, f.longitude))
+        flight.by_hand = True
+        if self.schedule:
+            flight.boarding_at = now + min(self.boarding_lead_s,
+                                           self.BOARD_NOW_LEAD_S)
+            log.info("traffic.debug: %s booked by hand, boarding at +%.0f s",
+                     flight.written, flight.boarding_at - now)
+            return flight, ""
+        # Due already: the traffic's own tick sends it, on its own thread,
+        # rather than this one taking it off the apron under the tick.
+        flight.boarding = True
+        flight.boarding_at = now - self.boarding_s - 1.0
+        log.info("traffic.debug: %s boarded by hand", flight.written)
+        return flight, ""
+
+    def arrival_to_nearest_stand(self, now: float) -> tuple[Flight | None, str]:
+        """An arrival on short final, holding the free stand nearest the
+        pilot. Returns the flight and "", or None and a reason key."""
+        if not self.field.ident:
+            return None, "no_field"
+        if self.requires_sim and not self.can_invent:
+            return None, "not_in_sim"
+        if self.ground is None:
+            return None, "no_stands"
+        user = self.user
+        if user is None or not user.has_position:
+            return None, "no_position"
+        if self._threshold(self.field.arrival_runway) is None:
+            return None, "no_runway"
+        occupied = self._on_ground_obstacles() + [
+            (*self.ground.to_xy(lat, lon), 20.0)
+            for lat, lon in self._parked_seen]
+        stand = self.ground.free_stand(
+            True, occupied, self._stands_taken(),
+            choose=lambda options: self._nearest_to_user(
+                options, lambda s: (s.x, s.z)))
+        if stand is None:
+            return None, "no_free_stand"
+        flight = self._new_flight(now, arriving=True)
+        if flight is None:
+            return None, "no_callsign"
+        flight.planned_stand = stand.index
+        if flight.ifr:
+            ahead = [f.distance_nm for f in self.traffic_ahead(True)]
+            flight.distance_nm = max([self.SHORT_FINAL_NM]
+                                     + [d + 3.0 for d in ahead
+                                        if d < self.SHORT_FINAL_NM + 3.0])
+            flight.altitude_ft = (self.field.elevation_ft
+                                  + flight.distance_nm * GLIDE_FT_PER_NM)
+            flight.sequence = len(ahead) + 1
+            self._start_flying(flight)
+        self._asked_for.append(flight)
+        log.info("traffic.debug: %s inbound by hand, %.1f nm out, for stand %s",
+                 flight.written, flight.distance_nm, stand.index)
+        return flight, ""
+
     def _legs_from_the_ramp(self, flight: Flight):
         """The way from the ramp to this runway, for an aeroplane put on it
         by hand: somewhere to be held and somewhere to line up."""
@@ -1753,8 +2530,72 @@ class TrafficInjector:
                    and now - f.held_since > self.DEPARTURE_PATIENCE_S
                    for f in self.flights)
 
+    def _rest_of_taxi(self, flight: Flight, now: float, *,
+                      inbound: bool) -> None:
+        """The second half of a taxi cut in two, said once the aeroplane is
+        at the taxiway it was told to hold short of: to the runway, or to
+        the stand. Read back short, as the first half was."""
+        if not flight.taxi_rest or flight.taxi_split_xy is None \
+                or self.ground is None:
+            return
+        x, z = self.ground.to_xy(flight.latitude, flight.longitude)
+        sx, sz = flight.taxi_split_xy
+        if math.hypot(x - sx, z - sz) > REST_OF_TAXI_M:
+            return
+        rest, flight.taxi_rest, flight.taxi_split_xy = \
+            flight.taxi_rest, [], None
+        position = "GND" if "GND" in self.field.stations else "TWR"
+        if inbound:
+            self._exchange(
+                flight, now, position,
+                controller=lambda c, a, s: c.taxi_to_parking(a, s, rest),
+                pilot_back=lambda p, a, s: p.leaving(a))
+            return
+        runway = self.field.departure_runway or flight.runway
+        self._exchange(
+            flight, now, position,
+            controller=lambda c, a, s: c.taxi_to_runway(a, s, runway, rest),
+            pilot_back=lambda p, a, s: p.taxi(a, runway,
+                                              route=_spell_route(rest)))
+
+    def _retire_at_gate(self) -> None:
+        """Invented flights whose callsign a real one has turned up with go
+        once they are standing at a gate."""
+        if any(s.retire for s in self.statics):
+            for s in self.statics:
+                if s.retire:
+                    self._used_callsigns.discard(s.written)
+            self.statics = [s for s in self.statics if not s.retire]
+
+    def _say_the_blend(self) -> None:
+        """A row whenever the mix changes: the density by category, the real
+        ones in it (live and simulator), the invented ones, and why."""
+        live = {c: 0 for c in livemod.CATEGORIES}
+        sim = {c: 0 for c in livemod.CATEGORIES}
+        for f in self.flights:
+            if f.observed and not f.done:
+                (live if f.source == "live" else sim)[
+                    livemod.flight_category(f)] += 1
+        wanted = self._density_by_category()
+        invented = self._invented_by_category()
+        summary = (tuple(wanted.values()), tuple(live.values()),
+                   tuple(sim.values()), tuple(invented.values()))
+        if summary == getattr(self, "_blend_said", None):
+            return
+        self._blend_said = summary
+        room = livemod.room(wanted, {c: live[c] + sim[c] for c in live})
+        why = ("no real traffic here: all invented" if not any(live.values())
+               and not any(sim.values())
+               else "real traffic fills the density: none invented"
+               if not any(room.values())
+               else "invented fill the difference, by category")
+        decision("blend", airport=self.field.ident, wanted=wanted,
+                 live=live, simulator=sim, invented=invented, room=room,
+                 why=why)
+
     def _new_flight(self, now: float, arriving: bool | None = None,
-                    parked: bool = True) -> Flight | None:
+                    parked: bool = True,
+                    category: str | None = None) -> Flight | None:
         if arriving is None:
             arriving = (self.random.random() < 0.5
                         and len(self._approaching()) < self.MAX_ON_APPROACH)
@@ -1765,14 +2606,20 @@ class TrafficInjector:
                 # one long enough.
                 arriving = False
         if not arriving and parked and self.ground is not None:
-            boarded = self._board_static(now)
-            if boarded is not None:
-                return boarded
+            if self.schedule:
+                # Booked to board; it calls once it has. Nothing to admit
+                # yet -- unless there is nobody parked to book.
+                if self._book_boarding(now):
+                    return None
+            else:
+                boarded = self._board_static(now)
+                if boarded is not None:
+                    return boarded
         # Which kind of aeroplane this is. Normally the field decides -- an
         # airline field carries airlines -- but a pilot can ask for a
         # frequency of registrations instead, which is a great deal easier to
         # follow than a roomful of telephony names you have to know by heart.
-        airline_field = self.field.size_rank >= AIRLINE_RANK
+        airline_field = self._airline_field
         if self.callsigns == "registration":
             # A registration, but still the aeroplane the field would have.
             # Giving Heathrow a frequency full of Cessnas to get its
@@ -1781,12 +2628,15 @@ class TrafficInjector:
             # corporate aeroplane, which every large field really does have.
             made = self._light_flight(airline_fleet=airline_field)
         elif airline_field:
-            made = self._airline_flight()
+            made = self._airline_flight(cargo=(
+                None if category is None else category == livemod.CARGO))
         else:
             made = self._light_flight()
         if made is None:
             return None
         written, type_code, operator = made
+        if self.force_types:
+            type_code = self.random.choice(self.force_types)
 
         language = (operator.speaks_at(self.field.ident) if operator
                     else _local_or_english(self.field.ident))
@@ -1796,7 +2646,7 @@ class TrafficInjector:
         # TAP0214 at Madeira, which no Portuguese controller would say and
         # which the user's own callsign, read correctly, sat next to.
         forms = every_language(written, type_code,
-                               dialect=dialect_for(self.field.ident))
+                               dialect=self.profile.dialect_for(self.field.ident))
         aircraft = Aircraft(forms["en"], type_code, wake_suffix(type_code),
                             callsigns=forms, language=language)
 
@@ -1818,12 +2668,23 @@ class TrafficInjector:
             next_at=now + self.random.uniform(2.0, 12.0),
             ifr=airline_field,
             performance=performance_for(type_code, light=operator is None),
+            category=(livemod.CARGO if operator is not None
+                      and operator.fleet == livemod.FREIGHT
+                      else livemod.AIRLINE if airline_field else livemod.GA),
         )
         if not flight.ifr:
             # A VFR flight squawks the conspicuity code, which is regional, and
             # is given one by nobody: it sets it before it starts the engine.
             flight.squawk = self._phrase(language).vfr_squawk
-            flight.pattern_work = self.random.random() < CIRCUIT_SHARE
+            # A business jet comes and goes; the circuit share is the
+            # field's (wilcoatc.atc.fleet).
+            kind = self.field.kind
+            share = kind.circuit_share if kind is not None else CIRCUIT_SHARE
+            flight.pattern_work = (type_code not in fleets.BUSINESS
+                                   and self.random.random() < share)
+            # And it comes from, or goes to, a field near this one, not Nice.
+            flight.origin = self._nearby_field() or flight.origin
+            flight.destination = self._nearby_field() or flight.destination
             flight.pattern_direction = (
                 "right" if self.random.random() < 0.2 else "left")
         if arriving and not flight.ifr:
@@ -1849,6 +2710,14 @@ class TrafficInjector:
             if not flight.ifr or "DEL" not in self.field.stations:
                 flight.phase = "taxi"
         self._used_callsigns.add(written)
+        if (arriving and self.schedule and self.ground is not None
+                and (flight.operator is not None or flight.ifr)):
+            # Its stand, held from now: where it will turn round decides
+            # which model it is drawn with, so it is drawn right from the
+            # first frame and never swapped at the gate.
+            stand = self._free_stand(airliner=True)
+            if stand is not None:
+                flight.planned_stand = stand.index
         if flight.phase in _FLYING_PHASES:
             self._start_flying(flight)
         elif self.ground is not None and parked:
@@ -1866,7 +2735,8 @@ class TrafficInjector:
 
     # -- the ground, driven ----------------------------------------------
 
-    def _on_ground_obstacles(self, ignore: Flight | None = None
+    def _on_ground_obstacles(self, ignore: Flight | None = None,
+                             with_user: bool = True
                              ) -> list[tuple[float, float, float]]:
         """Everything on the ground, as (x, z, radius) in the layout plane:
         the pilot and every other aeroplane."""
@@ -1875,7 +2745,7 @@ class TrafficInjector:
         if layout is None:
             return found
         user = self.user
-        if user is not None and user.has_position and user.on_ground:
+        if with_user and user is not None and user.has_position                 and user.on_ground:
             found.append((*layout.to_xy(user.latitude, user.longitude), 25.0))
         for other in self.flights + self._materialising + self._asked_for:
             if other is ignore or other.done or not other.positioned:
@@ -1886,15 +2756,48 @@ class TrafficInjector:
                           20.0))
         return found
 
-    def _free_stand(self, airliner: bool, also=()):
-        taken = {f.stand for f in self.flights + self._materialising
-                 + self._asked_for + self.statics
+    def _stands_taken(self) -> set[int]:
+        everyone = (self.flights + self._materialising + self._asked_for
+                    + self.statics)
+        return ({f.stand for f in everyone
                  if f.stand is not None and not f.done}
+                | {f.planned_stand for f in everyone
+                   if f.planned_stand is not None and not f.done})
+
+    def _free_stand(self, airliner: bool, also=(), prefer: int | None = None):
+        """A free stand, chosen at random -- or ``prefer``, the one an
+        arrival has held since it was invented, while it is still free."""
         occupied = self._on_ground_obstacles() + list(also) + [
             (*self.ground.to_xy(lat, lon), 20.0)
             for lat, lon in self._parked_seen]
-        return self.ground.free_stand(
-            airliner, occupied, taken, choose=self.random.choice)
+        taken = self._stands_taken()
+        choose = self.random.choice
+        if prefer is not None:
+            taken.discard(prefer)
+
+            def choose(options):
+                for option in options:
+                    if option.index == prefer:
+                        return option
+                return self.random.choice(options)
+        return self.ground.free_stand(airliner, occupied, taken, choose=choose)
+
+    def ground_occupancy(self, layout: "groundwork.GroundLayout"
+                         ) -> tuple[list[tuple[float, float, float]], set[int]]:
+        """Where every other aeroplane is on ``layout``'s ground, for the
+        pilot's own taxi (:mod:`wilcoatc.atc.taxi`).
+
+        (x, z, radius) for each aeroplane on the ground -- the ones driven
+        here and the ones somebody else put in the simulator -- and the stands
+        handed out to the traffic, which a stand number only means anything
+        on the layout the traffic is using. The pilot is not in it: they are
+        the one being taxied.
+        """
+        if layout is None or self.ground is not layout:
+            return [], set()
+        occupied = self._on_ground_obstacles(with_user=False) + [
+            (*layout.to_xy(lat, lon), 20.0) for lat, lon in self._parked_seen]
+        return occupied, self._stands_taken()
 
     def _park(self, flight: Flight, stand) -> None:
         flight.on_layout = True
@@ -1906,8 +2809,16 @@ class TrafficInjector:
         flight.ground_speed_kt = 0.0
         flight.on_ground = True
 
-    def _airline_flight(self) -> tuple[str, str, Operator] | None:
+    def _airline_flight(self, cargo: bool | None = None
+                        ) -> tuple[str, str, Operator] | None:
+        """An airline's flight. ``cargo`` True or False keeps to freighters or
+        to the others, where real traffic has filled the other category;
+        a field with none of the kind asked for draws from all of them."""
         candidates = roster_for(self.field.ident, self.field.size_rank)
+        if cargo is not None:
+            kept = [c for c in candidates
+                    if (c.operator.fleet == livemod.FREIGHT) == cargo]
+            candidates = kept or candidates
         if not candidates:
             return None
         operator = self.random.choices(
@@ -1944,7 +2855,8 @@ class TrafficInjector:
         prefix = registration_prefix(self.field.ident)
         letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
         needed = 5 - len(prefix.replace("-", ""))
-        fleet = self._airline_fleet() if airline_fleet else LIGHT_FLEET
+        kind = self.field.kind or fleets.classify(self.navdb, self.field.ident)
+        airliners = self._airline_fleet() if airline_fleet else ()
         for _ in range(20):
             if prefix == "N":
                 tail = (f"N{self.random.randint(100, 999)}"
@@ -1954,8 +2866,36 @@ class TrafficInjector:
                 tail = prefix + "".join(
                     self.random.choice(letters) for _ in range(needed))
             if tail not in self._used_callsigns:
-                return tail, self.random.choice(fleet), None
+                type_code = (self.random.choice(airliners) if airliners
+                             else fleets.light_type(kind, self.random))
+                return tail, type_code, None
         return None
+
+    @property
+    def _airline_field(self) -> bool:
+        kind = self.field.kind
+        if kind is None:
+            return self.field.size_rank >= AIRLINE_RANK
+        return kind.airline
+
+    def _nearby_field(self) -> str:
+        """A field a light aeroplane might have come from or be going to:
+        one with a runway, ten to eighty miles away. Empty with none."""
+        if not (self.field.latitude or self.field.longitude):
+            return ""
+        cached = getattr(self, "_nearby_cache", None)
+        if cached is None or cached[0] != self.field.ident:
+            try:
+                found = self.navdb.nearest_airports(
+                    self.field.latitude, self.field.longitude, limit=40,
+                    max_nm=80.0, min_rank=1, require_runway=True)
+            except Exception:
+                found = []
+            names = [a.spoken or a.name for a, d in found
+                     if a.ident != self.field.ident and d >= 10.0]
+            cached = (self.field.ident, names)
+            self._nearby_cache = cached
+        return self.random.choice(cached[1]) if cached[1] else ""
 
     def _airline_fleet(self) -> tuple[str, ...]:
         """The types the operators at this field actually fly.
@@ -1984,12 +2924,15 @@ class TrafficInjector:
     # most this many seconds' worth in one step.
     MAX_STEP_S = 5.0
 
-    # How far ahead of a taxiing aeroplane anything stops it. Seventy metres
-    # is an airliner's length and a half: room to stop behind one without
-    # its tail filling the windscreen.
-    TAXI_LOOK_M = 70.0
-    # An intersection is claimed this far before it is reached.
-    CLAIM_M = 60.0
+    # How far ahead of a taxiing aeroplane anything stops it. Ninety metres
+    # is the braking distance from twenty knots (groundwork.BRAKE_HARD_MS2,
+    # about thirty-five metres) plus an airliner's length and a half: room to
+    # stop behind one without its tail filling the windscreen. It was seventy
+    # when an aeroplane stopped dead the instant it saw something.
+    TAXI_LOOK_M = 90.0
+    # An intersection is claimed this far before it is reached, for the same
+    # reason: what holds an aeroplane short of it has to leave room to brake.
+    CLAIM_M = 95.0
 
     def _taxi(self, flight: Flight, elapsed: float, now: float) -> None:
         """One step along the route, unless something is in the way."""
@@ -2010,9 +2953,22 @@ class TrafficInjector:
             flight.held_since = flight.held_since or now
         elif not why:
             flight.held_since = 0.0
+        if taxi.speed < 0.0:
+            # Starting the route at the speed it already has: an arrival
+            # turning off the runway rolls on to its taxi.
+            taxi.speed = flight.ground_speed_kt / 1.943844
         if why:
             taxi.blocked_since = taxi.blocked_since or now
-            flight.ground_speed_kt = 0.0
+            if taxi.speed > 0.0:
+                # Braking, not stopped dead: something is seen in the look
+                # ahead (TAXI_LOOK_M, CLAIM_M), further than an airliner
+                # takes to stop from taxi speed, and stopping in an instant
+                # was a jolt in the simulator.
+                x, z, heading, speed = groundwork.advance(
+                    taxi, x, z, flight.heading, elapsed, stop=True)
+                flight.latitude, flight.longitude = layout.to_latlon(x, z)
+                flight.heading = heading
+            flight.ground_speed_kt = taxi.speed * 1.943844
             flight.target.intent = why
             self._break_deadlock(flight, now)
             return
@@ -2264,6 +3220,170 @@ class TrafficInjector:
             if holder == flight.written:
                 del self._reserved[node]
 
+    def _prune_reservations(self) -> None:
+        """Drop every reservation whose holder is no longer on the ground.
+
+        A reservation was released by driving past the junction, by parking,
+        or by the deadlock breaker -- never by leaving. A departure lined up
+        and took off still holding its last junction, and the next aeroplane
+        to use it waited for one that no longer existed: Kortrijk's "takeoff,
+        0.0 nm to run" for twenty-eight minutes, and the queue behind it.
+        Reproduced on Kortrijk's own taxi network (OO-BPH waiting on a
+        junction held by OO-XLZ, gone).
+        """
+        if not self._reserved:
+            return
+        on_the_ground = {f.written for f in
+                         self.flights + self._materialising + self._asked_for
+                         if not f.done and f.on_ground}
+        for node, holder in list(self._reserved.items()):
+            if holder not in on_the_ground:
+                del self._reserved[node]
+
+    # -- the watchdog ---------------------------------------------------
+
+    # How long an aeroplane may stand still where it should be moving before
+    # it is stuck: on a runway, on a taxiway, in the air. The figures asked
+    # for after Kortrijk -- longer than any stop this program's own traffic
+    # makes there on purpose, which is all they have to be.
+    STUCK_AFTER_S = {"runway": 20.0, "taxiway": 60.0, "air": 30.0}
+    # Standing still on purpose: told to, or waiting its turn.
+    _WAITING_ON_PURPOSE = frozenset({"holding short", "lined up",
+                                     "holding position", "parked"})
+    _AIRBORNE_PHASES = frozenset({"takeoff", "departed", "go_around",
+                                  "inbound", "joining", "final"}) \
+        | _CIRCUIT_PHASES
+    # Moved: a metre on the ground, ten feet up or down.
+    STILL_M = 1.0
+    STILL_FT = 10.0
+
+    def _where_moving(self, flight: Flight) -> str:
+        """"runway", "taxiway" or "air" for an aeroplane in a phase in which
+        it should be moving, or "" for one that may stand still."""
+        if flight.done or flight.observed or flight.static:
+            return ""
+        if not flight.on_ground:
+            return "air" if flight.phase in self._AIRBORNE_PHASES else ""
+        if flight.taxi is not None and flight.phase in (
+                "taxi", "ready", "taxi_in", "takeoff", "lineup", "landed"):
+            on_runway = (self.ground is not None
+                         and self._on_runway_itself(flight))
+            return "runway" if on_runway else "taxiway"
+        if flight.phase in ("takeoff", "landed"):
+            return "runway"
+        return ""
+
+    def _queued(self, flight: Flight, now: float) -> bool:
+        """Waiting for somebody who is themselves getting on with it -- the
+        aeroplane in front, or the one holding the junction ahead -- which
+        is a queue and not a fault. Two that have both stood still for the
+        whole limit are waiting on each other, and that is.
+
+        Measured at Madeira: an arrival taxiing in held for a junction
+        another of ours had reserved was taken away as stuck while the
+        holder was simply waiting its own turn.
+        """
+        if flight.taxi is None or self.ground is None:
+            return False
+        x, z = self.ground.to_xy(flight.latitude, flight.longitude)
+        ahead = self._in_the_way(flight, x, z)
+        if ahead is not None and not isinstance(ahead, Flight):
+            return True                     # the pilot, or the simulator's
+        waiting_on = [ahead] if isinstance(ahead, Flight) else []
+        taxi = flight.taxi
+        holders = {holder for node, holder in self._reserved.items()
+                   if holder != flight.written and node in taxi.nodes[taxi.index:]}
+        waiting_on += [f for f in self.flights if f.written in holders]
+        limit = min(self.STUCK_AFTER_S.values())
+        return any(not other.stuck and not other.done
+                   and now - (other.still_since or now) < limit
+                   for other in waiting_on)
+
+    def _watchdog(self, now: float) -> None:
+        """Find what has stopped where it should be moving, and deal with it.
+
+        The safety net, not the fix: whatever froze an aeroplane is a bug to
+        be found, and this is what keeps the frequency working until it is.
+        Stuck for ``STUCK_AFTER_S`` it is flagged -- out of the controller's
+        picture from then on -- and given one recovery; still stuck after
+        another as long, it is taken out of the traffic, and so out of the
+        simulator, with a ``traffic_stuck`` row saying which, where, in
+        what phase and why.
+        """
+        for flight in self.flights:
+            where = self._where_moving(flight)
+            here = (flight.latitude, flight.longitude, flight.altitude_ft)
+            if (not where or flight.target.intent in self._WAITING_ON_PURPOSE
+                    or self._queued(flight, now)):
+                flight.still_at, flight.still_since = here, now
+                flight.stuck = flight.recovered = False
+                continue
+            if flight.still_at is None or self._moved(flight.still_at, here):
+                flight.still_at, flight.still_since = here, now
+                if flight.stuck:
+                    log.info("traffic: %s is moving again", flight.written)
+                flight.stuck = flight.recovered = False
+                continue
+            still = now - flight.still_since
+            if still < self.STUCK_AFTER_S[where]:
+                continue
+            if not flight.recovered:
+                flight.stuck = True
+                flight.recovered = True
+                self._say_stuck(flight, where, still, "retry")
+                self._recover(flight)
+                flight.still_since = now
+                continue
+            self._say_stuck(flight, where, still, "removed")
+            flight.done = True
+            self._release_all(flight)
+            if where == "runway":
+                # Whatever it had booked the runway for is not happening.
+                self.runway_free_at = min(self.runway_free_at, now)
+
+    def _moved(self, was: tuple, here: tuple) -> bool:
+        north_m = (here[0] - was[0]) * 111_320.0
+        east_m = ((here[1] - was[1]) * 111_320.0
+                  * math.cos(math.radians(here[0])))
+        return (math.hypot(north_m, east_m) > self.STILL_M
+                or abs(here[2] - was[2]) > self.STILL_FT)
+
+    def _recover(self, flight: Flight) -> None:
+        """One attempt to get it going: nothing reserved in its name, the
+        route's wait forgotten, back in the flight model if it is flying,
+        and drawn again from scratch in case the simulator lost it."""
+        self._release_all(flight)
+        if flight.taxi is not None:
+            flight.taxi.blocked_since = None
+        flight.target.hold = False
+        if (flight.phase in _FLYING_PHASES and flight.taxi is None
+                and not flight.airborne_model):
+            self._start_flying(flight)
+        flight.redraw = True
+
+    def _say_stuck(self, flight: Flight, where: str, still: float,
+                   action: str) -> None:
+        if where == "runway":
+            place = f"runway {flight.runway}".strip()
+        elif where == "air":
+            place = f"in the air, {flight.altitude_ft:.0f} ft"
+        else:
+            place = "taxiway"
+        why = flight.target.intent or "not moving"
+        holders = sorted({holder for node, holder in self._reserved.items()
+                          if holder != flight.written and flight.taxi is not None
+                          and node in flight.taxi.nodes[flight.taxi.index:]})
+        if holders:
+            why += f" (route held by {', '.join(holders)})"
+        decision("traffic_stuck", callsign=flight.written, phase=flight.phase,
+                 where=place, latitude=round(flight.latitude, 5),
+                 longitude=round(flight.longitude, 5),
+                 altitude_ft=round(flight.altitude_ft), still_s=round(still),
+                 why=why, action=action)
+        log.info("traffic: %s stuck %s s %s in phase %s (%s): %s",
+                 flight.written, round(still), place, flight.phase, why,
+                 "trying once more" if action == "retry" else "taken away")
+
     def _arrived(self, flight: Flight, now: float) -> None:
         """At the end of a route: the holding point, the runway, a stand."""
         taxi = flight.taxi
@@ -2340,6 +3460,9 @@ class TrafficInjector:
         # anywhere, not a tick later.
         self._obey(now)
         self._fly(now)
+        self._prune_reservations()
+        self._watchdog(now)
+        self._protect_the_pilot(now)
         for flight in self.flights:
             if flight.done:
                 continue
@@ -2375,7 +3498,9 @@ class TrafficInjector:
         queued alongside. This is the other half: what the aeroplane will
         actually do about it, and when.
         """
-        command = Command(kind=kind, at=at, values=values)
+        command = Command(kind=kind, at=at, values=values,
+                          shown=(OWN_DECISIONS.get(kind, "")
+                                 if self.uncontrolled else ""))
         flight.commands.append(command)
         # Only the last few are kept. A strip shows what an aeroplane is
         # doing, not everything it has ever been told.
@@ -2417,6 +3542,14 @@ class TrafficInjector:
             # Released: no longer waiting, and no longer a reason for the
             # tower to hold the arrivals off.
             flight.held_since = 0.0
+        if kind == "touch_and_go" and flight.arriving:
+            # Cleared for the option on base or final: the clearance is used
+            # on the runway, by the touchdown in _work_the_arrival, which is
+            # where a circuit becomes a takeoff. Taken as a takeoff here, it
+            # put an arrival two miles out into a phase nothing on the
+            # arrival side moves on from, and it flew the runway heading for
+            # the rest of the session (Centennial, 26 October: five at once).
+            return
         if kind == "taxi" and flight.on_layout and flight.planned is not None:
             # The taxi clearance has been read back: off the stand and on
             # the way to the holding point.
@@ -2504,6 +3637,13 @@ class TrafficInjector:
         """
         if not self.field.ident:
             return
+        # The parked aeroplanes are taken up only once the pilot's own
+        # position is known: the pilot is in the simulator's list too, and
+        # until they can be recognised by where they are, their own
+        # aeroplane is a parked airliner on a stand -- which, measured, got
+        # its doors opened by this program for the ten seconds it took.
+        user_known = self.user is not None and self.user.has_position
+        self._observed_read = seen is not None and user_known
         known = {f.observed_id: f for f in self.flights if f.observed}
         here: set[int] = set()
         # The ones this program put there itself. They are in the simulator
@@ -2514,20 +3654,60 @@ class TrafficInjector:
                 for f in self.flights + self._materialising + self._asked_for
                 + self.statics
                 if not f.observed}
+        # The live ones this program draws: the simulator reports each of
+        # those back too, under the same callsign, and that copy is ours.
+        live_ours = ({f.written.upper() for f in self.flights
+                      if f.observed and f.source == "live"}
+                     | {one.callsign for one in self._parked_observed.values()
+                        if one.live})
+        seen = [one for one in self._rejoin_the_feed(seen or (), now)
+                if getattr(one, "source", "") == "live"
+                or (one.callsign or "").strip().upper() not in live_ours]
+        # A copy of ours just given back to the feed is no longer ours.
+        ours -= {f.written.upper() for f in self.flights
+                 if f.done and not f.observed}
+        seen = [self._live_pose(one, now)
+                if getattr(one, "source", "") == "live" else one
+                for one in seen]
+        # The live ones the feed hears now: a parked one is kept on its stand
+        # only while it does not (_note_parked).
+        self._live_heard = {one.object_id for one in seen
+                            if getattr(one, "source", "") == "live"}
+        # A real flight with a callsign an invented one already has (same
+        # airline, same number): the invented one finishes what it is doing
+        # and goes at its next gate, and the real one joins once it has --
+        # never two aeroplanes with one callsign, and nobody taken off the
+        # frequency mid-exchange.
+        for one in seen or ():
+            if getattr(one, "source", "") != "live":
+                continue
+            written = (one.callsign or "").strip().upper()
+            if written in ours:
+                for f in (self.flights + self._materialising + self.statics):
+                    if not f.observed and f.written.upper() == written \
+                            and not f.retire:
+                        f.retire = True
+                        decision("blend", event="retire", callsign=written,
+                                 why="the real flight has this callsign")
         # Somebody else's aeroplanes standing on this airport. Not worked,
-        # but in the way of anything this puts on a stand.
-        self._parked_seen = [
-            (one.latitude, one.longitude) for one in (seen or ())
+        # but in the way of anything this puts on a stand -- and on the map,
+        # and handled, because the simulator does nothing for them.
+        standing = [
+            one for one in (seen if user_known else ())
             if getattr(one, "positioned", False) and one.on_ground
             and one.ground_speed_kt < TAXIING_KT
             and (one.callsign or "").strip().upper() not in ours
+            and not self._is_user(one)
             and haversine_nm(self.field.latitude, self.field.longitude,
                              one.latitude, one.longitude) < PARKED_RANGE_NM]
+        self._parked_seen = [(one.latitude, one.longitude) for one in standing]
+        self._note_parked(standing, known, now)
 
         # Nearest first, so a field with more aeroplanes on it than can be
         # worked keeps the ones that are about to use the runway.
         wanted = [one for one in (seen or ())
                   if (one.callsign or "").strip().upper() not in ours
+                  and not self._is_user(one)
                   and self._works_here(one, one.object_id in known)]
         wanted.sort(key=lambda one: haversine_nm(
             self.field.latitude, self.field.longitude,
@@ -2541,6 +3721,16 @@ class TrafficInjector:
                 if flight is None:
                     continue
                 self.flights.append(flight)
+                if flight.source == "live":
+                    # Its first appearance, for logs radio: which real
+                    # aeroplane, from which source, going where.
+                    decision("live_traffic", event="appeared",
+                             callsign=flight.written, type=flight.type_code,
+                             feed=getattr(one, "feed", "") or "",
+                             category=flight.category,
+                             origin=flight.origin,
+                             destination=flight.destination,
+                             on_ground=bool(one.on_ground))
             self._read_observed(flight, one, now)
 
         # Anything that has gone is gone. It landed and taxied out of range,
@@ -2551,6 +3741,298 @@ class TrafficInjector:
                 flight.done = True
         self.flights = [f for f in self.flights if not f.done]
         self.observed_count = sum(1 for f in self.flights if f.observed)
+
+    # -- the live ones on the scenery (atc/live.py) ------------------------
+
+    def _live_pose(self, one, now: float):
+        """A live position, put where the simulator's scenery has it.
+
+        The reports are a receiver's, metres off: a departure on its roll
+        drawn beside the centreline, a taxiing one on the grass, a parked one
+        across two stands, and every one of them at the height of a pressure
+        altitude rather than of the simulator's ground. So:
+
+        - on the runway or its final, aligned with it and within 40 m of the
+          centreline, it is put on the centreline (the pilot's figure,
+          30 Oct 2026);
+        - taxiing, on the nearest taxiway, within 40 m;
+        - parked, on the stand it is on;
+        - on the ground, at the ground's height; in the air, its pressure
+          altitude corrected to the field's QNH, never below the field.
+
+        And an arrival taxiing in near a free stand is rolled onto it
+        (:meth:`_roll_in`), where it then stays.
+        """
+        from dataclasses import replace
+
+        if self.ground is not None:
+            rolled = self._roll_in(one, now)
+            if rolled is not None:
+                return rolled
+        lat, lon, heading = one.latitude, one.longitude, one.heading
+        snapped = ""
+        runway = self._on_a_centreline(lat, lon, heading)
+        if runway is not None:
+            lat, lon, course = runway
+            if one.on_ground:
+                heading = course
+            snapped = "runway"
+        elif one.on_ground and self.ground is not None:
+            if one.ground_speed_kt < livemod.MOVING_KT:
+                x, z = self.ground.to_xy(lat, lon)
+                stand = self.ground.stand_at(x, z)
+                if stand is not None:
+                    lat, lon = self.ground.to_latlon(stand.x, stand.z)
+                    heading, snapped = stand.heading, "stand"
+            else:
+                taxiway = self._on_a_taxiway(lat, lon)
+                if taxiway is not None:
+                    lat, lon = taxiway
+                    snapped = "taxiway"
+        elevation = self.field.elevation_ft
+        if one.on_ground:
+            altitude = elevation
+        else:
+            altitude = max(elevation, self._qnh_altitude(one.altitude_ft))
+        if not one.on_ground and one.hex:
+            self._live_flew.add(one.hex)
+        self.live_snapped[(one.callsign or "").upper()] = snapped
+        return replace(one, latitude=lat, longitude=lon, heading=heading,
+                       altitude_ft=altitude)
+
+    def _qnh_altitude(self, pressure_ft: float) -> float:
+        """A pressure altitude (1013.25) as the altitude above the sea the
+        simulator draws at: about 27 ft a hectopascal near the ground (ISA).
+        Above the transition the difference is nobody's business, and it is
+        not applied above FL180."""
+        weather = self.field.weather
+        qnh = getattr(weather, "qnh_hpa", None) if weather is not None else None
+        if not qnh or pressure_ft > 18000.0:
+            return pressure_ft
+        return pressure_ft + (float(qnh) - 1013.25) * FT_PER_HPA
+
+    def _on_a_centreline(self, lat: float, lon: float, heading: float):
+        """(lat, lon, course) on the centreline of the runway it is lined up
+        with -- on it, or on its final -- when it is within
+        LIVE_CENTRELINE_M of it; else None."""
+        for runway, (lat0, lon0, course) in self.field.thresholds.items():
+            if abs(livemod._wrap(heading - course)) > LIVE_ALIGNED_DEG:
+                continue
+            north = (lat - lat0) * M_PER_DEG
+            east = (lon - lon0) * M_PER_DEG * math.cos(math.radians(lat0))
+            rad = math.radians(course)
+            along = north * math.cos(rad) + east * math.sin(rad)
+            across = -north * math.sin(rad) + east * math.cos(rad)
+            surface = self.field.surfaces.get(runway)
+            length_m = (surface[2] * 1852.0 if surface else LIVE_RUNWAY_M)
+            if not (-LIVE_FINAL_M <= along <= length_m + 300.0):
+                continue
+            if abs(across) > LIVE_CENTRELINE_M:
+                continue
+            north_c, east_c = along * math.cos(rad), along * math.sin(rad)
+            return (lat0 + north_c / M_PER_DEG,
+                    lon0 + east_c / (M_PER_DEG * math.cos(math.radians(lat0))),
+                    course)
+        return None
+
+    def _on_a_taxiway(self, lat: float, lon: float):
+        """The nearest point of the nearest taxiway, within
+        LIVE_TAXIWAY_M; None away from all of them."""
+        layout = self.ground
+        x, z = layout.to_xy(lat, lon)
+        best, found = LIVE_TAXIWAY_M, None
+        for a, others in layout.edges.items():
+            ax, az = layout.xy[a]
+            for b, _length, runway, _label in others:
+                if runway:
+                    continue
+                bx, bz = layout.xy[b]
+                dx, dz = bx - ax, bz - az
+                span = dx * dx + dz * dz
+                u = 0.0 if span <= 0 else max(0.0, min(
+                    1.0, ((x - ax) * dx + (z - az) * dz) / span))
+                px, pz = ax + u * dx, az + u * dz
+                distance = math.hypot(x - px, z - pz)
+                if distance < best:
+                    best, found = distance, (px, pz)
+        return layout.to_latlon(*found) if found is not None else None
+
+    def _roll_in(self, one, now: float):
+        """An arrival taxiing in at taxi speed within 150 m of a free stand
+        ahead of it is rolled onto the stand at a walking pace and stays
+        there (after LocalTC): the real one goes to a gate the scenery may
+        not have where it is, and drawn on the grass beside the stand it
+        would not be parked anywhere. Let go once the feed has heard it stop
+        and then move again -- its next flight -- or after 45 minutes."""
+        from dataclasses import replace
+
+        held = self._live_stands.get(one.object_id)
+        if held is None:
+            if not (one.on_ground and one.hex in self._live_flew
+                    and livemod.MOVING_KT <= one.ground_speed_kt
+                    <= LIVE_TAXI_IN_KT):
+                return None
+            stand = self._stand_ahead(one)
+            if stand is None:
+                return None
+            self.live_snapped[(one.callsign or "").upper()] = "rolled in"
+            held = self._live_stands[one.object_id] = {
+                "stand": stand, "since": now, "at": (one.latitude,
+                                                     one.longitude),
+                "heading": one.heading, "stopped": False}
+            self._live_moving.discard(one.object_id)
+            decision("live_traffic", event="rolled onto a stand",
+                     callsign=one.callsign, stand=stand.index)
+        stand = held["stand"]
+        # Heard stopping, then moving again: its next flight.
+        if one.ground_speed_kt < livemod.MOVING_KT:
+            held["stopped"] = True
+        elif held["stopped"] or now - held["since"] > LIVE_PARKED_S:
+            del self._live_stands[one.object_id]
+            self._live_moving.add(one.object_id)
+            return None
+        layout = self.ground
+        target = layout.to_latlon(stand.x, stand.z)
+        lat, lon = held["at"]
+        x, z = layout.to_xy(lat, lon)
+        tx, tz = stand.x, stand.z
+        left = math.hypot(tx - x, tz - z)
+        step = LIVE_ROLL_MS * max(0.0, now - held.get("moved", now))
+        held["moved"] = now
+        if left <= step or left < 0.5:
+            held["at"] = target
+            return replace(one, latitude=target[0], longitude=target[1],
+                           heading=stand.heading, ground_speed_kt=0.0,
+                           altitude_ft=self.field.elevation_ft)
+        x += (tx - x) / left * step
+        z += (tz - z) / left * step
+        held["at"] = layout.to_latlon(x, z)
+        heading = math.degrees(math.atan2(tx - x, tz - z)) % 360.0
+        return replace(one, latitude=held["at"][0], longitude=held["at"][1],
+                       heading=heading,
+                       ground_speed_kt=LIVE_ROLL_MS / 0.514444,
+                       altitude_ft=self.field.elevation_ft)
+
+    def _stand_ahead(self, one):
+        """A free stand within LIVE_STAND_M, ahead of the aeroplane."""
+        layout = self.ground
+        x, z = layout.to_xy(one.latitude, one.longitude)
+        airliner = livemod.category_of(one.callsign or "",
+                                       one.type_code or "") != livemod.GA
+        taken = {held["stand"].index for held in self._live_stands.values()}
+        taken |= {f.stand for f in self.statics if f.stand is not None}
+        occupied = [layout.to_xy(lat, lon) for lat, lon in self._parked_seen]
+        best, found = LIVE_STAND_M, None
+        for stand in layout.stands_for(airliner=airliner):
+            if stand.index in taken:
+                continue
+            distance = math.hypot(stand.x - x, stand.z - z)
+            if distance > best:
+                continue
+            bearing = math.degrees(math.atan2(stand.x - x, stand.z - z))
+            if abs(livemod._wrap(bearing - one.heading)) > LIVE_AHEAD_DEG:
+                continue
+            if any(math.hypot(stand.x - ox, stand.z - oz) < stand.radius
+                   for ox, oz in occupied):
+                continue
+            best, found = distance, stand
+        return found
+
+    # How close an observed aeroplane has to be to the pilot's own position
+    # to be the pilot. Twenty-five metres: the next stand is forty away.
+    USER_IS_HERE_M = 25.0
+
+    def _is_user(self, one) -> bool:
+        """Whether an observed aeroplane is the pilot's own.
+
+        The simulator reports the user alongside the AI, and the name it
+        reports them under is not always the one the session knows: the
+        reader rebuilds a callsign from the airline and flight number, and
+        a user aircraft with neither answers with its registration. So the
+        pilot is also recognised by where they are, which no name can get
+        wrong -- a parked aeroplane twenty-five metres from the pilot's
+        reference point, on the ground as they are, is the pilot.
+        """
+        user = self.user
+        if user is None or not user.has_position:
+            return False
+        if bool(one.on_ground) != bool(user.on_ground):
+            return False
+        apart_m = haversine_nm(user.latitude, user.longitude,
+                               one.latitude, one.longitude) * 1852.0
+        return apart_m <= self.USER_IS_HERE_M
+
+    def _note_parked(self, standing, known: dict, now: float) -> None:
+        """Keep the parked observed aeroplanes, and when each one stopped.
+
+        One that had a strip a moment ago -- it taxied in and has just
+        stopped -- is an arrival and its turnaround starts now; one found
+        standing there has been there for some unknown while. An aeroplane
+        on a runway is not parked whatever its speed.
+        """
+        here: dict[int, ParkedObserved] = {}
+        for one in standing:
+            if self._on_runway(one):
+                continue
+            kept = self._parked_observed.get(one.object_id)
+            if kept is None:
+                flight = known.get(one.object_id)
+                if flight is not None:
+                    # It had a strip. Stopped on a stand it has parked and
+                    # the strip is finished; stopped anywhere else it is
+                    # holding short, which is the aeroplane the tower is
+                    # about to talk to, and it keeps its strip.
+                    if not self._parked_for_good(flight, one):
+                        continue
+                    flight.done = True
+                kept = ParkedObserved(
+                    object_id=one.object_id,
+                    callsign=(one.callsign or "").strip().upper(),
+                    registration=getattr(one, "registration", "") or "",
+                    type_code=observed_type(one.type_code),
+                    title=getattr(one, "title", "") or "",
+                    since=now if flight is not None else 0.0,
+                    live=getattr(one, "source", "") == "live",
+                    operator=(one.callsign[:3].upper() if livemod.category_of(
+                        one.callsign or "", one.type_code or "") in (
+                            livemod.AIRLINE, livemod.CARGO) else ""),
+                    parked_at=now,
+                    category=(getattr(one, "category", "") or
+                              livemod.category_of(one.callsign or "",
+                                                  one.type_code or "")))
+            kept.latitude = one.latitude
+            kept.longitude = one.longitude
+            kept.heading = one.heading
+            kept.altitude_ft = one.altitude_ft
+            here[one.object_id] = kept
+        # A live one the feed no longer hears is still at its gate: a parked
+        # aeroplane's transponder goes off. It stays its 45 minutes, unless
+        # the feed hears it moving again (_live_pose lets it go).
+        heard = getattr(self, "_live_heard", set())
+        for object_id, kept in self._parked_observed.items():
+            if (kept.live and object_id not in here
+                    and object_id not in heard
+                    and object_id not in self._live_moving
+                    and now - kept.parked_at < LIVE_PARKED_S):
+                here[object_id] = kept
+        self._parked_observed = here
+
+    def _parked_for_good(self, flight: Flight, one) -> bool:
+        """Whether a worked aeroplane that has stopped has parked.
+
+        With the airport's stands to hand, standing on one is the answer.
+        Without them, an arrival that has taxied in and stopped has parked
+        and a departure that has stopped is holding somewhere.
+        """
+        if self.ground is not None:
+            x, z = self.ground.to_xy(one.latitude, one.longitude)
+            return self.ground.stand_at(x, z) is not None
+        return flight.phase in ("taxi_in", "landed")
+
+    @property
+    def parked_observed(self) -> list["ParkedObserved"]:
+        """Somebody else's aeroplanes standing on this airport."""
+        return list(self._parked_observed.values())
 
     def _works_here(self, one, known: bool = False) -> bool:
         """Whether an observed aeroplane is this airport's business.
@@ -2594,22 +4076,32 @@ class TrafficInjector:
         if not written:
             return None
         type_code = observed_type(one.type_code)
-        operator = by_icao(written[:3]) if len(written) > 3 else None
+        operator = by_icao(written[:3]) if (
+            len(written) > 3 and written[:3].isalpha()
+            and written[3].isdigit()) else None
         language = (operator.speaks_at(self.field.ident) if operator
                     else reply_language(self.field.ident, "en"))
         forms = every_language(written, type_code,
-                               dialect=dialect_for(self.field.ident))
+                               dialect=self.profile.dialect_for(self.field.ident))
         aircraft = Aircraft(forms["en"], type_code, wake_suffix(type_code),
                             callsigns=forms)
         # Reserved, so the invented traffic never hands the same number to a
         # second aeroplane while this one is on the field.
         self._used_callsigns.add(written)
+        source = getattr(one, "source", "") or "simulator"
+        category = (getattr(one, "category", "")
+                    or livemod.category_of(written, type_code,
+                                           operator=operator))
         return Flight(
             written=written, type_code=type_code, aircraft=aircraft,
             language=language, operator=operator, arriving=not one.on_ground,
             ifr=True, observed=True, observed_id=one.object_id,
             runway=self.field.arrival_runway or self.field.departure_runway,
-            phase="taxi", step=0,
+            phase="taxi", step=0, source=source, category=category,
+            origin=getattr(one, "origin", "") or "",
+            destination=getattr(one, "destination", "") or "",
+            hex=getattr(one, "hex", "") or "",
+            squawk=_squawk(getattr(one, "squawk", "")),
         )
 
     def _read_observed(self, flight: Flight, one, now: float) -> None:
@@ -2627,8 +4119,19 @@ class TrafficInjector:
             self.field.latitude, self.field.longitude,
             one.latitude, one.longitude)
 
+        # A live one is drawn 30 s behind the feed; what it is doing is read
+        # off where the real one is now (its lead), so each thing it does is
+        # said before it is seen to do it -- a takeoff clearance half a
+        # minute before the roll. Held by our tower, it is doing nothing.
+        lead = getattr(one, "lead", None) or one
+        flight.lead_at = (lead.latitude, lead.longitude)
+        lead_to_run = to_run if lead is one else self._final_distance(lead)
+        flight.lead_distance_nm = (lead_to_run if lead_to_run is not None
+                                   else flight.distance_nm)
         was = flight.phase
-        flight.phase = self._observed_phase(flight, one, to_run)
+        if flight.live_held:
+            return
+        flight.phase = self._observed_phase(flight, lead, lead_to_run)
         flight.arriving = flight.phase in ("inbound", "final")
         if flight.phase != was:
             # A phase change is the only thing worth saying anything about, and
@@ -2651,10 +4154,23 @@ class TrafficInjector:
         difference between a base leg and a long final.
         """
         if one.on_ground:
-            if one.ground_speed_kt >= ROLLING_KT and self._on_runway(one):
-                return "takeoff"
+            # An arrival first: it rolls down the runway at the same speed
+            # a departure does, and the one thing that tells them apart is
+            # that it was on final a moment ago.
             if flight.phase in ("final", "landed", "taxi_in"):
                 return "landed" if one.ground_speed_kt >= ROLLING_KT else "taxi_in"
+            if one.ground_speed_kt >= ROLLING_KT and self._on_runway(one):
+                return "takeoff"
+            if self._lined_up(one) and flight.phase in (
+                    "taxi", "holding", "lineup", "pushback"):
+                return "lineup"
+            track = getattr(one, "track", None)
+            if (track is not None and flight.phase in ("holding", "pushback")
+                    and TAXIING_KT <= one.ground_speed_kt < PUSHBACK_KT
+                    and abs((track - one.heading + 540.0) % 360.0 - 180.0)
+                    > PUSHBACK_DEG):
+                # Moving tail first off a stand: being pushed back.
+                return "pushback"
             if one.ground_speed_kt >= TAXIING_KT:
                 return "taxi"
             return "holding"
@@ -2751,9 +4267,85 @@ class TrafficInjector:
         clearance over an occupied runway is not.
         """
         flight.next_at = now + 3.0
+        if flight.live_held:
+            return
+        # A live departure's cut taxi: the rest when it is drawn there.
+        self._rest_of_taxi(flight, now, inbound=False)
         if flight.step:
             return
         phase = flight.phase
+        runway_out = self.field.departure_runway or flight.runway
+
+        # The departure, as it happens -- for a live one half a minute
+        # before it is seen to happen: its clearance and its push, its taxi
+        # on the airport's own taxiways, its line-up and its takeoff. Nothing
+        # it does is unannounced, and nothing announced is not then done,
+        # because each is read off what the real one has just done.
+        if phase == "pushback":
+            flight.step = 1
+            if ("DEL" in self.field.stations and flight.destination
+                    and not flight.cleared):
+                flight.cleared = True
+                self._exchange(
+                    flight, now, "DEL",
+                    pilot_first=lambda p, a, s: p.request_clearance(
+                        a, s, flight.destination),
+                    controller=lambda c, a, s: c.ifr_clearance(
+                        a, s, flight.destination,
+                        initial_altitude=INITIAL_CLIMB_FT,
+                        squawk=flight.squawk,
+                        departure_freq=self._freq("DEP")),
+                    pilot_back=lambda p, a, s: p.clearance(
+                        a, flight.destination, flight.squawk,
+                        INITIAL_CLIMB_FT),
+                )
+            self._exchange(
+                flight, now, "GND" if "GND" in self.field.stations else "TWR",
+                controller=lambda c, a, s: c.pushback_approved(a),
+                pilot_back=lambda p, a, s: p.wilco(a),
+            )
+            return
+
+        if phase == "taxi" and not flight.arriving:
+            flight.step = 1
+            route: list[str] = []
+            hold_at = ""
+            if self.ground is not None:
+                planned = self._plan_departure(flight)
+                if planned is not None:
+                    route, hold_at, flight.taxi_rest, flight.taxi_split_xy = \
+                        _said_route(self.ground, planned[0], self.field.ident,
+                                    inbound=False)
+            self._exchange(
+                flight, now, "GND" if "GND" in self.field.stations else "TWR",
+                controller=lambda c, a, s: c.taxi_to_runway(
+                    a, s, runway_out, route, hold_short_taxiway=hold_at),
+                pilot_back=lambda p, a, s: p.taxi(
+                    a, runway_out, route=_spell_route(route),
+                    hold_short_taxiway=_spell_route([hold_at]) if hold_at
+                    else ""),
+            )
+            return
+
+        if phase == "lineup":
+            flight.step = 1
+            self._exchange(
+                flight, now, "TWR",
+                controller=lambda c, a, s: c.line_up_and_wait(
+                    a, runway_out, station=s),
+                pilot_back=lambda p, a, s: p.line_up(a, runway_out),
+            )
+            return
+
+        if phase == "takeoff":
+            flight.step = 1
+            self._exchange(
+                flight, now, "TWR",
+                controller=lambda c, a, s: c.cleared_for_takeoff(
+                    a, runway_out, self.field.weather, station=s),
+                pilot_back=lambda p, a, s: p.takeoff(a, runway_out),
+            )
+            return
 
         if phase == "inbound":
             flight.step = 1
@@ -2766,7 +4358,7 @@ class TrafficInjector:
             return
 
         if phase == "final":
-            if flight.distance_nm > LANDING_CLEARANCE_NM:
+            if flight.lead_distance_nm > LANDING_CLEARANCE_NM:
                 return                     # not yet close enough to clear
             if self.runway_occupied(now):
                 return                     # and not while somebody is on it
@@ -2802,7 +4394,171 @@ class TrafficInjector:
                 controller=lambda c, a, s: c.handoff(a, station, mhz),
                 pilot_back=lambda p, a, s: p.contact(a, station, mhz),
             )
+            if flight.source == "live":
+                # And where it goes, which it then does: to the ramp, the
+                # stand being the one it rolls onto.
+                self._exchange(
+                    flight, now, "GND",
+                    controller=lambda c, a, s: c.taxi_to_parking(a, s, []),
+                    pilot_back=lambda p, a, s: p.leaving(a),
+                )
             return
+
+    def _protect_the_pilot(self, now: float) -> None:
+        """The pilot's runway, against the real aeroplanes (occupancy):
+
+        - with the pilot on the runway, a live arrival on short final for it
+          is sent around -- taken over and flown round by us, the real one's
+          positions ignored from then on;
+        - with the pilot on the runway or on a final inside 4 nm, a live
+          departure about to go onto it is held short, and let go once the
+          pilot is clear, one at a time, 90 s apart;
+        - on the ground, a live aeroplane taxiing at the pilot stops and
+          gives way.
+
+        Said on the tower's frequency, where the pilot hears it only when
+        tuned there, and a hold short at most once a minute. After LocalTC's
+        traffic manager, which does the same three things.
+        """
+        hold = self.hold_live
+        user = self.user
+        on_runway = self._user_on_runway()
+        to_run = self._user_on_final()
+        busy = on_runway or (to_run is not None and to_run <= PILOT_FINAL_NM)
+        for flight in list(self.flights):
+            if flight.done or not flight.observed or flight.source != "live":
+                continue
+            # Arrivals: one about to land on top of the pilot goes around.
+            if (flight.phase == "final" and not flight.on_ground
+                    and flight.distance_nm <= LIVE_GO_AROUND_NM
+                    and (on_runway or (to_run is not None
+                                       and flight.distance_nm - to_run
+                                       < LIVE_BEHIND_NM
+                                       and flight.distance_nm > to_run))):
+                self._take_over_for_a_go_around(flight, now)
+                continue
+            if hold is None:
+                continue
+            # Departures: kept off the pilot's runway.
+            if (flight.live_held != "give way"
+                    and flight.phase in ("lineup", "takeoff")
+                    and not flight.live_held and busy
+                    and not self._on_runway(flight)):
+                flight.live_held = "runway"
+                hold(flight.hex, True)
+                decision("live_traffic", event="held short",
+                         callsign=flight.written,
+                         why="the pilot is on the runway or its final")
+                if now - self._hold_short_said >= HOLD_SHORT_EVERY_S:
+                    self._hold_short_said = now
+                    self._exchange(
+                        flight, now, "TWR",
+                        controller=lambda c, a, s, f=flight:
+                        c.hold_short_instruction(
+                            a, self.field.departure_runway or f.runway),
+                        pilot_back=lambda p, a, s: p.wilco(a),
+                    )
+            # On the ground: give way to the pilot taxiing.
+            ahead = self._pilot_ahead(flight)
+            if ahead and not flight.live_held:
+                flight.live_held = "give way"
+                hold(flight.hex, True)
+            elif flight.live_held == "give way" and not ahead:
+                flight.live_held = ""
+                hold(flight.hex, False)
+        # Let the held departures go once the pilot is clear: one at a time.
+        if hold is not None and not busy \
+                and now - self._last_release >= RELEASE_GAP_S:
+            waiting = [f for f in self.flights
+                       if f.live_held == "runway" and not f.done]
+            if waiting:
+                first = waiting[0]
+                first.live_held = ""
+                first.step = 0                 # its line-up is said now
+                hold(first.hex, False)
+                self._last_release = now
+                decision("live_traffic", event="released",
+                         callsign=first.written, why="the pilot is clear")
+
+    def _rejoin_the_feed(self, seen, now: float) -> list:
+        """The live arrivals we sent around and flew, given back to the feed
+        once ours is parked (the pilot's rule, 30 Oct 2026): not before --
+        the real one landed half a circuit ahead of ours -- and not never.
+        Ours goes the moment the feed hears the real one; a real one the
+        feed does not hear (a transponder off at the gate) leaves ours on
+        the stand, as one of the parked, for LIVE_PARKED_S. Returns ``seen``
+        without the feed's copies still being ignored."""
+        for object_id, ours in list(self._flown_for.items()):
+            if object_id in self._parked_since:
+                continue
+            if ours.done or ours.static or ours.parked_at:
+                self._parked_since[object_id] = now
+        heard = {one.object_id for one in seen
+                 if getattr(one, "source", "") == "live"}
+        for object_id, since in list(self._parked_since.items()):
+            ours = self._flown_for.get(object_id)
+            if object_id in heard:
+                if ours is not None:
+                    ours.done = True
+                    self._used_callsigns.discard(ours.written)
+                    if ours in self.statics:
+                        self.statics.remove(ours)
+                    decision("live_traffic", event="rejoined the feed",
+                             callsign=ours.written,
+                             why="ours is parked and the real one is heard")
+                self._taken_over.discard(object_id)
+            elif now - since > LIVE_PARKED_S:
+                # Never heard again: ours stays, an ordinary parked one.
+                self._taken_over.discard(object_id)
+            else:
+                continue
+            self._flown_for.pop(object_id, None)
+            self._parked_since.pop(object_id, None)
+        return [one for one in seen if one.object_id not in self._taken_over]
+
+    def _pilot_ahead(self, flight: Flight) -> bool:
+        """The pilot on the ground, close in front of a live one taxiing."""
+        user = self.user
+        if (user is None or not user.has_position or not user.on_ground
+                or not flight.on_ground
+                or flight.ground_speed_kt < TAXIING_KT
+                and flight.live_held != "give way"):
+            return False
+        distance_m = haversine_nm(flight.latitude, flight.longitude,
+                                  user.latitude, user.longitude) * 1852.0
+        if distance_m > GIVE_WAY_M:
+            return False
+        bearing = bearing_deg(flight.latitude, flight.longitude,
+                              user.latitude, user.longitude)
+        return abs((bearing - flight.heading + 540.0) % 360.0
+                   - 180.0) <= GIVE_WAY_DEG
+
+    def _take_over_for_a_go_around(self, flight: Flight, now: float) -> None:
+        """A live arrival sent around: the real one will land, so from here
+        it is ours, flown round by the flight model like any invented one,
+        and the feed's copy of it is ignored -- until ours has landed and
+        is parked, where the real one already is (_rejoin_the_feed)."""
+        self._taken_over.add(flight.observed_id)
+        self._flown_for[flight.observed_id] = flight
+        flight.observed = False
+        flight.source = "taken over"
+        flight.arriving = True
+        flight.runway = self.field.arrival_runway or flight.runway
+        flight.performance = performance_for(
+            flight.type_code, light=livemod.flight_category(flight)
+            == livemod.GA)
+        flight.airborne_model = True
+        decision("live_traffic", event="sent around", callsign=flight.written,
+                 why="the pilot is on the runway", to_run_nm=round(
+                     flight.distance_nm, 1))
+        reason = runway_traffic(flight.language)
+        self._exchange(
+            flight, now, "TWR",
+            controller=lambda c, a, s: c.go_around(a, reason=reason),
+            pilot_back=lambda p, a, s: p.going_around(a),
+            command=("go_around", {}),
+            urgent=True,
+        )
 
     def set_user(self, user: "UserAircraft | None") -> None:
         """Tell the traffic where the person flying actually is.
@@ -3090,15 +4846,21 @@ class TrafficInjector:
         final.
         """
         found = [f for f in self.flights
-                 if f is not ignore and not f.done and f.arriving
-                 and f.phase in ("inbound", "final", "base")]
-        # Only when they are on final. The stand-in was added whatever the
-        # user was doing, at a distance of nought when they were not on
-        # final -- so a pilot parked at the gate was an arrival at the
-        # threshold, every departure was held for them for ever, and nothing
-        # at the field ever took off.
-        if self._user_on_final() is not None:
-            user = self._user_flight()
+                 if f is not ignore and not f.done and not f.stuck
+                 and f.arriving and f.phase in ("inbound", "final", "base")]
+        # Only when they are on final, or in the circuit close to turning on
+        # to it. The stand-in was added whatever the user was doing, at a
+        # distance of nought when they were not on final -- so a pilot parked
+        # at the gate was an arrival at the threshold, every departure was
+        # held for them for ever, and nothing at the field ever took off.
+        # On base or late downwind they are at the distance they still have
+        # to fly, which is what makes the AI behind them extend rather than
+        # turn in front of them (atc.circuit).
+        to_run = self._user_on_final()
+        if to_run is None:
+            to_run = self._user_in_circuit()
+        if to_run is not None:
+            user = self._user_flight(to_run)
             if user is not None:
                 found.append(user)
         found.sort(key=lambda f: f.distance_nm)
@@ -3198,13 +4960,54 @@ class TrafficInjector:
             return self._user_flight()
         return None
 
-    def _user_flight(self) -> Flight | None:
+    # How far round the circuit the person flying can be and still count as
+    # the next to land: base, or late on the downwind.
+    USER_IN_CIRCUIT_NM = 4.0
+
+    def _user_in_circuit(self) -> float | None:
+        """What the person flying still has to fly to the threshold, when
+        they are on base or late downwind; None anywhere else."""
+        user = self.user
+        if user is None or user.on_ground or not user.has_position:
+            return None
+        runway = self.field.arrival_runway or self.field.departure_runway
+        if not runway or not self.field.ident:
+            return None
+        from .circuit import circuit_for
+
+        published = self.navdb.circuit_data(self.field.ident, runway)
+        side = published.side if published is not None and published.side else "left"
+        circuit = circuit_for(self.navdb, self.field.ident, runway, side=side)
+        if circuit is None:
+            return None
+        here = circuit.locate_at(user.latitude, user.longitude,
+                                 user.altitude_ft, user.heading)
+        if here.leg not in ("base", "downwind", "final"):
+            return None
+        if here.to_go_nm > self.USER_IN_CIRCUIT_NM:
+            return None
+        return here.to_go_nm
+
+    def _user_ahead_of(self, flight: Flight) -> str:
+        """The person flying, said as traffic, when they are ahead of this
+        aeroplane in the circuit at a field nobody works -- the "number two,
+        following the Cessna" an AI pilot announces. "" otherwise."""
+        if self.field.stations.get("TWR") is not None or self.user is None:
+            return ""
+        to_run = self._user_on_final()
+        if to_run is None:
+            to_run = self._user_in_circuit()
+        if to_run is None or to_run >= flight.distance_nm:
+            return ""
+        return article(make_of(self.user.type_code), flight.language)
+
+    def _user_flight(self, distance_nm: float | None = None) -> Flight | None:
         """The person flying, in the shape the rest of this module reads."""
         user = self.user
         if user is None:
             return None
         forms = every_language(user.callsign or "UNKNOWN", user.type_code,
-                               dialect=dialect_for(self.field.ident))
+                               dialect=self.profile.dialect_for(self.field.ident))
         aircraft = Aircraft(forms["en"], user.type_code,
                             wake_suffix(user.type_code), callsigns=forms)
         return Flight(
@@ -3213,10 +5016,23 @@ class TrafficInjector:
             arriving=True, runway=self.field.arrival_runway,
             phase="final", latitude=user.latitude, longitude=user.longitude,
             altitude_ft=user.altitude_ft, heading=user.heading,
-            distance_nm=self._user_on_final() or 0.0,
+            distance_nm=(distance_nm if distance_nm is not None
+                         else self._user_on_final() or 0.0),
         )
 
     # -- departures ----------------------------------------------------
+
+    # How long a departure with a door still open waits before looking again.
+    PUSH_RETRY_S = 10.0
+
+    def _may_push(self, flight: Flight) -> bool:
+        """Whether this departure's doors are shut, as far as anybody knows."""
+        if self.can_push is None:
+            return True
+        try:
+            return bool(self.can_push(flight.written))
+        except Exception:
+            return True
 
     def _advance_departure(self, flight: Flight, now: float) -> None:
         phase = flight.phase
@@ -3238,6 +5054,10 @@ class TrafficInjector:
             flight.next_at = now + self.random.uniform(25.0, 70.0)
             return
 
+        if phase == "taxi" and not self._may_push(flight):
+            flight.next_at = now + self.PUSH_RETRY_S
+            return
+
         if phase == "taxi" and flight.on_layout:
             planned = self._plan_departure(flight)
             if planned is None:
@@ -3251,7 +5071,10 @@ class TrafficInjector:
                 flight.next_at = now + 10.0
                 return
             flight.planned = planned
-            route = planned[0].names or self._taxi_route()
+            route, hold_at, rest, where = _said_route(
+                self.ground, planned[0], self.field.ident, inbound=False)
+            route = route or self._taxi_route()
+            flight.taxi_rest, flight.taxi_split_xy = rest, where
             if flight.ifr:
                 first = lambda p, a, s: p.request_taxi(a, s)
             elif flight.pattern_work:
@@ -3263,9 +5086,13 @@ class TrafficInjector:
                 flight, now, "GND",
                 pilot_first=first,
                 controller=lambda c, a, s: c.taxi_to_runway(
-                    a, s, flight.runway, route),
+                    a, s, flight.runway, route, hold_short_taxiway=hold_at),
+                # The readback is the taxiways, where it holds and the
+                # runway: never the whole clearance said back.
                 pilot_back=lambda p, a, s: p.taxi(
-                    a, flight.runway, route=_spell_route(route)),
+                    a, flight.runway, route=_spell_route(route),
+                    hold_short_taxiway=_spell_route([hold_at]) if hold_at
+                    else ""),
                 command=("taxi", {"runway": flight.runway}),
             )
             flight.phase = "ready"
@@ -3275,7 +5102,9 @@ class TrafficInjector:
         if phase == "ready" and flight.on_layout and (
                 flight.taxi is not None or flight.planned is not None):
             # Still taxiing. It asks for the runway when it is at the
-            # holding point, not when a timer says it should be.
+            # holding point, not when a timer says it should be -- and is
+            # given the rest of a cut taxi at the taxiway it held short of.
+            self._rest_of_taxi(flight, now, inbound=False)
             flight.next_at = now + 2.0
             return
 
@@ -3306,10 +5135,13 @@ class TrafficInjector:
 
         if phase == "ready":
             # At the holding point and asking for the runway. What happens
-            # next is not this flight's decision.
-            self._say(flight, now, "TWR", from_pilot=True,
-                      make=lambda p, a, s: p.ready_for_departure(
-                          a, flight.runway, s))
+            # next is not this flight's decision. At an AFIS the call opens
+            # the exchange that gives the runway (``_afis_exchange``), so it
+            # is not made twice.
+            if not (self.uncontrolled and self.field.afis is not None):
+                self._say(flight, now, "TWR", from_pilot=True,
+                          make=lambda p, a, s: p.ready_for_departure(
+                              a, flight.runway, s))
             flight.phase = "waiting"
             flight.next_at = now + self.random.uniform(4.0, 12.0)
             return
@@ -3845,16 +5677,20 @@ class TrafficInjector:
 
         if phase == "taxi_in" and flight.on_layout:
             if flight.step < 10:
-                route = (flight.taxi.names if flight.taxi is not None
-                         else []) or self._taxi_route()
+                route, hold_at, rest, where = _said_route(
+                    self.ground, flight.taxi, self.field.ident, inbound=True)
+                route = route or self._taxi_route()
+                flight.taxi_rest, flight.taxi_split_xy = rest, where
                 self._exchange(
                     flight, now,
                     "GND" if "GND" in self.field.stations else "TWR",
-                    controller=lambda c, a, s: c.taxi_to_parking(a, s, route),
+                    controller=lambda c, a, s: c.taxi_to_parking(
+                        a, s, route, hold_short_taxiway=hold_at),
                     pilot_back=lambda p, a, s: p.leaving(a),
                     command=("taxi_in", {}),
                 )
                 flight.step = 10
+            self._rest_of_taxi(flight, now, inbound=True)
             # Parked a while, and then off the radio -- the passengers are off
             # and it is nobody's business any more. It stays on its stand as
             # one of the parked aeroplanes if the apron has room for it, and
@@ -3898,7 +5734,7 @@ class TrafficInjector:
             return
         threshold, heading = runway
         stand = self._free_stand(airliner=flight.operator is not None
-                                 or flight.ifr)
+                                 or flight.ifr, prefer=flight.planned_stand)
         if stand is None:
             return
         x, z = layout.to_xy(flight.latitude, flight.longitude)
@@ -3917,6 +5753,7 @@ class TrafficInjector:
             return
         flight.on_layout = True
         flight.stand = stand.index
+        flight.planned_stand = None
         flight.taxi = taxi
 
     def _work_the_arrival(self, flight: Flight, now: float) -> None:
@@ -3932,13 +5769,15 @@ class TrafficInjector:
             sequence = ""
             if flight.sequence > 1 and ahead:
                 sequence = self._sequence_text(flight, ahead[-1])
+            following = self._user_ahead_of(flight)
             if flight.pattern_work:
                 # Round again: the option covers the touch-and-go without the
                 # tower having to know which one the pilot has chosen.
                 self._exchange(
                     flight, now, "TWR",
                     pilot_first=lambda p, a, s: p.on_leg(
-                        a, self._phrase(flight.language).leg("base")),
+                        a, self._phrase(flight.language).leg("base"),
+                        following=following),
                     controller=lambda c, a, s: c.cleared_touch_and_go(
                         a, flight.runway, self.field.weather,
                         sequence=sequence, station=s),
@@ -3949,7 +5788,8 @@ class TrafficInjector:
                 self._exchange(
                     flight, now, "TWR",
                     pilot_first=lambda p, a, s: p.on_leg(
-                        a, self._phrase(flight.language).leg("final")),
+                        a, self._phrase(flight.language).leg("final"),
+                        following=following),
                     controller=lambda c, a, s: c.cleared_to_land(
                         a, flight.runway, self.field.weather, station=s,
                         sequence=sequence),
@@ -4000,8 +5840,26 @@ class TrafficInjector:
 
     @property
     def uncontrolled(self) -> bool:
-        """Whether this field is worked by nobody at all."""
-        return not self.field.stations and self.field.advisory is not None
+        """Whether this field has no controller: worked by nobody, on its
+        traffic frequency, or by an information service, which gives
+        information and clears nobody."""
+        return not self.field.stations and (
+            self.field.advisory is not None or self.field.afis is not None)
+
+    @property
+    def _announcing_on(self) -> str:
+        """The position an uncontrolled field's traffic is heard on."""
+        return "INFO" if self.field.afis is not None else "CTAF"
+
+    def _aerodrome_information(self, ident: str) -> Station | None:
+        from . import afis
+
+        for station in self.navdb.stations(ident):
+            if (station.position == "INFO" and station.mhz
+                    and afis.kind_of(self.navdb, station) == afis.AERODROME):
+                return station
+        return None
+
 
     def _exchange(self, flight: Flight, now: float, position: str, *,
                   pilot_first=None, controller=None, pilot_back=None,
@@ -4029,6 +5887,10 @@ class TrafficInjector:
         the aeroplane acts on it whether or not the frequency was clear enough
         for the words to be heard.
         """
+        if self.uncontrolled and self.field.afis is not None:
+            self._afis_exchange(flight, now, pilot_first=pilot_first,
+                                announce=announce, command=command)
+            return
         if self.uncontrolled:
             say = announce or pilot_first or pilot_back
             if say is not None:
@@ -4067,12 +5929,59 @@ class TrafficInjector:
         if command is not None:
             self._tell(flight, command[0], at, **command[1])
 
+    def _afis_exchange(self, flight: Flight, now: float, *, pilot_first=None,
+                       announce=None, command=None) -> None:
+        """An exchange with an AFIS: the pilot calls up and is given the
+        field (runway in use, wind, QNH, traffic), or calls ready or on final
+        and is told the runway is free, the wind, and "at your discretion";
+        the pilot acknowledges. Nothing the pilot would only have said back
+        to a controller -- a readback of a takeoff clearance, "line up and
+        wait" -- is said at all. UNVERIFIED: the acknowledgement as a plain
+        "roger".
+        """
+        kind = command[0] if command is not None else ""
+        runway = (command[1].get("runway") if command is not None else "") \
+            or flight.runway
+        weather = self.field.weather or Weather()
+        if kind == "takeoff":
+            opening = lambda p, a, s: p.ready_for_departure(a, runway, station=s)
+            answer = lambda c, a, s: c.afis_takeoff(a, weather)
+        elif kind in ("land", "touch_and_go"):
+            opening = pilot_first or announce
+            answer = lambda c, a, s: c.afis_land(a, weather)
+        elif kind in ("taxi", "pattern") and pilot_first is not None:
+            opening = pilot_first
+            answer = lambda c, a, s: c.afis_field(a, s, runway, weather)
+        elif kind == "line_up":
+            opening = answer = None
+        else:
+            opening, answer = announce or pilot_first, None
+        at = now
+        if opening is not None and answer is not None:
+            self._exchanges += 1
+            mark = self._exchanges
+            halves = [self._queue(flight, at, "INFO", True, opening,
+                                  exchange=mark)]
+            at += READBACK_GAP_S + self.random.uniform(0.4, 2.0)
+            halves.append(self._queue(flight, at, "INFO", False, answer,
+                                      exchange=mark))
+            at += READBACK_GAP_S + self.random.uniform(0.2, 1.2)
+            halves.append(self._queue(flight, at, "INFO", True,
+                                      lambda p, a, s: p.roger(a),
+                                      exchange=mark))
+            if any(half is None for half in halves):
+                self.pending = [c for c in self.pending if c.exchange != mark]
+        elif opening is not None:
+            self._queue(flight, now, "INFO", True, opening)
+        if command is not None:
+            self._tell(flight, command[0], max(at, now + 1.0), **command[1])
+
     def _say(self, flight: Flight, now: float, position: str, *,
              from_pilot: bool, make) -> None:
         if self.uncontrolled:
             if not from_pilot:
                 return
-            position = "CTAF"
+            position = self._announcing_on
         self._queue(flight, now, position, from_pilot, make)
 
     def _queue(self, flight: Flight, at: float, position: str,
@@ -4085,7 +5994,8 @@ class TrafficInjector:
         silence in the middle of an exchange is heard as a lost transmission.
         """
         station = self.field.stations.get(position) or (
-            self.field.advisory if position == "CTAF" else None)
+            self.field.advisory if position == "CTAF"
+            else self.field.afis if position == "INFO" else None)
         station_name = station.callsign_in(flight.language) if station else ""
         speaker = (flight.aircraft.for_language(flight.language).spoken_short
                    if from_pilot else station_name)
@@ -4114,10 +6024,12 @@ class TrafficInjector:
         return call
 
     def _phrase(self, language: str):
-        found = self._phraseology.get(language)
+        key = (language, self.profile.region)
+        found = self._phraseology.get(key)
         if found is None:
-            found = phraseology_for(language, self.field.ident)
-            self._phraseology[language] = found
+            found = phraseology_for(language, self.field.ident,
+                                    region=self.profile.region)
+            self._phraseology[key] = found
         return found
 
     def _pilot(self, language: str) -> PilotSpeech:
@@ -4179,6 +6091,32 @@ class TrafficInjector:
             return ""
 
 
+def _said_route(layout, taxi, field: str, *, inbound: bool):
+    """A route as a controller gives it (atc.taxi): ``(said now, held short
+    of, the rest, where the rest is given)`` -- each taxiway once, its
+    number only at the holding point or the exit, five at most before the
+    cut, field words said as words -- from a ground Taxiing."""
+    from . import taxi as taxiplan
+
+    if layout is None or taxi is None:
+        return [], "", [], None
+    nodes = [node for node in getattr(taxi, "nodes", []) if node is not None]
+    said = taxiplan.spoken_route(layout, nodes, inbound=inbound)
+    names = [name for name, _ in said]
+    first, hold_at, rest = taxiplan.split_route(names)
+    where = None
+    if rest:
+        where = layout.xy[nodes[said[len(first)][1]]]
+    return (taxiplan.say_words(field, first),
+            taxiplan.say_words(field, [hold_at])[0] if hold_at else "",
+            taxiplan.say_words(field, rest), where)
+
+
+# How close one of ours gets to where it was told to hold short before the
+# rest of a cut taxi is given. Chosen: a junction's width.
+REST_OF_TAXI_M = 60.0
+
+
 def _spell_route(route: list[str]) -> str:
     """``["A", "B"]`` -> ``"Alpha Bravo"``, for a pilot reading it back."""
     from .speech import taxiway
@@ -4187,10 +6125,11 @@ def _spell_route(route: list[str]) -> str:
 
 
 def _local_or_english(ident: str) -> str:
-    """What a local light aircraft speaks: the local language if there is one."""
-    from .language import local_language
+    """What a local light aircraft speaks: the field's own working language
+    if it has one -- not one it merely accepts (Kortrijk's French)."""
+    from .language import traffic_language
 
-    return local_language(ident) or "en"
+    return traffic_language(ident) or "en"
 
 
 # Somewhere to be going. Spoken names, because they are read out on the radio.

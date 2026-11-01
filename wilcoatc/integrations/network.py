@@ -38,6 +38,8 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from ..navdata.channels import same_channel
+
 log = logging.getLogger(__name__)
 
 VATSIM_URL = "https://data.vatsim.net/v3/vatsim-data.json"
@@ -314,7 +316,9 @@ class OnlineNetwork:
         best: OnlineController | None = None
         best_range = 0.0
         for controller in self.controllers:
-            if abs(controller.mhz - float(mhz)) > SAME_FREQUENCY_MHZ:
+            # By channel: 126.630 is 126.625, and 118.005 is not 118.010
+            # though the two are as close as 126.625 and 126.630.
+            if not same_channel(controller.mhz, float(mhz), 0):
                 continue
             if not self._in_range(controller, latitude, longitude):
                 continue

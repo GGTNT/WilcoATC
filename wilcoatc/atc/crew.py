@@ -105,14 +105,24 @@ from ..audio.voices import (accent_for, gender_of as voice_gender,
                             in_language, language_of as voice_language)
 from ..logs import CREW
 from ..navdata.db import transition_altitude
+from . import aircraft_class, checklist_files
+from . import profile as flight_profile
+from .callouts import Callouts, Situation
+from .notices import SAFETY as SAFETY_NOTICES, Notices, Watching
+from .checklist import OFFER_SETTLE_S, ChecklistRunner
 from .copilot import confirmation
 from . import interphone
-from .crew_lines import (ANSWERS, CABIN, CABIN_PA, CAPTAIN, CONDITIONS,
-                         CUE_GROUPS, CUE_RECORDINGS, FIRST_OFFICER, GROUND,
+from .crew_lines import (ANSWERS, CABIN, CABIN_PA, CAPTAIN, CHECKLIST_DIGITS,
+                         CHECKLIST_WORDS,
+                         CONDITIONS, CUE_GROUPS, CUE_RECORDINGS,
+                         FIRST_OFFICER, FIRST_OFFICER_ANSWERS,
+                         FIRST_OFFICER_WORDS, GROUND, LEG_WORDS,
+                         NOTICE_WORDS,
                          GROUP_SIDE, INTERCOM, PURSER, RECORDED_ONLY, SCRIPTS,
                          Line)
 from .landing import APPLAUSE_FPM, touchdown_rate
 from .session import FlightSession, Phase
+from . import vspeeds
 
 log = logging.getLogger(__name__)
 
@@ -196,37 +206,10 @@ CHATTER_EVERY_S = 900.0
 # would be calling flight levels, but ten thousand is where the signs and the
 # lights change and that is what the cabin hears.
 TEN_THOUSAND_FT = 10_000.0
-# Above the ground, on the way down.
-ONE_THOUSAND_AGL = 1000.0
-FIVE_HUNDRED_AGL = 500.0
-MINIMUMS_AGL = 250.0
-# A rotation is called off airspeed, not off the ground.
-EIGHTY_KT = 80.0
-
 # The phases that mean the aeroplane has not gone anywhere yet. Boarding
 # happens in all of them: a clearance is something the flight deck does while
 # the cabin fills up, not something that ends the boarding.
 AT_THE_STAND = (Phase.PREFLIGHT, Phase.CLEARED, Phase.PUSHBACK)
-
-
-def _v_speed(type_code: str) -> float:
-    """A plausible V1 for the aeroplane, in knots.
-
-    Not a performance calculation and not pretending to be one. The callout
-    exists so that the takeoff roll has the shape a takeoff roll has, and a
-    light single rotating at a hundred and thirty knots would be a worse lie
-    than a rounded number that is roughly right for the class of aeroplane.
-    """
-    code = (type_code or "").upper()
-    if code.startswith(("A38", "B74", "B77", "B78", "A35", "A34", "MD11")):
-        return 150.0
-    if code.startswith(("A3", "B7", "B3", "E19", "E17", "CRJ", "MD8")):
-        return 135.0
-    if code.startswith(("AT4", "AT7", "DH8", "SF3", "C700", "C25", "GL", "SF50")):
-        return 105.0
-    if code.startswith(("TBM", "PC12", "B350", "BE", "C208", "PA4")):
-        return 85.0
-    return 60.0
 
 
 def _about_how_long(text: str) -> float:
@@ -262,6 +245,11 @@ class _Pending:
     # transmission carries a numpy array, and two of those do not answer
     # ``==`` with a yes or a no.
     voice: object = field(default=None, compare=False)
+    # After this, a callout is not worth saying (immersion.first_officer
+    # .callout_late_s past the moment it was queued for). Zero for a line
+    # that keeps. Set from the clock when it is queued, so a queue wound on
+    # by hand does not age it.
+    stale_at: float = 0.0
 
 
 @dataclass
@@ -328,7 +316,8 @@ class CrewDirector:
     """
 
     def __init__(self, config, synth, player, emit=None, weather_for=None,
-                 here=None, announcements=None, radio_busy=None, ground=None):
+                 here=None, announcements=None, radio_busy=None, ground=None,
+                 fresh=None):
         self.config = config
         self.synth = synth
         self.player = player
@@ -355,6 +344,58 @@ class CrewDirector:
         self.ground = ground
         self.state = CrewState()
         self._lock = threading.Lock()
+        # One simulator variable read now rather than when the rotation
+        # reaches it, or None: what the first officer looks at before saying
+        # the aeroplane disagrees with the pilot. Read only, ever.
+        self.fresh = fresh
+        # The checklists, run with the pilot (wilcoatc.atc.checklist). Their
+        # lines go through the queue below, so they wait for the radio like
+        # everything else in here.
+        self.checklists = ChecklistRunner(
+            say=self._say_checklist, quiet=self._checklist_quiet,
+            fresh=self._fresh_value, references=self._reference,
+            free=self._nobody_talking, settle_s=OFFER_SETTLE_S)
+        # The class of aeroplane the checklists are for, and when the files
+        # were last looked at (they are read again when they change).
+        self._class: aircraft_class.AircraftClass | None = None
+        self._book_read_at = 0.0
+        # The simulator's title for the model, which a study-level add-on's
+        # checklist file is matched on.
+        self._title = ""
+        # The callouts (wilcoatc.atc.callouts), and what the pilot said that
+        # they depend on: their speeds, their minimums, and how much they
+        # want to hear ("normal", "quiet", "callouts").
+        self.callouts = Callouts()
+        self.cockpit = "normal"
+        self._stated = vspeeds.Stated()
+        self.callout_minimums: float | None = None
+        # Where the circuit puts the aeroplane, when the engine can say:
+        # ``() -> circuit.Position | None``.
+        self.circuit = None
+        # The second pair of eyes (wilcoatc.atc.notices): the reserve the
+        # pilot stated, and when the controller's QNH was last seen to
+        # change, which is when the altimeter starts being late.
+        self.notices = Notices()
+        # What the engine can tell the first officer, for the pilot's
+        # questions: ``(name) -> (callsign, mhz) | None`` and
+        # ``() -> (place, nm) | None``.
+        self.frequency_for = None
+        self.distance_to_field = None
+        # The radio, handed over (Phase 4.2): the engine builds the call,
+        # ``(kind) -> (text, why_not)``, and sends it, ``(text) -> None``.
+        # The call waits in the queue like any line of the first officer's;
+        # it is sent once it has been heard, then the radio is handed back.
+        self.radio_call = None
+        self.transmit = None
+        self._radio_call_at: tuple[float, str] | None = None
+        self.reserve_gal = 0.0
+        self.reserve_lb = 0.0
+        self._qnh_seen = 0.0
+        self._qnh_at = 0.0
+        # When a checklist line of the first officer's was last played, so a
+        # bare "say again" after the controller has spoken is the controller's.
+        self._checklist_said_at = 0.0
+        self._first_officer_name = ""
         # A stable per-flight number, so the captain, the casting and the
         # choice of wording are the same on a re-fly of the same aeroplane.
         self._seed = 0
@@ -428,8 +469,25 @@ class CrewDirector:
         self._now = None
         self._blocked_since = 0.0
         self._type = session.aircraft.type_code if session else ""
+        self._first_officer_name = ""
+        self._class = None
+        # The profile the simulator's aeroplane suggests instead of the one
+        # the pilot chose, once per flight, for the panel to ask about.
+        self.profile_question = ""
+        self._book_read_at = 0.0
+        self._checklist_said_at = 0.0
+        self.callouts.begin()
+        self.notices.begin()
+        self.reserve_gal = self.reserve_lb = 0.0
+        self._qnh_seen = self._qnh_at = 0.0
+        self.cockpit = "normal"
+        self._stated = vspeeds.Stated()
+        self.callout_minimums = None
+        self.checklists.begin(None, language=self._language)
+        self._know_the_aeroplane(None, session)
         CREW.write("flight", callsign=self._callsign, type=self._type,
                    language=self._language,
+                   first_officer=self.first_officer_names()[0],
                    copilot=self._voice_for(FIRST_OFFICER),
                    cabin=self._voice_for(PURSER),
                    settings={
@@ -551,16 +609,19 @@ class CrewDirector:
                 self.state.queue = [p for p in self.state.queue
                                     if p.recording is not None]
                 self.state.named = ()
+                self._first_officer_name = ""
             for pending in self.state.queue:
                 pending.voice = None
             self._cast.clear()
         was, self._language = self._language, language
+        self.checklists.use(self.checklists.book, language=language)
         CREW.write("voices", language=language, was=was,
                    copilot=self._voice_for(FIRST_OFFICER),
                    cabin=self._voice_for(PURSER))
 
     def stop(self) -> None:
         """Silence the cabin, now. Used when the switch is turned off."""
+        self.checklists.drop()
         with self._lock:
             self.state.queue.clear()
             self.state.applause_at = self.state.applause_until = 0.0
@@ -587,6 +648,7 @@ class CrewDirector:
         with self._lock:
             if self._held_at is None:
                 self._held_at = now
+        self.checklists.pause()
         # The music goes too. A paused simulator is a paused aeroplane, and a
         # bed looping over a menu screen is the same complaint as a purser
         # doing it -- except that this one would run for as long as the pilot
@@ -645,6 +707,11 @@ class CrewDirector:
         group = CUE_GROUPS.get(cue, "")
         if not group:
             return "unknown cue"
+        # There is no cabin in a light aeroplane or a helicopter: no purser,
+        # no passengers to address, no boarding music. It used to be the
+        # switches alone, and a C172 got the safety demonstration.
+        if GROUP_SIDE.get(group) == "cabin" and not self._profile().cabin:
+            return "flight.profile"
         # The one cue with a switch of its own. It is in the announcements
         # group because that is where the moment belongs, but it is not
         # somebody speaking, and a pilot who wants the purser and not the
@@ -662,9 +729,32 @@ class CrewDirector:
                 return f"immersion.{name}"
         if group == "chatter" and settings.verbosity != "chatty":
             return "immersion.verbosity is not chatty"
-        if settings.verbosity == "quiet" and group not in ("callouts",):
+        if settings.verbosity == "quiet" and group not in ("callouts",
+                                                           "notices"):
             return "immersion.verbosity is quiet"
+        # "Taxi checklist complete" about a checklist nobody ran. Where the
+        # first officer runs them with the pilot, it offers instead.
+        if cue in self.RUN_WITH_THE_PILOT and not self._checklists_refused():
+            return "the first officer runs this checklist with the pilot"
+        # What the pilot asked for on the flight deck.
+        if group == "notices" and not settings.first_officer.notices:
+            return "immersion.first_officer.notices"
+        # A quiet cockpit is broken for what is unsafe, as a sterile one is.
+        if side == "copilot" and self.cockpit == "quiet" \
+                and cue not in SAFETY_NOTICES:
+            return "the pilot asked for a quiet cockpit"
+        if side == "copilot" and self.cockpit == "callouts" \
+                and group not in ("callouts", "notices"):
+            return "the pilot asked for callouts only"
+        # Spoilers and reversers are an airliner's.
+        if cue == "touchdown" and self._class is not None \
+                and self._class.name != aircraft_class.AIRLINER:
+            return "the rollout calls are an airliner's"
         return ""
+
+    # The cues that recite a checklist as done.
+    RUN_WITH_THE_PILOT = frozenset({"taxi", "before_takeoff", "after_takeoff",
+                                    "approach", "taxi_in"})
 
     # ------------------------------------------------------------------
     # the flight, watched
@@ -692,6 +782,8 @@ class CrewDirector:
 
         self._watch_switches(state)
         self._drain()
+        self._send_the_call()
+        self._run_checklists(state, session)
         self._run_music()
         self._run_applause(state)
         if previous is None:
@@ -706,6 +798,8 @@ class CrewDirector:
         self._watch_cruise(state, session)
         self._watch_descent(previous, state, session)
         self._watch_landing(previous, state, session)
+        self._run_callouts(previous, state, session)
+        self._run_notices(previous, state, session)
 
     def _watch_switches(self, state) -> None:
         """Keep the aeroplane itself, and note which switches it really has.
@@ -868,17 +962,7 @@ class CrewDirector:
         if not state.on_ground and previous.on_ground:
             self._abandon(self.AT_THE_STAND_ONLY,
                           "the aeroplane left the ground")
-            self._fire("positive_rate", session, state, delay=3.0)
             self._fire("after_takeoff", session, state, delay=22.0)
-            return
-        if not state.on_ground:
-            return
-        speed = state.indicated_airspeed_kt or state.ground_speed_kt
-        if speed >= EIGHTY_KT and previous.ground_speed_kt < EIGHTY_KT:
-            self._fire("eighty", session, state)
-        rotate = _v_speed(state.type_code or session.aircraft.type_code)
-        if speed >= rotate:
-            self._fire("v_one", session, state)
 
     def _watch_climb(self, previous, state, session) -> None:
         if state.on_ground:
@@ -965,14 +1049,6 @@ class CrewDirector:
         if state.gear_down and height < 2500:
             self._fire("approach", session, state)
 
-        if was > height:
-            if height <= ONE_THOUSAND_AGL < was:
-                self._fire("one_thousand", session, state)
-            if height <= FIVE_HUNDRED_AGL < was:
-                self._fire("five_hundred", session, state)
-            if height <= MINIMUMS_AGL < was:
-                self._fire("minimums", session, state)
-
     # -- on the ground again ---------------------------------------------
 
     # How long after the wheels touch the cabin starts clapping, and how long
@@ -1029,6 +1105,8 @@ class CrewDirector:
         for name in ("enabled", "cabin", "applause"):
             if not getattr(self.config.immersion, name, True):
                 return f"immersion.{name}"
+        if not self._profile().cabin:
+            return "flight.profile"
         return ""
 
     def _run_applause(self, state) -> None:
@@ -1076,7 +1154,8 @@ class CrewDirector:
     # ------------------------------------------------------------------
 
     def _fire(self, cue: str, session, state, delay: float = 0.0,
-              again: bool = False) -> None:
+              again: bool = False, language: str = "",
+              extra: dict | None = None) -> None:
         """Queue a cue, once.
 
         Every way out of this method writes a row to the crew log, including
@@ -1114,7 +1193,12 @@ class CrewDirector:
             self.music(True, delay)
             return
 
-        script = SCRIPTS.get(self._language, SCRIPTS["en"]).get(cue)
+        # A callout on a turboprop twin or a jet is in English whatever the
+        # crew speak; everything else in the crew's language.
+        if language == self._language:
+            language = ""
+        script = SCRIPTS.get(language or self._language,
+                             SCRIPTS["en"]).get(cue)
         if not script:
             script = SCRIPTS["en"].get(cue)
         if not script:
@@ -1131,7 +1215,14 @@ class CrewDirector:
         self.state.variants[cue] = index
 
         words = self._words(session, state)
-        lines = self._with_english(cue, list(script[index]), session, state)
+        words.update(extra or {})
+        lines = list(script[index])
+        if language:
+            lines = [replace(line, language=language) for line in lines]
+        else:
+            lines = self._with_english(cue, lines, session, state)
+        callout = CUE_GROUPS.get(cue) == "callouts"
+        late = float(self.config.immersion.first_officer.callout_late_s)
         at = time.monotonic() + max(0.0, delay)
         with self._lock:
             at = max(at, self._behind_the_queue(cue))
@@ -1145,7 +1236,7 @@ class CrewDirector:
                 if not self._audible(line):
                     continue
                 at += line.after_s
-                if line.language:
+                if line.language and not language:
                     # Already filled in, in its own language.
                     text = line.text
                 else:
@@ -1155,7 +1246,8 @@ class CrewDirector:
                         text = line.text
                 self.state.queue.append(
                     _Pending(at=at, line=replace(line, text=text), cue=cue,
-                             expires=at + line.patience_s))
+                             expires=at + line.patience_s,
+                             stale_at=at + late if callout else 0.0))
                 # A line's own length has to be allowed for, or a sequence
                 # arrives on top of itself. Nothing has been rendered yet, so
                 # this is only the order and a first guess at the spacing.
@@ -1413,6 +1505,9 @@ class CrewDirector:
             if not getattr(self.config.immersion, name):
                 CREW.write("music", playing=False, why=f"immersion.{name}")
                 return
+        if not self._profile().cabin:
+            CREW.write("music", playing=False, why="flight.profile")
+            return
         self._bed(True)
 
     def _bed(self, on: bool) -> None:
@@ -1577,8 +1672,13 @@ class CrewDirector:
             # Only ever one per pass: the queue is a script, not a mixer.
             floor = self._floor()
             keep: list[_Pending] = []
+            late: list[_Pending] = []
             for pending in self.state.queue:
-                if due is not None or pending.at > now:
+                if pending.stale_at and now > pending.stale_at:
+                    # Its moment has gone: a "rotate" the radio held back
+                    # is not said at an aeroplane already climbing.
+                    late.append(pending)
+                elif due is not None or pending.at > now:
                     keep.append(pending)
                 elif not self.still_true(pending.line):
                     # Waiting for a switch, or overtaken by the flight. Both
@@ -1599,13 +1699,28 @@ class CrewDirector:
         for cue in dropped:
             CREW.write("line", said=False, cue=cue,
                        why="the flight overtook it")
+        for pending in late:
+            CREW.write("line", said=False, cue=pending.cue,
+                       text=pending.line.text,
+                       why="too late: the frequency or the speaker was busy "
+                           "past its moment")
         if due is None:
             self._prepare()
             return
         if due.recording is not None:
             spoken_s = self.play(due.recording, due.line.who)
         else:
-            spoken_s = self.say(due.line, due.voice)
+            spoken_s = (self.say(due.line, due.voice, shown=False)
+                        if due.cue == "radio_call"
+                        else self.say(due.line, due.voice))
+            if due.cue == "radio_call":
+                # On the air once it has been said in here.
+                self._radio_call_at = (time.monotonic() + spoken_s,
+                                       due.line.text)
+            if due.cue == "checklist":
+                # When it was heard, not when it was queued: the queue can
+                # hold it behind the controller.
+                self._checklist_said_at = time.monotonic()
         self._close_up(due, spoken_s)
 
     # How long the cabin may be held before the log says so, and how often it
@@ -1853,7 +1968,7 @@ class CrewDirector:
                 log.debug("crew synthesis failed again: %s", exc)
             return None
 
-    def say(self, line: Line, voice=None) -> float:
+    def say(self, line: Line, voice=None, shown: bool = True) -> float:
         """Put one line on the cabin audio path, and say how long it runs.
 
         ``voice`` is the line already rendered, which is the ordinary case:
@@ -1885,9 +2000,650 @@ class CrewDirector:
                    rate=rate, peak=round(_peak(audio), 4),
                    volume=self.player.volume,
                    voice=getattr(transmission, "voice_key", ""))
-        self.emit("crew", line.text, _SPEAKER_NAMES.get(position, position),
-                  path=line.path)
+        # A radio call the first officer makes is shown once, as their
+        # transmission (Engine.first_officer_transmits), not as a crew line.
+        if shown:
+            self.emit("crew", line.text,
+                      _SPEAKER_NAMES.get(position, position), path=line.path)
         return seconds
+
+    # ------------------------------------------------------------------
+    # the callouts
+    # ------------------------------------------------------------------
+
+    # Whose callouts are in English whatever the crew speak: their
+    # operators' SOPs are.
+    ENGLISH_CALLOUTS = frozenset({aircraft_class.TURBOPROP_TWIN,
+                                  aircraft_class.BUSINESS_JET,
+                                  aircraft_class.AIRLINER})
+
+    def _callout_language(self) -> str:
+        if self._class is not None and self._class.name in self.ENGLISH_CALLOUTS:
+            return "en"
+        return ""
+
+    def _runway_words(self, runway: str, language: str = "") -> str:
+        """"24L" as the first officer says it: "two four left"."""
+        language = language or self._language
+        digits = CHECKLIST_DIGITS.get(language, CHECKLIST_DIGITS["en"])
+        words = FIRST_OFFICER_WORDS.get(language, FIRST_OFFICER_WORDS["en"])
+        out = []
+        for ch in (runway or "").upper():
+            if ch.isdigit():
+                out.append(digits[int(ch)])
+            elif ch in "LRC":
+                out.append(words[{"L": "left", "R": "right",
+                                  "C": "centre"}[ch]])
+        return " ".join(out)
+
+    def _where_in_the_circuit(self):
+        if self.circuit is None:
+            return None
+        try:
+            return self.circuit()
+        except Exception:
+            log.debug("could not place the aeroplane in the circuit",
+                      exc_info=True)
+            return None
+
+    def _situation(self, state, session) -> Situation:
+        name = self._class.name if self._class else aircraft_class.PISTON_SINGLE
+        type_code = (getattr(state, "type_code", "") or self._type or "")
+        speeds = vspeeds.speeds_for(
+            type_code, name, stated=self._stated,
+            min_rotation_kt=getattr(state, "min_rotation_kt", 0.0) or 0.0,
+            design_takeoff_kt=getattr(state, "design_takeoff_kt", 0.0) or 0.0)
+        where = self._where_in_the_circuit()
+        field = None
+        if self.here is not None:
+            try:
+                field = self.here()
+            except Exception:
+                field = None
+        elevation = getattr(field, "elev_ft", None)
+        return Situation(
+            aircraft_class=name, type_code=type_code,
+            rules="vfr" if session.visual else "ifr", speeds=speeds,
+            phase=session.phase,
+            assigned_altitude_ft=session.assigned_altitude_ft or 0.0,
+            minimums=self.callout_minimums,
+            field_elevation_ft=(float(elevation) if elevation is not None
+                                else None),
+            runway=(session.arrival_runway or session.departure_runway
+                    or ""),
+            cleared_to_land=bool(session.cleared_landing),
+            leg=getattr(where, "leg", "") or "",
+            stage=getattr(where, "stage", "") or "",
+            flare=bool(self.config.immersion.first_officer.flare_callouts))
+
+    def _run_callouts(self, previous, state, session) -> None:
+        """One pass of the callouts. The decision runs whatever is switched
+        off, so a call switched back on mid-flight knows where it is."""
+        self.callouts.deviation_every_s = float(
+            self.config.immersion.first_officer.deviation_every_s)
+        try:
+            calls = self.callouts.watch(previous, state,
+                                        self._situation(state, session))
+        except Exception:
+            log.debug("the callouts raised", exc_info=True)
+            return
+        self._say_calls(calls, session, state)
+
+    def _say_calls(self, calls, session, state) -> None:
+        language = self._callout_language()
+        for call in calls:
+            extra, cue = {}, call.cue
+            if "runway" in call.values:
+                runway = self._runway_words(call.values["runway"], language)
+                if runway:
+                    extra["runway"] = runway
+                else:
+                    # No runway known: "final, cleared", not a gap.
+                    cue = f"{cue}_plain"
+            CREW.write("callout", cue=cue, why=call.why,
+                       aircraft_class=getattr(self._class, "name", ""))
+            self._fire(cue, session, state, again=True,
+                       language=language, extra=extra)
+
+    def heard_on_the_radio(self, text: str) -> None:
+        """A transmission the pilot made to a controller. A go-around
+        reported to the tower is also the call on the flight deck."""
+        folded = interphone.fold(text)
+        if any(phrase in folded for phrase in
+               ("go around", "going around", "remise de gaz",
+                "remise des gaz", "durchstarten", "doorstarten")):
+            self._go_around()
+
+    def _go_around(self) -> None:
+        state = self._now
+        if state is not None and getattr(state, "on_ground", False):
+            return
+        if self._session is None:
+            return
+        self.notices.go_around()
+        self._say_calls(self.callouts.go_around(), self._session, state)
+
+    def _say_now(self, text: str, cue: str, language: str = "") -> None:
+        """A line of the first officer's own, answering the pilot."""
+        at = time.monotonic() + self.CHECKLIST_AFTER_S
+        line = Line(FIRST_OFFICER, text, INTERCOM,
+                    language="" if language == self._language else language)
+        with self._lock:
+            self.state.queue.append(_Pending(at=at, line=line, cue=cue,
+                                             expires=at))
+            self.state.queue.sort(key=lambda p: p.at)
+        CREW.write("ask", answered=True, who=FIRST_OFFICER, what=cue,
+                   text=text)
+
+    def _told(self, said) -> bool:
+        """The pilot telling the first officer something outside a
+        checklist. True when it was that."""
+        what = said.what
+        language = self._callout_language() or self._language
+        words = FIRST_OFFICER_WORDS.get(language, FIRST_OFFICER_WORDS["en"])
+        digits = CHECKLIST_DIGITS.get(language, CHECKLIST_DIGITS["en"])
+
+        def figure(value) -> str:
+            return " ".join(digits[int(c)] for c in str(int(round(value))))
+
+        if what in (interphone.QUIET, interphone.CALLOUTS_ONLY,
+                    interphone.NORMAL):
+            self.cockpit = {interphone.QUIET: "quiet",
+                            interphone.CALLOUTS_ONLY: "callouts",
+                            interphone.NORMAL: "normal"}[what]
+            if self.cockpit != "normal":
+                # What was still to be said goes with the request.
+                with self._lock:
+                    self.state.queue = [
+                        p for p in self.state.queue
+                        if p.line.who != FIRST_OFFICER
+                        or (self.cockpit == "callouts"
+                            and CUE_GROUPS.get(p.cue) == "callouts")]
+            key = {"quiet": "quiet", "callouts": "callouts_only",
+                   "normal": "normal"}[self.cockpit]
+            self._say_now(words[key], "cockpit", language)
+            return True
+        if what == interphone.SPEEDS:
+            given = dict(said.speeds)
+            self._stated = vspeeds.Stated(
+                v1=given.get("v1", self._stated.v1),
+                vr=given.get("vr", self._stated.vr),
+                v2=given.get("v2", self._stated.v2),
+                vapp=given.get("vapp", self._stated.vapp))
+            parts = [words[name].format(**{name: figure(given[name])})
+                     for name in ("v1", "vr", "v2", "vapp") if name in given]
+            if parts:
+                text = ", ".join(parts)
+                self._say_now(text[:1].upper() + text[1:] + ".", "speeds",
+                              language)
+            return True
+        if what == interphone.MINIMUMS:
+            self.callout_minimums = float(said.value)
+            self._say_now(words["minimums"].format(value=figure(said.value)),
+                          "minimums", language)
+            # The checklist's own item, if that is the one waiting.
+            if "minim" in self.checklists.current_item.lower():
+                self.checklists.hear(interphone.Said(
+                    who=interphone.FIRST_OFFICER, what=interphone.ANSWER,
+                    text=said.text, answers=("value", "set"),
+                    value=said.value))
+            return True
+        if what == interphone.GO_AROUND:
+            self._go_around()
+            return True
+        if what == interphone.QUESTION:
+            self._answer(said, language)
+            return True
+        if what == interphone.HANDOVER:
+            self._take_the_radio(said, language)
+            return True
+        if what == interphone.RESERVE:
+            value = float(said.value)
+            # By volume against the gallons, by weight against the pounds.
+            self.reserve_gal = {"gal": value, "l": value / 3.785}.get(
+                said.unit, 0.0)
+            self.reserve_lb = {"lb": value, "kg": value * 2.20462}.get(
+                said.unit, 0.0)
+            self._say_now(words["reserve"], "reserve", language)
+            return True
+        return False
+
+    # ------------------------------------------------------------------
+    # the pilot asks, and hands over the radio
+    # ------------------------------------------------------------------
+
+    def _figures(self, value, language: str) -> str:
+        digits = CHECKLIST_DIGITS.get(language, CHECKLIST_DIGITS["en"])
+        decimal = CHECKLIST_WORDS.get(language, CHECKLIST_WORDS["en"])["decimal"]
+        return " ".join(digits[int(c)] if c.isdigit() else decimal
+                        for c in str(value) if c.isdigit() or c == ".")
+
+    def _answer(self, said, language: str) -> None:
+        """A question, answered from what the flight already knows."""
+        words = FIRST_OFFICER_ANSWERS.get(language,
+                                          FIRST_OFFICER_ANSWERS["en"])
+        session = self._session
+        asked = said.asked
+        text = ""
+        if asked == "squawk":
+            code = str(getattr(session, "squawk", "") or "")
+            text = words["squawk"].format(
+                value=self._figures(code.zfill(4), language))
+        elif asked == "qnh":
+            qnh = self._reference("$qnh")
+            text = (words["qnh"].format(value=self._figures(
+                self._pressure(qnh), language)) if qnh else words["no_qnh"])
+        elif asked == "runway":
+            runway = (getattr(session, "departure_runway", "")
+                      or getattr(session, "arrival_runway", ""))
+            text = (words["runway"].format(
+                value=self._runway_words(runway, language)) if runway
+                else words["no_runway"])
+        elif asked == "said":
+            last = [t for _at, who, t in getattr(session, "log", [])
+                    if who == "atc"]
+            text = (words["said"].format(value=last[-1]) if last
+                    else words["nothing_said"])
+        elif asked == "clearance":
+            text = getattr(session, "last_clearance", "") or \
+                words["no_clearance"]
+        elif asked == "circuit":
+            where = self._where_in_the_circuit()
+            runway = (getattr(session, "arrival_runway", "")
+                      or getattr(session, "departure_runway", ""))
+            if where is None or not getattr(where, "in_circuit", False):
+                text = words["not_in_circuit"]
+            else:
+                legs = LEG_WORDS.get(language, LEG_WORDS["en"])
+                leg = legs.get(where.leg, where.leg)
+                stage = legs.get(where.stage, where.stage)
+                place = (legs["_order"].format(stage=stage, leg=leg)
+                         if stage else leg)
+                text = words["circuit"].format(
+                    where=place[:1].upper() + place[1:],
+                    runway=self._runway_words(runway, language))
+        elif asked == "frequency":
+            found = None
+            if self.frequency_for is not None and said.name:
+                try:
+                    found = self.frequency_for(said.name)
+                except Exception:
+                    log.debug("could not look the frequency up", exc_info=True)
+            text = (words["frequency"].format(
+                station=found[0],
+                value=self._figures(f"{found[1]:.3f}".rstrip("0").rstrip("."),
+                                    language)) if found
+                else words["no_frequency"])
+        elif asked == "distance":
+            found = None
+            if self.distance_to_field is not None:
+                try:
+                    found = self.distance_to_field()
+                except Exception:
+                    log.debug("could not work out the distance", exc_info=True)
+            if found:
+                figure = self._figures(int(round(found[1])), language)
+                text = words["distance"].format(
+                    value=figure[:1].upper() + figure[1:], place=found[0])
+            else:
+                text = words["no_distance"]
+        if text:
+            self._say_now(text, f"answer_{asked}", language)
+
+    def _take_the_radio(self, said, language: str) -> None:
+        """ONE call, handed over in so many words, then the radio back."""
+        words = FIRST_OFFICER_ANSWERS.get(language,
+                                          FIRST_OFFICER_ANSWERS["en"])
+        if not self.config.immersion.first_officer.radio \
+                or self.radio_call is None or self.transmit is None:
+            CREW.write("radio_call", made=False, call=said.call,
+                       why="immersion.first_officer.radio")
+            self._say_now(words["radio_yours"], "radio_call_refused", language)
+            return
+        try:
+            text, why = self.radio_call(said.call)
+        except Exception as exc:
+            log.debug("the first officer could not build the call",
+                      exc_info=True)
+            text, why = "", str(exc)
+        if not text:
+            CREW.write("radio_call", made=False, call=said.call, why=why)
+            if why == "readback":
+                key, values = "readback_yours", {}
+            elif why.startswith("not_on"):
+                key, values = "not_on", {"station": words["ground"]}
+            elif why == "which":
+                key, values = "which_call", {}
+            else:
+                key, values = "radio_yours", {}
+            self._say_now(words[key].format(**values), "radio_call_refused",
+                          language)
+            return
+        CREW.write("radio_call", made=True, call=said.call, text=text)
+        at = time.monotonic() + self.CHECKLIST_AFTER_S
+        with self._lock:
+            self.state.queue.append(_Pending(
+                at=at, line=Line(FIRST_OFFICER, text, INTERCOM),
+                cue="radio_call", expires=at))
+            self.state.queue.sort(key=lambda p: p.at)
+
+    # How far ahead of the line's measured end the call may go out: the
+    # player's own report that it has finished is what is waited for.
+    CALL_SLACK_S = 0.05
+
+    def _send_the_call(self) -> None:
+        due = self._radio_call_at
+        # Once it has been heard: the cabin player has finished with it (the
+        # clock's own resolution is coarser than a short line on Windows).
+        if due is None or self.player.busy                 or time.monotonic() < due[0] - self.CALL_SLACK_S:
+            return
+        self._radio_call_at = None
+        try:
+            self.transmit(due[1])
+        except Exception:
+            log.debug("the first officer's call failed", exc_info=True)
+        language = self._callout_language() or self._language
+        words = FIRST_OFFICER_ANSWERS.get(language,
+                                          FIRST_OFFICER_ANSWERS["en"])
+        self._say_now(words["your_radio"], "your_radio", language)
+
+    # ------------------------------------------------------------------
+    # the second pair of eyes
+    # ------------------------------------------------------------------
+
+    def _watching(self, state, session) -> Watching:
+        book = self.checklists.book
+        flaps = None
+        if book is not None and "before_takeoff" in book.checklists:
+            for item in book.checklists["before_takeoff"].items:
+                if item.check is not None and item.check.var == "flaps_index":
+                    flaps = item.check
+        qnh = float(getattr(session, "altimeter", 0.0) or 0.0)
+        if qnh != self._qnh_seen:
+            self._qnh_seen, self._qnh_at = qnh, time.monotonic()
+        station = getattr(session, "handoff_pending", None)
+        where = self._where_in_the_circuit()
+        ident = self._field_ident()
+        try:
+            transition = float(transition_altitude(ident)) if ident else 18000.0
+        except Exception:
+            transition = 18000.0
+        return Watching(
+            aircraft_class=(self._class.name if self._class
+                            else aircraft_class.PISTON_SINGLE),
+            phase=session.phase, leg=getattr(where, "leg", "") or "",
+            unchecked=(book.unchecked if book is not None else frozenset()),
+            takeoff_flaps=flaps, qnh=qnh, qnh_given_at=self._qnh_at,
+            transition_altitude_ft=transition,
+            frequency=float(getattr(station, "mhz", 0.0) or 0.0),
+            frequency_given_at=float(getattr(session, "handoff_offered_at",
+                                             0.0) or 0.0),
+            reserve_gal=self.reserve_gal, reserve_lb=self.reserve_lb)
+
+    def _run_notices(self, previous, state, session) -> None:
+        try:
+            calls = self.notices.watch(previous, state,
+                                       self._watching(state, session))
+        except Exception:
+            log.debug("the notices raised", exc_info=True)
+            return
+        language = self._callout_language()
+        spoken = language or self._language
+        digits = CHECKLIST_DIGITS.get(spoken, CHECKLIST_DIGITS["en"])
+        sides = NOTICE_WORDS.get(spoken, NOTICE_WORDS["en"])
+        decimal = CHECKLIST_WORDS.get(spoken, CHECKLIST_WORDS["en"])["decimal"]
+
+        def figure(text: str) -> str:
+            return " ".join(digits[int(c)] if c.isdigit() else decimal
+                            for c in text if c.isdigit() or c == ".")
+
+        for call in calls:
+            extra = {}
+            if "qnh" in call.values:
+                extra["qnh"] = figure(self._pressure(call.values["qnh"]))
+                extra["set"] = figure(self._pressure(
+                    call.values["set"], like=call.values["qnh"]))
+            if "frequency" in call.values:
+                extra["frequency"] = figure(
+                    f"{call.values['frequency']:.3f}".rstrip("0").rstrip("."))
+            if "side" in call.values:
+                extra["side"] = sides[call.values["side"]]
+            live = self._radio_is_live()
+            refused = self.refused(call.cue)
+            CREW.write("notice", cue=call.cue, said=not (live or refused),
+                       why=(refused or ("waiting: the radio was live"
+                                        + (f" ({call.why})" if call.why
+                                           else "")) if live else call.why))
+            self._fire(call.cue, session, state, again=True,
+                       language=language, extra=extra)
+
+    @staticmethod
+    def _pressure(value, like=None) -> str:
+        """An altimeter setting as it is said: four figures of hectopascals,
+        or of inches without the point -- in the unit of ``like``."""
+        value = float(value)
+        inches = (like if like is not None else value) < 100.0
+        if inches and value > 100.0:
+            value = value / 33.8639
+        return f"{round(value * 100):d}" if inches else f"{round(value):d}"
+
+    # ------------------------------------------------------------------
+    # the checklists, run with the pilot
+    # ------------------------------------------------------------------
+
+    # How often the checklist files are looked at again, so one a pilot
+    # saves mid-flight counts at the next checklist without a restart.
+    BOOK_EVERY_S = 2.0
+    # How long after the pilot's answer the next item comes. The pilot has
+    # just let go of the button; less than the cabin's answer delay,
+    # because a checklist is a quick exchange.
+    CHECKLIST_AFTER_S = 0.6
+
+    def _checklists_refused(self) -> str:
+        """What stops the first officer running checklists, or ""."""
+        settings = self.config.immersion
+        for name in ("enabled", "copilot", "checklists"):
+            if not getattr(settings, name):
+                return f"immersion.{name}"
+        if self._class is not None and not self._class.checklists:
+            return f"no checklists for a {self._class.name.replace('_', ' ')}"
+        return ""
+
+    def _profile(self) -> flight_profile.FlightProfile:
+        return getattr(self._session, "profile", None) or flight_profile.DEFAULT
+
+    def _know_the_aeroplane(self, state, session) -> None:
+        """The class, inside the pilot's profile, and its checklist files.
+
+        The simulator decides which aeroplane of the profile's kind this is
+        -- a piston single or a business jet, a jet or a turboprop airliner.
+        What it reports outside the kind is a question for the pilot, asked
+        once, and the profile stands meanwhile: an A320 under the general
+        aviation profile is flown with a light aeroplane's first officer
+        until the pilot says otherwise.
+        """
+        aircraft = getattr(session, "aircraft", None)
+        type_code = (getattr(state, "type_code", "") or
+                     getattr(aircraft, "type_code", "") or self._type)
+        engine_type = getattr(state, "engine_type", -1)
+        profile = getattr(session, "profile", None) or flight_profile.DEFAULT
+        reported = aircraft_class.classify(
+            type_code, engine_type=None if engine_type < 0 else engine_type,
+            engines=getattr(state, "engine_count", 0),
+            category=getattr(state, "category", ""),
+            airline=profile.airliner)
+        found = profile.within(reported)
+        question = profile.questioned(reported)
+        if question and not self.profile_question:
+            self.profile_question = question
+            CREW.write("profile_questioned", profile=profile.kind,
+                       suggested=question, type=type_code,
+                       aircraft_class=reported.name, why=reported.why)
+        title = getattr(state, "title", "") or ""
+        now = time.monotonic()
+        changed = (self._class is None or found.name != self._class.name
+                   or title != self._title)
+        self._title = title
+        if not changed and now - self._book_read_at < self.BOOK_EVERY_S:
+            return
+        if changed:
+            CREW.write("aircraft_class", type=type_code,
+                       aircraft_class=found.name, why=found.why)
+        self._class = found
+        self._book_read_at = now
+        book = None
+        if found.checklists:
+            try:
+                book = checklist_files.load(found.name, type_code,
+                                            title=title)
+            except Exception as exc:
+                CREW.write("checklist_file", problem=str(exc),
+                           aircraft_class=found.name, type=type_code)
+        rules = "ifr" if getattr(session, "ifr", False) else "vfr"
+        self.checklists.use(book, rules=rules, language=self._language)
+
+    def _run_checklists(self, state, session) -> None:
+        # The class is the callouts' and the notices' as much as the
+        # checklists', so it is kept up whether they run or not: with the
+        # checklists off it was the first guess for the whole flight.
+        self._know_the_aeroplane(state, session)
+        refused = self._checklists_refused()
+        if refused:
+            if self.checklists.running:
+                self.checklists.drop()
+                self._note("checklist", refused)
+            return
+        self.checklists.rules = "ifr" if session.ifr else "vfr"
+        self.checklists.configure(self.config.immersion.first_officer)
+        # Asked-for checklists run in either mode; offers only when the
+        # pilot has not asked for a quieter cockpit.
+        self.checklists.offers = self.cockpit == "normal"
+        self.checklists.aircraft_title = getattr(state, "title", "") or ""
+        self.checklists.tick(state, session=session,
+                             height_ft=self._height(state))
+
+    def _say_checklist(self, text: str) -> None:
+        """One first officer line from the checklists, into the queue."""
+        at = time.monotonic() + self.CHECKLIST_AFTER_S
+        with self._lock:
+            self.state.queue.append(_Pending(
+                at=at, line=Line(FIRST_OFFICER, text, INTERCOM),
+                cue="checklist", expires=at))
+            self.state.queue.sort(key=lambda p: p.at)
+
+    def _checklist_quiet(self) -> bool:
+        """Everything the first officer said has been heard, and nobody is
+        talking: the moment the wait for the pilot's answer starts."""
+        with self._lock:
+            if any(p.cue == "checklist" for p in self.state.queue):
+                return False
+        return not self.player.busy and not self._radio_is_live()
+
+    def _nobody_talking(self) -> bool:
+        """Nothing queued for anybody, nothing playing, the radio quiet: the
+        only moment an unprompted offer is made."""
+        with self._lock:
+            if self.state.queue:
+                return False
+        return not self.player.busy and not self._radio_is_live()
+
+    def _fresh_value(self, var: str):
+        if self.fresh is None:
+            return None
+        try:
+            return self.fresh(var)
+        except Exception:
+            log.debug("could not read %s again", var, exc_info=True)
+            return None
+
+    def _field_ident(self) -> str:
+        if self.here is not None:
+            try:
+                airport = self.here()
+            except Exception:
+                airport = None
+            if getattr(airport, "ident", ""):
+                return airport.ident
+        session = self._session
+        for airport in (getattr(session, "departure", None),
+                        getattr(session, "destination", None)):
+            if getattr(airport, "ident", ""):
+                return airport.ident
+        return ""
+
+    def _reference(self, name: str, said=None):
+        """What a checklist check's ``$name`` stands for, or None when
+        nothing is known -- which leaves the item unchecked."""
+        if name == "$said":
+            return said
+        session = self._session
+        if session is None:
+            return None
+        if name == "$squawk":
+            code = str(getattr(session, "squawk", "") or "")
+            if session.ifr:
+                return code if session.clearance_issued and code else None
+            if code and code not in ("1200", "7000"):
+                return code
+            # Nothing assigned: the region's VFR code, pinned or the field's.
+            return ("1200" if self._profile().region_for(
+                self._field_ident()) == "faa" else "7000")
+        if name == "$qnh":
+            if getattr(session, "altimeter", 0.0):
+                return session.altimeter
+            ident = self._field_ident()
+            if ident and self.weather_for is not None:
+                try:
+                    weather = self.weather_for(ident)
+                except Exception:
+                    weather = None
+                qnh = getattr(weather, "qnh_hpa", 0.0)
+                if qnh:
+                    return qnh
+            return None
+        if name == "$altitude":
+            return session.assigned_altitude_ft or None
+        if name == "$heading":
+            return session.assigned_heading
+        if name == "$frequency":
+            station = getattr(session, "handoff_pending", None)
+            if station is not None and getattr(station, "mhz", 0.0):
+                return station.mhz
+            last = getattr(session, "last_instruction", None)
+            return (last.values.get("frequency")
+                    if last is not None else None)
+        return None
+
+    def waiting_for_the_pilot(self) -> bool:
+        """Whether the first officer is waiting on the pilot: a bare answer
+        may be theirs (the engine adds the readback and who spoke last)."""
+        return not self._checklists_refused() and self.checklists.waiting
+
+    def offering(self) -> str:
+        return "" if self._checklists_refused() else self.checklists.offering
+
+    def checklist_titles(self) -> dict[str, tuple[str, ...]]:
+        return self.checklists.titles()
+
+    def spoke_after(self, moment: float) -> bool:
+        """Whether the first officer's last checklist line was played after
+        this (or at the same tick)."""
+        return self._checklist_said_at >= moment
+
+    def first_officer_names(self) -> tuple[str, ...]:
+        """What the first officer is called, so the pilot can say it.
+
+        From the same pools and seed as the cabin, never one of theirs.
+        """
+        if not self._first_officer_name:
+            book = FIRST_NAMES.get(self._language) or FIRST_NAMES["en"]
+            gender = self._gender_for(FIRST_OFFICER)
+            pool = book.get(gender) or book["m" if self._seed & 1 else "f"]
+            taken = set(self.names())
+            choices = [n for n in pool if n not in taken] or list(pool)
+            self._first_officer_name = choices[(self._seed >> 7)
+                                               % len(choices)]
+        return (self._first_officer_name,)
 
     # ------------------------------------------------------------------
     # answering the flight deck
@@ -1932,6 +2688,28 @@ class CrewDirector:
             CREW.write("ask", answered=False, who=said.who, what=said.what,
                        why="immersion.cabin")
             return False
+        if said.who == interphone.FIRST_OFFICER:
+            if not settings.copilot:
+                CREW.write("ask", answered=False, who=said.who,
+                           what=said.what, why="immersion.copilot")
+                return False
+            if self._told(said):
+                return True
+            # The checklists take whatever is theirs; an address with
+            # nothing after it, and no checklist waiting, is answered below.
+            if said.what != interphone.ATTENTION or self.checklists.waiting:
+                refused = self._checklists_refused()
+                if refused:
+                    CREW.write("ask", answered=False, who=said.who,
+                               what=said.what, why=refused)
+                    return False
+                self.checklists.hear(said)
+                CREW.write("ask", answered=True, who=said.who,
+                           what=said.what, checklist=said.checklist,
+                           answers=list(said.answers), value=said.value,
+                           heard=said.text, addressed=said.addressed)
+                return True
+            self.checklists.spoken_to()
 
         key = answer or f"{said.who}_{said.what}"
         book = ANSWERS.get(self._language, ANSWERS["en"])
@@ -2082,6 +2860,10 @@ class CrewDirector:
             "temperature": temperature,
             "runway": (session.departure_runway or session.arrival_runway
                        or _say(language, "in_use")),
+            # The notices' figures, which always come with the notice
+            # (_run_notices); empty here so no line can reach the speaker
+            # with a brace in it.
+            "qnh": "", "set": "", "frequency": "", "side": "",
         }
 
     def _destination_weather(self, airport,

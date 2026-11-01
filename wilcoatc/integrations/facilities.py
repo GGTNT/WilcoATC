@@ -32,6 +32,7 @@ import ctypes
 import ctypes.wintypes as w
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -74,6 +75,33 @@ POSITIONS: dict[int, str] = {
     14: "DEL",       # clearance pre-taxi
     15: "DEL",       # remote clearance delivery
 }
+
+# The simulator's common-traffic types (MULTICOM, UNICOM, CTAF) also carry
+# the aerodrome information services: Kortrijk's AFIS comes back as one of
+# them, named "KORTRIJK INFORMATION". The type alone filed it as a traffic
+# frequency, so its AFIS was never reached. The name decides, with the words
+# the published data's descriptions use for the same thing
+# (navdata.build.POSITION_MAP) -- and a name that says it is a traffic
+# frequency stays one, "UNICOM RADIO" included.
+_TRAFFIC_KINDS = frozenset({2, 3, 4})
+_INFORMATION_WORDS = re.compile(
+    r"(?<![A-Z0-9])(?:INFORMATION|INFO|AFIS|FIS|RADIO|RDO|A/G)(?![A-Z0-9])")
+_TRAFFIC_WORDS = re.compile(
+    r"(?<![A-Z0-9])(?:UNICOM|UNIC|MULTICOM|CTAF|TRAFFIC|ATF|TIBA|SAFETYCOM)"
+    r"(?![A-Z0-9])")
+
+
+def position_for(kind: int, name: str) -> str | None:
+    """Our position for a simulator frequency: its type, read with its name
+    where the type is one the simulator shares between a traffic frequency
+    and an information service."""
+    position = POSITIONS.get(int(kind))
+    if position == "CTAF" and int(kind) in _TRAFFIC_KINDS:
+        said = " ".join((name or "").upper().split())
+        if _INFORMATION_WORDS.search(said) and not _TRAFFIC_WORDS.search(said):
+            return "INFO"
+    return position
+
 
 # SimConnect message ids, from the SDK header.
 _RECV_EXCEPTION = 1
@@ -280,10 +308,10 @@ class SimFacilities:
         raw = bytes(payload[:length])
         kind, hertz = ctypes.cast(
             raw, ctypes.POINTER(ctypes.c_int32 * 2)).contents[:]
-        position = POSITIONS.get(int(kind))
+        name = raw[8:].split(b"\x00")[0].decode("utf-8", "replace").strip()
+        position = position_for(int(kind), name)
         if position is None or hertz <= 0:
             return None
-        name = raw[8:].split(b"\x00")[0].decode("utf-8", "replace").strip()
         return Frequency(position=position,
                          mhz=round(hertz / 1_000_000.0, 3),
                          name=name, kind=int(kind))
@@ -296,4 +324,5 @@ class SimFacilities:
 
 
 __all__ = ["SimFacilities", "Frequency", "find_simconnect", "POSITIONS",
+           "position_for",
            "SEARCH", "NEEDS"]

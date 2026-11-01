@@ -1,0 +1,23 @@
+{
+  "_comment": "Which INTERACTIVE POINT of each aircraft model is which door. 'match' is text looked for in the simulator title (case does not matter), 'exclude' is text that rules a title out, 'doors' is role -> interactive point index; the exit event takes index + 1. Roles starting with 'cargo' are holds, everything else is a passenger or service door. A model with no entry here has its doors left alone, which is right for FSLTL's FAIB models: they have no door animation at all. Add an entry with scripts/scan_doors.py, which sets 'verified' once the indices have been watched.",
+  "A321 Asobo": {
+    "match": [
+      "A321"
+    ],
+    "exclude": [
+      "FSLTL",
+      "FAIB",
+      "PassiveAircraft"
+    ],
+    "doors": {
+      "pax_l1": 0,
+      "pax_r1": 1,
+      "pax_l2": 2,
+      "pax_r2": 3,
+      "cargo_aft": 6,
+      "cargo_fwd": 7
+    },
+    "verified": true,
+    "measured_on": "the flyable A321, simulator title \"A321\" (scan_portes.py --title \"A321\"); not the PassiveAircraft A321 CEO/NEO, on which these points toggle but no door moves"
+  }
+}

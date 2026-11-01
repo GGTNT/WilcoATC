@@ -111,10 +111,13 @@ def _voices(config: Config) -> Check:
         counts[spec.engine] = counts.get(spec.engine, 0) + 1
     detail = ", ".join(f"{count} {name.title()}"
                        for name, count in sorted(counts.items()))
-    if counts.get("kokoro"):
+    # Supertonic is every controller speaking their own language and the
+    # whole of the US; without it those are Piper's, which works and sounds
+    # its age.
+    if counts.get("supertonic"):
         return Check("voices", "Controller voices", "ok", detail)
     return Check("voices", "Controller voices", "warn",
-                 f"{detail}, Kokoro not installed", fix="voices")
+                 f"{detail}, Supertonic not installed", fix="voices")
 
 
 def _speech(config: Config) -> Check:
@@ -350,6 +353,49 @@ def _windows_block(config: Config) -> Check | None:
     )
 
 
+def _runways(config: Config) -> Check:
+    """Where the runways come from: the simulator while it runs (its
+    facility data, the authority, since the aeroplane rolls on them), the
+    airports it has described kept for 60 days, and OurAirports for the
+    rest. Read off the cache folder; nothing is asked of the simulator."""
+    from .navdata.runway_cache import MAX_AGE_DAYS, RunwayCache
+    from .paths import data_root
+
+    kept = RunwayCache(data_root() / "airports").airports()
+    fresh = [(ident, age) for ident, age in kept if age <= MAX_AGE_DAYS]
+    if not fresh:
+        return Check("runways", "Runways", "ok",
+                     "from the simulator while it runs; none kept yet, so "
+                     "OurAirports until then")
+    oldest = max(age for _ident, age in fresh)
+    return Check("runways", "Runways", "ok",
+                 f"from the simulator while it runs; {len(fresh)} airports "
+                 f"kept from it (the oldest {oldest:.0f} days); OurAirports "
+                 f"for the rest")
+
+
+def _live_traffic(config: Config) -> Check:
+    """Whose traffic flies, and, with the live traffic on, exactly what
+    leaves the machine for it. Nothing is asked of the network here: the
+    row is the privacy line, said where a pilot looks."""
+    from .integrations.fsltl import traffic_source
+
+    live = config.traffic.live
+    source = traffic_source(config.traffic)
+    if source == "fsltl":
+        return Check("live_traffic", "Live traffic", "off",
+                     "FSLTL flies the traffic (traffic.source)")
+    if not live.enabled:
+        return Check("live_traffic", "Live traffic", "off", "switched off")
+    asked = "adsb.lol, adsb.fi" + (", your own receiver" if live.own_url
+                                   else "")
+    detail = (f"{asked}: only your position and a {live.radius_nm:.0f} nm "
+              f"radius are sent, every {max(live.poll_s, 6.0):.0f} s")
+    if live.routes:
+        detail += "; adsbdb.com is asked the callsigns heard"
+    return Check("live_traffic", "Live traffic", "ok", detail)
+
+
 def _weather(config: Config) -> Check:
     from .weather.metar import WeatherProvider
 
@@ -377,6 +423,8 @@ CHECKS: tuple[tuple[str, str, Callable[[Config], Check | None]], ...] = (
     ("ai", "AI understanding", _ai),
     ("windows_block", "Windows block", _windows_block),
     ("weather", "Weather", _weather),
+    ("live_traffic", "Live traffic", _live_traffic),
+    ("runways", "Runways", _runways),
 )
 
 

@@ -139,8 +139,54 @@ def is_valid_channel(mhz: float) -> bool:
     return khz % 100 in _NAMES
 
 
+# Where the airband is 8.33 kHz and a frequency is known by its channel name:
+# the ICAO EUR states that took the mandate, by ICAO prefix. Israel (LL),
+# Turkey (LT) and the Palestinian territories (LV) carry an L and did not.
+# UNVERIFIED state by state: the mandate's own list was not read for this.
+_EIGHT_33_LETTERS = ("E", "L")
+_NOT_EIGHT_33 = ("LL", "LT", "LV")
+
+# The distress channel is a 25 kHz frequency everywhere and keeps its name:
+# nobody says "one two one decimal five zero five".
+_KEPT = frozenset({121_500})
+
+
+def names_channels(ident: str) -> bool:
+    """Whether frequencies here go by their 8.33 channel names: what the AIP
+    publishes, the radio shows and the controller says."""
+    code = (ident or "").strip().upper()
+    return (len(code) >= 2 and code[0] in _EIGHT_33_LETTERS
+            and code[:2] not in _NOT_EIGHT_33)
+
+
+def shown(mhz: float, ident: str) -> float:
+    """The number for a frequency where it is: its channel name in 8.33
+    airspace (126.625 -> 126.630), the carrier everywhere else (a US radio
+    has no 126.630 to show)."""
+    if not names_channels(ident) or carrier_khz(mhz) in _KEPT:
+        return carrier(mhz)
+    return channel_name(carrier(mhz))
+
+
+def spoken_channel(mhz: float, ident: str) -> tuple[float, bool]:
+    """What a controller here says for a frequency, and whether every
+    decimal of it is said: the channel name, six digits, in 8.33 airspace;
+    the number as it was given, read as it always was, everywhere else."""
+    if not names_channels(ident) or carrier_khz(mhz) in _KEPT:
+        return mhz, False
+    return channel_name(carrier(mhz)), True
+
+
+def channel_digits(mhz: float) -> str:
+    """The decimals to say of a channel name: all three, or only the first
+    when the last two are zero (ICAO Annex 10 Vol II, 5.2.1.4.3.1)."""
+    frac = f"{float(mhz):.3f}".partition(".")[2]
+    return frac[0] if frac[1:] == "00" else frac
+
+
 __all__ = [
     "to_khz", "carrier_khz", "carrier", "same_channel", "is_eight_33",
-    "snap", "snap_khz",
+    "snap", "snap_khz", "names_channels", "shown", "channel_digits",
+    "spoken_channel",
     "channel_name", "is_valid_channel", "AIRBAND_LOW_KHZ", "AIRBAND_HIGH_KHZ",
 ]

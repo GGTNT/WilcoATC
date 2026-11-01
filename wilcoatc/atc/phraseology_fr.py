@@ -30,6 +30,10 @@ from __future__ import annotations
 from typing import Sequence
 
 from . import speech_fr as fr
+from ..navdata.channels import spoken_channel
+
+# The circle's side, as the French clause says it.
+_FR_COMPASS = {"north": "nord", "east": "est", "south": "sud", "west": "ouest"}
 from .phraseology import (Aircraft, Weather, _join, _pick, _sentence,
                           without_callsign)
 
@@ -66,13 +70,44 @@ class FrenchPhraseology:
     UNKNOWN_DESTINATION = "votre destination"
     DEFAULT_APPROACH = "ILS"
 
+    def stand(self, number: int, gate: bool = False) -> str:
+        """A stand by its number, for a taxi in.
+
+        "Poste" is the word French aerodromes use for a stand ("poste de
+        stationnement"); whether the DGAC manual of phraseology has the
+        controller say "roulez vers le poste" or "roulez au poste" has not
+        been checked, and the first is used because it is the form this
+        phrasebook's taxi already has.
+        """
+        return f"le poste {fr.cardinal(int(number))}"
+
     def approach_name(self, kind: str) -> str:
-        return {"VISUAL": "à vue"}.get(kind, kind)
+        """See :meth:`Phraseology.approach_name`. UNVERIFIED: "LOC arrière"
+        for a back course."""
+        from .approaches import split_name
+        from .speech import _ALPHABET
+
+        base, letter = split_name(kind)
+        word = {"VISUAL": "à vue", "LOC BC": "LOC arrière",
+                "VOR/DME": "VOR DME", "NDB/DME": "NDB DME"}.get(base, base)
+        return f"{word} {_ALPHABET.get(letter, letter)}" if letter else word
+
+    def circle_clause(self, runway: str, side: str = "") -> str:
+        """A circle to land: "suivie d'une MVL piste 07". UNVERIFIED: the
+        DGAC manual was not consulted for a circling clearance."""
+        body = f"suivie d'une MVL piste {self.rwy(runway)}"
+        if side:
+            body += f", au {_FR_COMPASS.get(side, side)} de l'aérodrome"
+        return body
 
     # Les points de report qui tiennent un circuit sans radar.
     REPORT_MIDFIELD_DOWNWIND = "en milieu de vent arrière"
     REPORT_TURNING_BASE = "en base"
     REPORT_ENTERING_DOWNWIND = "en vent arrière"
+    REPORT_FINAL = "en finale"
+    REPORT_BASE = "en base"
+    REPORT_LINED_UP = "aligné"
+    REPORT_LEAVING_ZONE = "quittant la zone"
 
     _LEGS = {"downwind": "vent arrière", "base": "base", "final": "finale",
              "crosswind": "vent traversier", "upwind": "montée initiale"}
@@ -80,7 +115,7 @@ class FrenchPhraseology:
     # La France ne parle pas de classes sur la fréquence, elle nomme le
     # volume : la CTR autour d'un terrain, la TMA au-dessus.
     _AIRSPACE = {"B": "la région terminale", "C": "la région terminale",
-                 "D": "la zone de contrôle"}
+                 "D": "la CTR"}
 
     def leg(self, name: str) -> str:
         return self._LEGS.get((name or "").lower(), self._LEGS["downwind"])
@@ -116,6 +151,8 @@ class FrenchPhraseology:
         # controller somewhere else is still told where the region's is.
         self.transition = int(transition) or 5000
         self.digit_dialect = "fr"
+        # The French VFR practice (the DGAC's), wherever French is spoken.
+        self.region = "fr"
 
     # ------------------------------------------------------------------
     # primitives
@@ -127,8 +164,14 @@ class FrenchPhraseology:
     def alt(self, feet: float, transition: int = 0, level_from: int = 0) -> str:
         return fr.altitude(feet, transition or self.transition, level_from)
 
+    def vfr_alt(self, feet: float, transition: int = 0) -> str:
+        return self.alt(feet, transition)
+
+    channels: str = ""      # as Phraseology.channels
+
     def freq(self, mhz: float) -> str:
-        return fr.frequency(mhz)
+        mhz, named = spoken_channel(mhz, self.channels)
+        return fr.frequency(mhz, channel=named)
 
     def hdg(self, degrees: float) -> str:
         return fr.heading(degrees)
@@ -169,10 +212,11 @@ class FrenchPhraseology:
         departure_freq: float = 0.0,
         squawk: str = "1200",
         transition_altitude: int = 5000,
+        runway: str = "",
     ) -> str:
         """A full IFR clearance in French, in the published order."""
         if departure_procedure:
-            via = f"par la {departure_procedure}"
+            via = f"par la {self.procedure(departure_procedure)}"
             if transition:
                 via += f", transition {transition}"
             via += f", puis {route}"
@@ -182,8 +226,12 @@ class FrenchPhraseology:
         parts = [
             self.addressed(aircraft, station),
             f"autorisé {destination} {via}",
-            f"montez initialement {self.alt(initial_altitude, transition_altitude)}",
         ]
+        if runway:
+            # UNVERIFIED: the DGAC form of the runway in a clearance.
+            parts.append(f"piste {self.rwy(runway)}")
+        parts.append(
+            f"montez initialement {self.alt(initial_altitude, transition_altitude)}")
         if cruise_altitude and cruise_altitude > initial_altitude:
             parts.append(
                 f"prévoyez {self.alt(cruise_altitude, transition_altitude)} "
@@ -198,23 +246,22 @@ class FrenchPhraseology:
         self, aircraft: Aircraft, station: str, *, airspace: str = "",
         departure_freq: float = 0.0, squawk: str = "1200",
         altitude_restriction: float = 0.0, direction: str = "",
+        pressure: float = 0.0, exit_point: str = "",
     ) -> str:
-        parts = [self.addressed(aircraft, station)]
-        if airspace:
-            body = f"autorisé à quitter {airspace}"
-            if direction:
-                body += f", départ {direction} approuvé"
-            parts.append(body)
-        elif direction:
-            parts.append(f"départ {direction} approuvé")
-        else:
-            parts.append("départ VFR approuvé")
+        """La sortie d'un VFR : "quittez la CTR par Sierra, altitude maximum
+        1500 pieds, QNH 1013, transpondeur 7000". Jamais "autorisé à quitter".
+        UNVERIFIED: the plan's DGAC form, not checked against the manual."""
+        where = (f"par {exit_point}" if exit_point
+                 else f"par le {direction}" if direction else "")
+        parts = [self.addressed(aircraft, station),
+                 " ".join(w for w in ("quittez", airspace or "la CTR", where) if w)]
         if altitude_restriction:
-            parts.append(f"maintenez VFR à ou en dessous de "
-                         f"{self.alt(altitude_restriction)}")
+            parts.append(f"altitude maximum {self.alt(altitude_restriction)}")
+        if pressure:
+            parts.append(self.pressure(pressure))
         if departure_freq:
             parts.append(f"fréquence départ {self.freq(departure_freq)}")
-        parts.append(f"affichez {fr.squawk(squawk)}")
+        parts.append(f"transpondeur {fr.squawk(squawk)}")
         return _join(*parts) + "."
 
     def readback_correct(self, aircraft: Aircraft, *, next_station: str = "",
@@ -271,18 +318,21 @@ class FrenchPhraseology:
     def taxi_to_runway(
         self, aircraft: Aircraft, station: str, runway: str,
         route: Sequence[str], *, hold_short: str = "", altimeter: float = 0.0,
-        abbreviated: bool = True,
+        abbreviated: bool = True, hold_short_taxiway: str = "",
     ) -> str:
         """``roulez`` plus the route, then the holding point.
 
         French names the holding point rather than saying "hold short of":
-        "point d'attente piste zéro six".
+        "point d'attente piste zéro six". A long taxi cut in two holds
+        before the next taxiway (UNVERIFIED: the DGAC wording).
         """
         parts = [self.addressed(aircraft, station, abbreviated)]
         if route:
             parts.append(f"roulez par {fr.taxi_route(route)}")
         else:
             parts.append("roulez vers la piste")
+        if hold_short_taxiway:
+            parts.append(f"maintenez avant {fr.taxiway(hold_short_taxiway)}")
         parts.append(f"point d'attente piste {self.rwy(runway)}")
         if hold_short:
             parts.append(f"maintenez avant la piste {self.rwy(hold_short)}")
@@ -293,13 +343,15 @@ class FrenchPhraseology:
     def taxi_to_parking(
         self, aircraft: Aircraft, station: str, route: Sequence[str],
         destination: str = "le parking", *, hold_short: str = "",
-        abbreviated: bool = True,
+        abbreviated: bool = True, hold_short_taxiway: str = "",
     ) -> str:
         parts = [self.addressed(aircraft, station, abbreviated)]
         if route:
             parts.append(f"roulez vers {destination} par {fr.taxi_route(route)}")
         else:
             parts.append(f"roulez vers {destination}")
+        if hold_short_taxiway:
+            parts.append(f"maintenez avant {fr.taxiway(hold_short_taxiway)}")
         if hold_short:
             parts.append(f"maintenez avant la piste {self.rwy(hold_short)}")
         return _join(*parts) + "."
@@ -349,27 +401,36 @@ class FrenchPhraseology:
         self, aircraft: Aircraft, runway: str, weather: Weather | None = None,
         *, station: str = "", after_departure: str = "",
         abbreviated: bool = True, traffic: str = "",
+        caution: str = "",
+        immediate: bool = False,
     ) -> str:
         parts = [self.addressed(aircraft, station, abbreviated)]
         if traffic:
             parts.append(traffic)
         if weather is not None:
             parts.append(self.wind(weather))
+        if caution:
+            parts.append(caution)
         parts.append(f"piste {self.rwy(runway)}")
         if after_departure:
             parts.append(after_departure)
-        parts.append("autorisé décollage")
+        # UNVERIFIED: "décollage immédiat".
+        parts.append("autorisé décollage immédiat" if immediate
+                     else "autorisé décollage")
         return _join(*parts) + "."
 
     def cleared_to_land(
         self, aircraft: Aircraft, runway: str, weather: Weather | None = None,
         *, station: str = "", sequence: str = "", abbreviated: bool = True,
+        caution: str = "",
     ) -> str:
         parts = [self.addressed(aircraft, station, abbreviated)]
         if sequence:
             parts.append(sequence)
         if weather is not None:
             parts.append(self.wind(weather))
+        if caution:
+            parts.append(caution)
         parts.append(f"piste {self.rwy(runway)}")
         parts.append("autorisé atterrissage")
         return _join(*parts) + "."
@@ -377,13 +438,17 @@ class FrenchPhraseology:
     def cleared_touch_and_go(self, aircraft: Aircraft, runway: str,
                              weather: Weather | None = None, *,
                              sequence: str = "", station: str = "",
-                             abbreviated: bool = True) -> str:
+                             abbreviated: bool = True,
+                             caution: str = "") -> str:
         parts = [self.addressed(aircraft, station, abbreviated)]
         if sequence:
             parts.append(sequence)
         if weather is not None:
             parts.append(self.wind(weather))
-        parts += [f"piste {self.rwy(runway)}", "autorisé option"]
+        if caution:
+            parts.append(caution)
+        # UNVERIFIED: "posé-décollé" is the plan's DGAC form.
+        parts += [f"piste {self.rwy(runway)}", "autorisé posé-décollé"]
         return _join(*parts) + "."
 
     def closed_traffic_approved(
@@ -395,7 +460,7 @@ class FrenchPhraseology:
         if weather is not None:
             parts.append(self.wind(weather))
         parts += [f"piste {self.rwy(runway)}", "autorisé décollage",
-                  f"tour de piste main {direction} approuvé"]
+                  f"tour de piste main {direction}"]
         return _join(*parts) + "."
 
     def make_short_approach(self, aircraft: Aircraft, reason: str = "") -> str:
@@ -409,6 +474,57 @@ class FrenchPhraseology:
             return _join(aircraft.spoken(True),
                          f"virage à {direction} approuvé") + "."
         return _join(aircraft.spoken(True), "poursuite en route approuvée") + "."
+
+    # --- la piste occupée --------------------------------------------------
+    # UNVERIFIED: every form below.
+
+    def traffic_on_final(self, traffic: str, miles: float) -> str:
+        n = max(1, int(round(miles)))
+        return f"trafic {traffic} en finale à {fr.distance(n)}"
+
+    def land_after(self, aircraft: Aircraft, runway: str,
+                   weather: Weather | None = None, *, traffic: str,
+                   station: str = "", abbreviated: bool = True,
+                   caution: str = "") -> str:
+        parts = [self.addressed(aircraft, station, abbreviated),
+                 f"piste {self.rwy(runway)}", f"atterrissez après {traffic}"]
+        if weather is not None:
+            parts.append(self.wind(weather))
+        if caution:
+            parts.append(caution)
+        return _join(*parts) + "."
+
+    def departing_prior(self) -> str:
+        return "un trafic décollera avant votre arrivée"
+
+    def line_up_behind(self, aircraft: Aircraft, runway: str, traffic: str, *,
+                       station: str = "", abbreviated: bool = True) -> str:
+        return _join(self.addressed(aircraft, station, abbreviated),
+                     f"derrière {traffic}",
+                     f"alignez-vous piste {self.rwy(runway)}", "derrière") + "."
+
+    def landing_traffic_named(self, traffic: str) -> str:
+        return f"{traffic} à l'atterrissage"
+
+    # --- les attentes -------------------------------------------------------
+    # UNVERIFIED: every form below.
+
+    def orbit(self, aircraft: Aircraft, side: str, sequence: str = "") -> str:
+        return _join(aircraft.spoken(True), sequence,
+                     f"faites un tour complet par la {side} pour espacement",
+                     "rappelez terminé") + "."
+
+    def hold_at(self, aircraft: Aircraft, station: str, point: str,
+                runway: str) -> str:
+        return _join(self.addressed(aircraft, station), f"attendez à {point}",
+                     "circuit chargé", f"piste {self.rwy(runway)}",
+                     "je vous rappelle") + "."
+
+    def leave_hold(self, aircraft: Aircraft, point: str) -> str:
+        return f"quittez {point}"
+
+    def expedite(self, aircraft: Aircraft, reason: str = "") -> str:
+        return _join(aircraft.spoken(True), "accélérez", reason) + "."
 
     def go_around(self, aircraft: Aircraft, reason: str = "",
                   instruction: str = "") -> str:
@@ -451,23 +567,67 @@ class FrenchPhraseology:
         parts = [self.addressed(aircraft, station)]
         if sequence:
             parts.append(sequence)
+        # The leg is the report: "rappelez vent arrière main gauche piste 27"
+        # is the whole instruction (UNVERIFIED: the plan's DGAC form).
         if straight_in:
             parts.append(f"en approche directe piste {self.rwy(runway)}")
+            if report:
+                parts.append(f"rappelez {report}")
         elif leg:
-            parts.append(f"intégrez en {leg} main {direction} "
+            parts.append(f"rappelez {leg} main {direction} "
                          f"piste {self.rwy(runway)}")
         else:
             parts.append(f"intégrez le circuit main {direction} "
                          f"piste {self.rwy(runway)}")
-        if report:
-            parts.append(f"rappelez {report}")
+            if report:
+                parts.append(f"rappelez {report}")
         if weather is not None:
             parts.append(self.wind(weather))
             parts.append(self.pressure(weather.qnh_hpa))
         return _join(*parts) + "."
 
-    def report_position(self, aircraft: Aircraft, point: str) -> str:
-        return _join(aircraft.spoken(True), f"rappelez {point}") + "."
+    def vrp(self, name: str, altitude_ft: float = 0.0) -> str:
+        from .phraseology import _is_letters
+
+        said = fr.letters(name) if _is_letters(name) else name
+        if altitude_ft:
+            said = f"{said}, {self.alt(altitude_ft)}"
+        return said
+
+    def infringement(self, aircraft: Aircraft, station: str, airspace: str,
+                     turn: str, heading: float) -> str:
+        # UNVERIFIED: no DGAC source for the wording.
+        return _join(self.addressed(aircraft, station),
+                     f"vous pénétrez dans {airspace} sans clairance",
+                     f"virez à {turn} cap {self.hdg(heading)}",
+                     "restez en dehors de l'espace contrôlé") + "."
+
+    def enter_zone(self, aircraft: Aircraft, airspace: str, via: str = "") -> str:
+        # UNVERIFIED, as above.
+        return _join(aircraft.spoken(True),
+                     f"pénétrez dans {airspace}" + (f" par {via}" if via else "")) + "."
+
+    def join_report(self) -> str:
+        return self.leg("downwind")
+
+    def report_after_downwind(self) -> tuple[str, str]:
+        # "Rappelez dernier virage": the turn on to final, at the end of the
+        # base, so it is chased as the base report.
+        return "dernier virage", "base"
+
+    def join_overhead(self, aircraft: Aircraft, station: str, runway: str,
+                      altitude_ft: float, pressure: float,
+                      direction: str = "gauche") -> str:
+        # UNVERIFIED: the verticale terrain join; the order of the items.
+        return _join(self.addressed(aircraft, station),
+                     f"rappelez verticale terrain à {self.alt(altitude_ft)}",
+                     f"piste {self.rwy(runway)}",
+                     f"tour de piste main {direction}",
+                     self.pressure(pressure)) + "."
+
+    def report_position(self, aircraft: Aircraft, point: str,
+                        sequence: str = "") -> str:
+        return _join(aircraft.spoken(True), sequence, f"rappelez {point}") + "."
 
     def extend_downwind(self, aircraft: Aircraft, reason: str = "") -> str:
         parts = [aircraft.spoken(True), "prolongez vent arrière"]
@@ -475,6 +635,26 @@ class FrenchPhraseology:
             parts.append(reason)
         parts.append("je vous rappelle en base")
         return _join(*parts) + "."
+
+    def traffic_on_leg(self, traffic: str, leg: str) -> str:
+        """``"le Cessna en base"``."""
+        return f"{traffic} en {leg}" if traffic and leg else traffic
+
+    def turn_base(self, aircraft: Aircraft, sequence: str = "") -> str:
+        # UNVERIFIED: the DGAC manual was not available to check the words.
+        parts = [aircraft.spoken(True), "virez en base"]
+        if sequence:
+            parts.append(sequence)
+        return _join(*parts) + "."
+
+    def say_position(self, aircraft: Aircraft) -> str:
+        # UNVERIFIED, as above.
+        return _join(aircraft.spoken(True), "rappelez votre position") + "."
+
+    def confirm_leg(self, aircraft: Aircraft, seen: str) -> str:
+        # UNVERIFIED, as above.
+        return _join(aircraft.spoken(True),
+                     f"confirmez votre position, je vous ai en {seen}") + "."
 
     def cleared_low_approach(self, aircraft: Aircraft, runway: str) -> str:
         return _join(aircraft.spoken(True), f"piste {self.rwy(runway)}",
@@ -534,6 +714,24 @@ class FrenchPhraseology:
             parts.append(restriction)
         return _join(*parts) + "."
 
+    def descend_crossing(self, aircraft: Aircraft, fix: str, feet: float, *,
+                         station: str = "", abbreviated: bool = True,
+                         transition_altitude: int = 5000,
+                         transition_level: int = 0, pressure: float = 0.0,
+                         fix_spoken: str = "") -> str:
+        """See :meth:`Phraseology.descend_crossing`. UNVERIFIED: the DGAC
+        manual was not consulted for a level to reach by a point."""
+        from .speech import is_flight_level
+
+        level = self.alt(feet, transition_altitude, transition_level)
+        parts = [self.addressed(aircraft, station, abbreviated),
+                 f"descendez pour être {level} à "
+                 f"{fix_name_fr(fix, fix_spoken)}"]
+        if pressure and not is_flight_level(
+                feet, transition_altitude or self.transition, transition_level):
+            parts.append(self.pressure(pressure))
+        return _join(*parts) + "."
+
     def maintain_altitude(self, aircraft: Aircraft, feet: float,
                           transition_altitude: int = 5000) -> str:
         return _join(aircraft.spoken(True),
@@ -568,6 +766,117 @@ class FrenchPhraseology:
         return _join(self.addressed(aircraft, station, abbreviated),
                      f"direct {fix_name_fr(fix, fix_spoken)}") + "."
 
+    def procedure(self, name: str) -> str:
+        """Une SID ou une STAR telle qu'on la dit : "OPALE 7K" est "Opale
+        sept Kilo"."""
+        from .procedures import spoken
+
+        return spoken(name, self.d, fix_name_fr, fr.ALPHABET_FR)
+
+    def rnav_to(self, fix: str) -> str:
+        # The US tower's form only; in France the SID is the route.
+        return ""
+
+    def climb_clause(self, feet: float, transition_altitude: int = 5000) -> str:
+        return f"montez {self.alt(feet, transition_altitude)}"
+
+    def direct_clause(self, fix: str, fix_spoken: str = "") -> str:
+        return f"direct {fix_name_fr(fix, fix_spoken)}"
+
+    def verify_on_departure(self, aircraft: Aircraft, procedure: str) -> str:
+        # UNVERIFIED: the IFR plan's line, in French.
+        return _join(aircraft.spoken(True),
+                     f"vérifiez que vous êtes sur le départ "
+                     f"{self.procedure(procedure)}") + "."
+
+    def confirm_departure(self, aircraft: Aircraft, procedure: str) -> str:
+        # UNVERIFIED: "confirmez" is the DGAC's word for a doubt; the line
+        # for a SID is the IFR plan's.
+        return _join(aircraft.spoken(True),
+                     f"confirmez le départ {self.procedure(procedure)}") + "."
+
+    def verify_direct(self, aircraft: Aircraft, fix: str,
+                      fix_spoken: str = "") -> str:
+        # UNVERIFIED: the IFR plan's line, in French.
+        return _join(aircraft.spoken(True),
+                     f"confirmez que vous êtes direct "
+                     f"{fix_name_fr(fix, fix_spoken)}") + "."
+
+    def deviation_approved(self, aircraft: Aircraft, degrees: int = 0,
+                           side: str = "", fix: str = "",
+                           fix_spoken: str = "") -> str:
+        # UNVERIFIED: the DGAC manual was not consulted for a deviation.
+        where = {"left": "à gauche", "right": "à droite"}.get(side, "")
+        if degrees and where:
+            what = f"déviation de {int(degrees)} degrés {where} approuvée"
+        elif where:
+            what = f"déviation {where} de la route approuvée"
+        else:
+            what = "déviation approuvée"
+        parts = [aircraft.spoken(True), what]
+        if fix:
+            parts.append(f"dès que possible, direct {fix_name_fr(fix, fix_spoken)}")
+        return _join(*parts) + "."
+
+    def vectors_for(self, approach: str, runway: str) -> str:
+        # UNVERIFIED: the DGAC manual was not consulted for the reason.
+        return f"guidage pour l'approche {approach} piste {self.rwy(runway)}"
+
+    def fly_present_heading(self, aircraft: Aircraft, reason: str = "") -> str:
+        return _join(aircraft.spoken(True), "maintenez le cap actuel", reason) + "."
+
+    def intercept_clearance(self, aircraft: Aircraft, heading: float,
+                            direction: str, approach: str, runway: str, *,
+                            maintain_ft: float = 0.0, localizer: bool = True,
+                            visual: bool = False, transition_altitude: int = 5000,
+                            transition_level: int = 0) -> str:
+        """See :meth:`Phraseology.intercept_clearance`. UNVERIFIED: the
+        DGAC wording for the intercept and "rappelez établi"."""
+        side = {"left": "gauche", "right": "droite"}.get(direction, "")
+        turn = (f"tournez à {side} cap {self.hdg(heading)}" if side
+                else f"prenez le cap {self.hdg(heading)}")
+        if visual:
+            return _join(aircraft.spoken(True), turn,
+                         f"autorisé approche à vue piste {self.rwy(runway)}") + "."
+        return _join(aircraft.spoken(True), turn,
+                     f"autorisé approche {approach} piste {self.rwy(runway)}",
+                     "rappelez établi") + "."
+
+    def tower_continue(self, aircraft: Aircraft, runway: str,
+                       station: str = "", sequence: str = "") -> str:
+        # UNVERIFIED: the DGAC wording for the check-in on the final.
+        return _join(self.addressed(aircraft, station, not station), sequence,
+                     f"continuez l'approche, piste {self.rwy(runway)}") + "."
+
+    def hold_clearance(self, aircraft: Aircraft, fix: str, side: str,
+                       inbound: float, altitude_ft: float, leg_minutes: float,
+                       efc_hhmm: str, *, station: str = "",
+                       abbreviated: bool = True, transition_altitude: int = 5000,
+                       transition_level: int = 0, fix_spoken: str = "") -> str:
+        """See :meth:`Phraseology.hold_clearance`. UNVERIFIED: the DGAC
+        wording of a holding clearance."""
+        legs = "une minute et demie" if leg_minutes == 1.5 else "une minute"
+        return _join(self.addressed(aircraft, station, abbreviated),
+                     f"attendez à {fix_name_fr(fix, fix_spoken)}",
+                     f"maintenez {self.alt(altitude_ft, transition_altitude, transition_level)}",
+                     f"rapprochement {self.hdg(inbound)}",
+                     "virages à droite", f"éloignement {legs}",
+                     f"heure d'approche prévue {self.d(efc_hhmm)}") + "."
+
+    def hold_sequence(self, aircraft: Aircraft, number: int, efc_hhmm: str) -> str:
+        return _join(aircraft.spoken(True), f"numéro {fr.cardinal(int(number))}",
+                     f"heure d'approche prévue {self.d(efc_hhmm)}") + "."
+
+    def leave_the_hold(self, aircraft: Aircraft, fix: str,
+                       fix_spoken: str = "") -> str:
+        return _join(aircraft.spoken(True), "quittez l'attente",
+                     f"direct {fix_name_fr(fix, fix_spoken)}") + "."
+
+    def verify_holding(self, aircraft: Aircraft, fix: str,
+                       fix_spoken: str = "") -> str:
+        return _join(aircraft.spoken(True),
+                     f"confirmez en attente à {fix_name_fr(fix, fix_spoken)}") + "."
+
     def resume_own_navigation(self, aircraft: Aircraft) -> str:
         return _join(aircraft.spoken(True), "reprenez votre navigation") + "."
 
@@ -587,6 +896,15 @@ class FrenchPhraseology:
     def resume_normal_speed(self, aircraft: Aircraft) -> str:
         return _join(aircraft.spoken(True), "reprenez vitesse normale") + "."
 
+    def speed_until(self, aircraft: Aircraft, knots: float, miles: int) -> str:
+        # UNVERIFIED: the DGAC wording of a speed held to a DME distance.
+        return _join(aircraft.spoken(True),
+                     f"maintenez {fr.speed(knots)} jusqu'à {fr.cardinal(int(miles))} DME") + "."
+
+    def no_speed_restrictions(self, aircraft: Aircraft) -> str:
+        # UNVERIFIED: "pas de restriction de vitesse".
+        return _join(aircraft.spoken(True), "pas de restriction de vitesse") + "."
+
     def traffic_advisory(self, aircraft: Aircraft, oclock: int,
                          distance_nm: float, direction: str = "",
                          traffic_type: str = "", altitude_ft: float = 0.0,
@@ -604,6 +922,92 @@ class FrenchPhraseology:
             parts.append("niveau inconnu")
         return _join(*parts) + "."
 
+    def traffic_call(self, aircraft: Aircraft, *, oclock: int,
+                     distance_nm: float, motion: str, heading: float,
+                     traffic: str = "", relative_ft: int = 0) -> str:
+        # UNVERIFIED: the DGAC wording for a traffic call.
+        hour = ("midi" if oclock == 12 else "une heure" if oclock == 1
+                else f"{fr.cardinal(oclock)} heures")
+        parts = [aircraft.spoken(True), f"trafic à {hour}",
+                 f"à {fr.distance(distance_nm)}",
+                 {"same": "même sens", "opposite": "sens opposé",
+                  "left_to_right": "de gauche à droite",
+                  "right_to_left": "de droite à gauche"}[motion]]
+        if traffic:
+            parts.append(traffic)
+        if abs(relative_ft) < 100:
+            parts.append("même niveau")
+        else:
+            parts.append(f"{self.alt(abs(relative_ft))} "
+                         f"{'plus haut' if relative_ft > 0 else 'plus bas'}")
+        return _join(*parts) + "."
+
+    def caution_wake(self) -> str:
+        return "attention turbulence de sillage"
+
+    def runway_wet(self) -> str:
+        # UNVERIFIED.
+        return "piste mouillée"
+
+    # --- VFR spécial ------------------------------------------------------
+    # UNVERIFIED: every form below; the DGAC manual was not read for them.
+
+    def vfr_below_minima(self, aircraft: Aircraft, station: str = "", *,
+                         offer: bool = True, airspace: str = "") -> str:
+        parts = [self.addressed(aircraft, station),
+                 "conditions inférieures aux minima VFR"]
+        if airspace:
+            parts.append(f"restez en dehors de {airspace}")
+        parts.append("VFR spécial possible sur demande" if offer
+                     else "rappelez vos intentions")
+        return _join(*parts) + "."
+
+    def _svfr_terms(self, altitude_ft: float, pressure: float) -> list[str]:
+        parts = []
+        if altitude_ft:
+            parts.append(f"altitude maximum {self.alt(altitude_ft)}")
+        if pressure:
+            parts.append(self.pressure(pressure))
+        return parts
+
+    def special_vfr_leave(self, aircraft: Aircraft, station: str = "", *,
+                          zone: str = "", airspace: str = "", exit_point: str = "",
+                          direction: str = "", altitude_ft: float = 0.0,
+                          pressure: float = 0.0, squawk: str = "",
+                          departure_freq: float = 0.0) -> str:
+        where = (f"par {exit_point}" if exit_point
+                 else f"par le {direction}" if direction else "")
+        head = " ".join(w for w in ("autorisé à quitter", airspace or "la CTR",
+                                    "en VFR spécial", where) if w)
+        parts = [self.addressed(aircraft, station), head,
+                 *self._svfr_terms(altitude_ft, pressure)]
+        if departure_freq:
+            parts.append(f"fréquence départ {self.freq(departure_freq)}")
+        if squawk:
+            parts.append(f"transpondeur {fr.squawk(squawk)}")
+        return _join(*parts) + "."
+
+    def special_vfr_enter(self, aircraft: Aircraft, station: str = "", *,
+                          zone: str = "", airspace: str = "", entry_point: str = "",
+                          altitude_ft: float = 0.0, pressure: float = 0.0,
+                          report: str = "") -> str:
+        where = f"par {entry_point}" if entry_point else ""
+        head = " ".join(w for w in ("autorisé à pénétrer dans", airspace or "la CTR",
+                                    "en VFR spécial", where) if w)
+        parts = [self.addressed(aircraft, station), head,
+                 *self._svfr_terms(altitude_ft, pressure)]
+        if report:
+            parts.append(f"rappelez {report}")
+        return _join(*parts) + "."
+
+    def special_vfr_unable(self, aircraft: Aircraft, reason: str,
+                           station: str = "") -> str:
+        why = {"visibility": "visibilité inférieure aux minima",
+               "ceiling": "plafond inférieur aux minima",
+               "night": "pas de VFR spécial de nuit"}.get(reason, "")
+        return _join(self.addressed(aircraft, station), "VFR spécial impossible",
+                     why, "rappelez vos intentions") + "."
+
     def traffic_no_factor(self, aircraft: Aircraft) -> str:
         return _join(aircraft.spoken(True), "trafic précédent sans influence") + "."
 
@@ -614,11 +1018,11 @@ class FrenchPhraseology:
     # --- approach ---
 
     def expect_approach(self, aircraft: Aircraft, approach: str, runway: str,
-                        airport: str = "") -> str:
+                        airport: str = "", circle: str = "") -> str:
         body = f"prévoyez l'approche {approach} piste {self.rwy(runway)}"
         if airport:
             body += f" à {airport}"
-        return _join(aircraft.spoken(True), body) + "."
+        return _join(aircraft.spoken(True), body, circle) + "."
 
     def vector_to_final(self, aircraft: Aircraft, *, distance_nm: float,
                         fix: str, heading: float, direction: str,
@@ -641,7 +1045,8 @@ class FrenchPhraseology:
     def cleared_approach(self, aircraft: Aircraft, approach: str, runway: str,
                          *, straight_in: bool = False, maintain_ft: float = 0.0,
                          descend_ft: float = 0.0, transition_altitude: int = 0,
-                         transition_level: int = 0, pressure: float = 0.0) -> str:
+                         transition_level: int = 0, pressure: float = 0.0,
+                         circle: str = "") -> str:
         """See :meth:`Phraseology.cleared_approach`. "Jusqu'à l'établissement"
         is the wording :meth:`vector_to_final` already used; it is not
         checked against a DGAC publication."""
@@ -656,6 +1061,8 @@ class FrenchPhraseology:
                     transition_level):
                 parts.append(self.pressure(pressure))
         parts.append(f"{prefix} {approach} piste {self.rwy(runway)}")
+        if circle:
+            parts.append(circle)
         if maintain_ft:
             parts.append(f"maintenez {self.alt(maintain_ft, transition_altitude, transition_level)} "
                          "jusqu'à l'établissement")
@@ -677,8 +1084,21 @@ class FrenchPhraseology:
         parts.append("rappelez terrain en vue")
         return _join(*parts) + "."
 
-    def descend_via(self, aircraft: Aircraft, arrival: str) -> str:
-        return _join(aircraft.spoken(True), f"descendez selon la {arrival}") + "."
+    def descend_via(self, aircraft: Aircraft, arrival: str, *,
+                    station: str = "", abbreviated: bool = True,
+                    level_ft: float = 0.0, transition_altitude: int = 5000,
+                    transition_level: int = 0, pressure: float = 0.0) -> str:
+        """See :meth:`Phraseology.descend_via`. UNVERIFIED: the DGAC
+        manual was not consulted for a STAR named with a descent."""
+        from .speech import is_flight_level
+
+        parts = [self.addressed(aircraft, station, abbreviated),
+                 f"arrivée {self.procedure(arrival)}",
+                 f"descendez {self.alt(level_ft, transition_altitude, transition_level)}"]
+        if pressure and not is_flight_level(
+                level_ft, transition_altitude or self.transition, transition_level):
+            parts.append(self.pressure(pressure))
+        return _join(*parts) + "."
 
     def climb_via_sid(self, aircraft: Aircraft, departure: str,
                       top_altitude: float = 0.0,
@@ -721,9 +1141,11 @@ class FrenchPhraseology:
     def vfr_squawk(self) -> str:
         return VFR_SQUAWK_EUROPE
 
-    def squawk_vfr(self, aircraft: Aircraft) -> str:
-        return _join(aircraft.spoken(True),
-                     f"affichez {fr.squawk(VFR_SQUAWK_EUROPE)}") + "."
+    def squawk_vfr(self, aircraft: Aircraft, frequency_change: bool = False) -> str:
+        parts = [aircraft.spoken(True), f"transpondeur {fr.squawk(VFR_SQUAWK_EUROPE)}"]
+        if frequency_change:
+            parts.append("changement de fréquence approuvé")
+        return _join(*parts) + "."
 
     def maintain_vfr_clause(self, altitude_ft: float = 0.0, *,
                             at_or_below: bool = True,
@@ -740,6 +1162,20 @@ class FrenchPhraseology:
             altitude_ft, at_or_below=at_or_below,
             transition_altitude=transition_altitude)) + "."
 
+    def say_altitude(self, aircraft: Aircraft) -> str:
+        # UNVERIFIED: DGAC wording.
+        return _join(aircraft.spoken(True), "annoncez votre altitude") + "."
+
+    def descend_at_or_below(self, aircraft: Aircraft, altitude_ft: float, *,
+                            transition_altitude: int = 0,
+                            shown_ft: float = 0.0) -> str:
+        # UNVERIFIED: DGAC wording.
+        shown = (f"je vous ai à {self.vfr_alt(shown_ft, transition_altitude)}"
+                 if shown_ft else "")
+        return _join(aircraft.spoken(True), shown,
+                     f"descendez {self.vfr_alt(altitude_ft, transition_altitude)}"
+                     " ou en dessous") + "."
+
     def vfr_altitude_discretion(self, aircraft: Aircraft) -> str:
         return _join(aircraft.spoken(True), "maintenez VFR",
                      "altitude à votre convenance") + "."
@@ -748,14 +1184,13 @@ class FrenchPhraseology:
         self, aircraft: Aircraft, airspace: str, *, altitude_ft: float = 0.0,
         route: str = "", report: str = "", transition_altitude: int = 5000,
     ) -> str:
-        parts = [aircraft.spoken(True), f"autorisé à traverser {airspace}"]
-        if route:
-            parts.append(route)
+        # UNVERIFIED: "transit autorisé par ..., altitude maximum ...,
+        # rappelez ..." is the plan's DGAC form.
+        parts = [aircraft.spoken(True),
+                 f"transit autorisé par {route}" if route else "transit autorisé"]
         if altitude_ft:
-            parts.append("maintenez VFR à ou en dessous de "
+            parts.append("altitude maximum "
                          f"{self.alt(altitude_ft, transition_altitude)}")
-        else:
-            parts.append("maintenez VFR")
         if report:
             parts.append(f"rappelez {report}")
         return _join(*parts) + "."
@@ -782,6 +1217,12 @@ class FrenchPhraseology:
     # ------------------------------------------------------------------
     # handoffs
     # ------------------------------------------------------------------
+
+    def called_elsewhere(self, aircraft: Aircraft, station: str,
+                         called: str, called_freq: float) -> str:
+        """Un autre poste appelé sur la fréquence de celui-ci."""
+        return _join(self.addressed(aircraft, station, True),
+                     f"{called} est sur {self.freq(called_freq)}") + "."
 
     def handoff(self, aircraft: Aircraft, next_station: str, next_freq: float,
                 *, when: str = "", farewell: bool = False, welcome: str = "",
@@ -810,20 +1251,129 @@ class FrenchPhraseology:
     def remain_this_frequency(self, aircraft: Aircraft) -> str:
         return _join(aircraft.spoken(True), "restez sur cette fréquence") + "."
 
-    def frequency_change_approved(self, aircraft: Aircraft) -> str:
-        return _join(aircraft.spoken(True), "changement de fréquence approuvé") + "."
+    def frequency_change_approved(self, aircraft: Aircraft,
+                                  squawk: str = "") -> str:
+        parts = [aircraft.spoken(True)]
+        if squawk:
+            parts.append(f"transpondeur {fr.squawk(squawk)}")
+        parts.append("changement de fréquence approuvé")
+        return _join(*parts) + "."
+
+    # ------------------------------------------------------------------
+    # les services d'information : AFIS, information de vol
+    # ------------------------------------------------------------------
+    #
+    # UNVERIFIED: the DGAC Manuel de phraséologie was not available. "Piste
+    # libre", "à votre convenance" and "rappelez vent arrière" are the forms
+    # the plan names and that French AFIS agents are heard to use.
+
+    def afis_field(self, aircraft: Aircraft, station: str, runway: str,
+                   weather: Weather, *, direction: str = "", traffic: str = "",
+                   report: str = "") -> str:
+        parts = [self.addressed(aircraft, station),
+                 f"piste {self.rwy(runway)} en service"]
+        if direction:
+            parts.append(f"tour de piste main {direction}")
+        parts += [self.wind(weather), self.pressure(weather.qnh_hpa),
+                  f"trafic {traffic}" if traffic else "pas de trafic signalé"]
+        if report:
+            parts.append(f"rappelez {report}")
+        return _join(*parts) + "."
+
+    def afis_traffic_report(self, aircraft: Aircraft, traffic: str,
+                            report: str) -> str:
+        # UNVERIFIED: the words. "Reçu" where there is no traffic: the next
+        # report is asked for either way.
+        return _join(aircraft.spoken(True),
+                     f"trafic {traffic}" if traffic else "reçu",
+                     f"rappelez {report}") + "."
+
+    def afis_takeoff(self, aircraft: Aircraft, weather: Weather) -> str:
+        return _join(aircraft.spoken(True), "piste libre", self.wind(weather),
+                     "décollage à votre convenance") + "."
+
+    def afis_land(self, aircraft: Aircraft, weather: Weather) -> str:
+        return _join(aircraft.spoken(True), "piste libre", self.wind(weather),
+                     "atterrissage à votre convenance") + "."
+
+    def afis_runway_occupied(self, aircraft: Aircraft, traffic: str = "") -> str:
+        parts = [aircraft.spoken(True), "piste occupée"]
+        if traffic:
+            parts.append(f"trafic {traffic}")
+        return _join(*parts) + "."
+
+    def fis_service(self, aircraft: Aircraft, station: str, pressure: float,
+                    region: str = "icao") -> str:
+        return _join(self.addressed(aircraft, station), "information de vol",
+                     self.pressure(pressure)) + "."
+
+    def position_fix(self, aircraft: Aircraft, miles: int, direction: str,
+                     field: str) -> str:
+        # "à l'est", "au nord-ouest".
+        where = f"à l'{direction}" if direction[:1] in "aeiou" else f"au {direction}"
+        return _join(aircraft.spoken(True),
+                     f"vous êtes à {fr.cardinal(int(miles))} nautiques "
+                     f"{where} de {field}") + "."
+
+    def bearing_fix(self, aircraft: Aircraft, kind: str, bearing: int) -> str:
+        return _join(aircraft.spoken(True),
+                     f"{kind} {fr.digits(f'{int(bearing) % 360 or 360:03d}')}") + "."
+
+    def flight_plan_activated(self, aircraft: Aircraft, station: str = "") -> str:
+        return _join(self.addressed(aircraft, station),
+                     "plan de vol VFR activé") + "."
+
+    def flight_plan_relayed(self, aircraft: Aircraft) -> str:
+        # UNVERIFIED.
+        return _join(aircraft.spoken(True), "bien reçu",
+                     "je clôture votre plan de vol") + "."
+
+    def flight_plan_closed(self, aircraft: Aircraft, station: str = "") -> str:
+        return _join(self.addressed(aircraft, station),
+                     "plan de vol clôturé") + "."
+
+    def weather_report(self, aircraft: Aircraft, field: str,
+                       weather: Weather) -> str:
+        return _join(aircraft.spoken(True), f"météo {field}",
+                     self.wind(weather), self.pressure(weather.qnh_hpa)) + "."
 
     def radar_service_terminated(self, aircraft: Aircraft, *,
                                  squawk_vfr: bool = True,
                                  next_station: str = "",
                                  next_freq: float = 0.0) -> str:
-        parts = [aircraft.spoken(True), "service radar terminé"]
+        # UNVERIFIED: the plan's DGAC form.
+        parts = [aircraft.spoken(True), "fin du service radar"]
         if squawk_vfr:
-            parts.append(f"affichez {fr.squawk(VFR_SQUAWK_EUROPE)}")
+            parts.append(f"transpondeur {fr.squawk(VFR_SQUAWK_EUROPE)}")
         if next_station and next_freq:
             parts.append(f"contactez {next_station} {self.freq(next_freq)}")
         else:
             parts.append("changement de fréquence approuvé")
+        return _join(*parts) + "."
+
+    def handoff_reoffer(self, aircraft: Aircraft, next_station: str,
+                        next_freq: float) -> str:
+        # UNVERIFIED: no recording of a handoff said again was checked.
+        return (f"{aircraft.spoken(True)}, avez-vous la fréquence ? "
+                f"Contactez {next_station} {self.freq(next_freq)}.")
+
+    def centre_check_in(self, aircraft: Aircraft, station: str,
+                        level_ft: float = 0.0, transition: int = 0) -> str:
+        parts = [self.addressed(aircraft, station, False), "identifié"]
+        if level_ft:
+            parts.append(f"maintenez {self.alt(level_ft, transition)}")
+        return _join(*parts) + "."
+
+    def oceanic_contact(self, aircraft: Aircraft, next_station: str,
+                        hf_khz: Sequence[int] = ()) -> str:
+        # UNVERIFIED: no French recording of a transfer to HF was checked.
+        parts = [aircraft.spoken(True), "fin du service radar"]
+        body = f"contactez {next_station}"
+        if hf_khz:
+            body += f" en HF, principale {fr.digits(hf_khz[0])}"
+            if len(hf_khz) > 1:
+                body += f", secondaire {fr.digits(hf_khz[1])}"
+        parts.append(body)
         return _join(*parts) + "."
 
     def ifr_cancelled(self, aircraft: Aircraft) -> str:
@@ -883,6 +1433,47 @@ class FrenchPhraseology:
     def unable_unknown_fix(self, aircraft: Aircraft) -> str:
         return self.unable(aircraft, "répétez le point")
 
+    # UNVERIFIED: the three below; no French recording or manual checked.
+    def unable_climb_traffic(self, aircraft: Aircraft, asked_ft: float,
+                             level_ft: float, *,
+                             transition_altitude: int = 0) -> str:
+        return _join(aircraft.spoken(True),
+                     f"impossible {self.alt(asked_ft, transition_altitude)} "
+                     "en raison du trafic",
+                     f"maintenez {self.alt(level_ft, transition_altitude)}") + "."
+
+    def unable_direct(self, aircraft: Aircraft, fix: str) -> str:
+        return _join(aircraft.spoken(True),
+                     f"impossible direct {fix_name_fr(fix)}",
+                     "maintenez la route actuelle") + "."
+
+    def expect_lower(self, aircraft: Aircraft, minutes: int) -> str:
+        return _join(aircraft.spoken(True),
+                     f"prévoyez la descente dans {fr.cardinal(minutes)} "
+                     "minutes") + "."
+
+    UNABLE_REASONS = {
+        "speed_limit": "vitesse limitée à 250 nœuds sous le niveau 100",
+        "traffic_ahead": "trafic devant vous",
+        "no_hold_fix": "pas de point d'attente sur votre route, précisez le point",
+        "no_alternate": "pas de dégagement déposé, précisez le terrain",
+        "no_runway": "piste {runway} non disponible",
+        "no_approach": "approche {approach} piste {runway} non disponible, prévoyez {other}",
+    }
+
+    def unable_because(self, aircraft: Aircraft, reason: str, **params) -> str:
+        # UNVERIFIED: the DGAC wording of each reason.
+        if "runway" in params:
+            params["runway"] = self.rwy(params["runway"])
+        return self.unable(aircraft, self.UNABLE_REASONS[reason].format(**params))
+
+    def cleared_to_airport(self, aircraft: Aircraft, airport: str,
+                           altitude_ft: float, *, transition_altitude: int = 5000,
+                           transition_level: int = 0) -> str:
+        # UNVERIFIED: the DGAC wording of a diversion.
+        return _join(aircraft.spoken(True), f"autorisé vers {airport} direct",
+                     f"maintenez {self.alt(altitude_ft, transition_altitude, transition_level)}") + "."
+
     def unable_unknown_destination(self, aircraft: Aircraft) -> str:
         return self.unable(aircraft, "annoncez votre destination")
 
@@ -896,6 +1487,19 @@ class FrenchPhraseology:
         return _join(aircraft.spoken(True),
                      f"je vous reçois {fr.cardinal(readability)} sur "
                      f"{fr.cardinal(5)}") + "."
+
+    def runway_change(self, station: str, runway: str) -> str:
+        # UNVERIFIED: the DGAC wording.
+        return _sentence(f"à toutes les stations, {station}, changement de "
+                         f"piste, piste en service {self.rwy(runway)}")
+
+    def information_current(self, letter: str, pressure: float) -> str:
+        """L'information ATIS en vigueur, pour un pilote qui en annonce une
+        ancienne."""
+        # UNVERIFIED: "information ... en vigueur" is the usual French form;
+        # the DGAC Manuel de phraséologie was not available to check it.
+        return _sentence(f"information {fr.letters(letter)} en vigueur, "
+                         f"{self.pressure(pressure)}")
 
     def no_reply(self, aircraft: Aircraft, station: str) -> str:
         return _join(aircraft.spoken(False), station, "comment me recevez-vous") + " ?"
@@ -955,8 +1559,12 @@ class FrenchPhraseology:
 
     def correction(self, aircraft: Aircraft, wrong: list[str], values: dict,
                    current_altitude_ft: float = 0.0,
-                   transition_altitude: int = 5000) -> str:
-        """Correct only the items read back wrongly."""
+                   transition_altitude: int = 5000,
+                   confirm: bool = False) -> str:
+        """Correct only the items read back wrongly; ``confirm`` asks
+        instead (see :meth:`Phraseology.correction`)."""
+        if confirm and list(wrong) == ["sid"]:
+            return self.confirm_departure(aircraft, values["sid"])
         parts: list[str] = []
         for key in wrong:
             value = values[key]
@@ -974,6 +1582,14 @@ class FrenchPhraseology:
                 parts.append(f"contactez sur {self.freq(value)}")
             elif key == "speed_kt":
                 parts.append(f"vitesse {fr.speed(value)}")
+            elif key == "vfr_ceiling_ft":
+                parts.append(f"altitude maximum {self.alt(value)}")
+            elif key == "exit_point":
+                parts.append(f"par {self.vrp(value)}")
+            elif key == "sid":
+                parts.append(f"par la {self.procedure(value)}")
+            elif key == "star":
+                parts.append(f"arrivée {self.procedure(value)}")
             elif key == "hold_short":
                 # The instruction's own words. Correcting with "point
                 # d'attente" names the holding point of the runway being
@@ -983,6 +1599,8 @@ class FrenchPhraseology:
                     parts.append(f"maintenez avant la piste {self.rwy(value)}")
                 else:
                     parts.append("maintenez avant la piste")
+        if confirm:
+            return _join(aircraft.spoken(True), "confirmez " + ", ".join(parts)) + "."
         return self.readback_incorrect(aircraft, ", ".join(parts) + ", collationnez")
 
     # ------------------------------------------------------------------

@@ -79,6 +79,20 @@ def confirmation(instruction: Instruction, language: str = "en") -> str:
     return ", ".join(p for p in parts if p).strip() + "."
 
 
+def _spoken_route(route, language: str) -> str:
+    """The taxiways as the controller said them; the instruction keeps the
+    names, and each phrasebook spells them its own way."""
+    if not route:
+        return ""
+    if isinstance(route, str):
+        return route
+    if (language or "en")[:2] == "fr":
+        from .speech_fr import taxi_route
+    else:
+        from .speech import taxi_route
+    return taxi_route(route)
+
+
 def readback(instruction: Instruction, aircraft: Aircraft,
              phraseology, language: str = "en",
              station_name: str = "") -> str:
@@ -101,7 +115,7 @@ def readback(instruction: Instruction, aircraft: Aircraft,
                                   float(values["frequency"]))
         if kind == "taxi":
             return speech.taxi(aircraft, str(values.get("runway", "")),
-                               str(values.get("route", "")),
+                               _spoken_route(values.get("route"), language),
                                str(values.get("hold_short", "")))
         if kind == "line_up_and_wait":
             return speech.line_up(aircraft, str(values.get("runway", "")))
@@ -112,6 +126,16 @@ def readback(instruction: Instruction, aircraft: Aircraft,
         if kind == "go_around":
             return speech.going_around(
                 aircraft, float(values.get("altitude_ft", 0) or 0))
+        if kind in ("approach_clearance", "visual_approach") \
+                and "heading" in values:
+            # A vector carrying the clearance (atc/vectors.py): both are owed.
+            visual = kind == "visual_approach"
+            return speech.intercept(
+                aircraft, float(values["heading"]),
+                phraseology.approach_name("VISUAL") if visual
+                else _approach_named(instruction.text),
+                str(values.get("runway", "")),
+                0.0 if visual else float(values.get("altitude_ft", 0) or 0))
         if kind == "approach_clearance":
             # Not the hold-short frame the runway-only fallback gives, which
             # read "hold short runway two two" back to an approach clearance
@@ -127,7 +151,16 @@ def readback(instruction: Instruction, aircraft: Aircraft,
                 str(values.get("destination", "")),
                 str(values.get("squawk", "")),
                 float(values.get("altitude_ft", 0) or 0),
+                sid=str(values.get("sid", "")),
             )
+        if kind == "diversion" and values.get("airport"):
+            return speech.cleared_to(aircraft, str(values["airport"]),
+                                     float(values.get("altitude_ft", 0) or 0))
+        if kind == "hold" and values.get("fix"):
+            return speech.hold(aircraft, str(values["fix"]),
+                               float(values.get("altitude_ft", 0) or 0))
+        if kind == "descend_via" and values.get("star"):
+            return speech.descend_via(aircraft, str(values["star"]))
         if kind in ("altitude", "vfr_altitude") and "altitude_ft" in values:
             return speech.level(aircraft, float(values["altitude_ft"]),
                                 climbing=_climbing(instruction))

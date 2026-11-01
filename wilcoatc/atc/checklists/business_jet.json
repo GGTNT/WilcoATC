@@ -1,0 +1,120 @@
+{
+  "_comment": "The class flows for a business jet, the items in English as the operators' checklists are.",
+  "source": "Cessna Citation CJ4 and Embraer Phenom 300 normal checklists for the items; airline SOP conventions (a challenge, its response, one checklist per phase) as in the Airbus A320 and Boeing 737 FCOMs; FAA Airplane Flying Handbook (FAA-H-8083-3C) chapter 15 (transition to jet-powered airplanes).",
+  "checklists": {
+    "before_start": {
+      "title": {"en": "before start", "fr": "avant mise en route"},
+      "items": [
+        {"challenge": "Preflight inspection", "response": "complete", "accept": ["complete", "check"]},
+        {"challenge": {"en": "Parking brake", "fr": "Frein de parc"}, "response": {"en": "set", "fr": "serré"}, "accept": ["set", "on"], "check": {"var": "parking_brake", "op": "eq", "value": true}},
+        {"challenge": "Battery", "response": "on", "accept": ["on"], "check": {"var": "battery_master", "op": "eq", "value": true}},
+        {"challenge": "Fuel quantity", "response": "checked", "accept": ["check", "value"]},
+        {"challenge": "Takeoff data", "response": "set", "accept": ["set", "check"], "note": "The speeds are the pilot's, from the AFM: the first officer never says a figure."},
+        {"challenge": {"en": "Altimeter", "fr": "Altimètre"}, "response": {"en": "set", "fr": "calé"}, "accept": ["set", "value"], "check": {"var": "kohlsman_hpa", "op": "near", "value": "$qnh", "tolerance": 1.0}, "note": "Against the QNH the controller gave, else the field's."},
+        {"challenge": {"en": "Clearance", "fr": "Clairance"}, "response": {"en": "received and set", "fr": "reçue et affichée"}, "accept": ["check", "set", "complete"], "rules": "ifr"},
+        {"challenge": {"en": "Beacon", "fr": "Feu anticollision"}, "response": {"en": "on", "fr": "allumé"}, "accept": ["on"], "check": {"var": "beacon_light", "op": "eq", "value": true}, "note": "Anti-collision lights on before the engines start: 14 CFR 91.209(b), the FAA Airplane Flying Handbook ch. 2."}
+      ]
+    },
+    "after_start": {
+      "title": {"en": "after start", "fr": "après mise en route"},
+      "items": [
+        {"challenge": "Generators", "response": "on", "accept": ["on", "check"]},
+        {"challenge": "Engine instruments", "response": "checked", "accept": ["check", "green"]},
+        {"challenge": {"en": "Avionics master", "fr": "Interrupteur avionique"}, "response": {"en": "on", "fr": "marche"}, "accept": ["on"], "check": {"var": "avionics_master", "op": "eq", "value": true}},
+        {"challenge": {"en": "Transponder code", "fr": "Code transpondeur"}, "response": {"en": "set", "fr": "affiché"}, "accept": ["set", "value"], "rules": "ifr", "check": {"var": "transponder_code", "op": "eq", "value": "$squawk"}},
+        {"challenge": {"en": "Transponder", "fr": "Transpondeur"}, "response": {"en": "VFR code set", "fr": "code VFR affiché"}, "accept": ["set", "value"], "rules": "vfr", "check": {"var": "transponder_code", "op": "eq", "value": "$squawk"}}
+      ]
+    },
+    "taxi": {
+      "title": {"en": "taxi", "fr": "roulage"},
+      "items": [
+        {"challenge": "Brakes", "response": "checked", "accept": ["check"]},
+        {"challenge": "Flight controls", "response": "checked", "accept": ["check"]},
+        {"challenge": "Flight instruments", "response": "checked", "accept": ["check"]},
+        {"challenge": {"en": "Navigation source", "fr": "Source de navigation"}, "response": {"en": "set", "fr": "sélectionnée"}, "accept": ["set", "check"], "rules": "ifr"}
+      ]
+    },
+    "before_takeoff": {
+      "title": {"en": "before takeoff", "fr": "avant décollage"},
+      "items": [
+        {"challenge": "Flaps", "response": "set", "accept": ["set", "up", "value", "check"], "note": "Up or the takeoff stage on a CJ4: not checked."},
+        {"challenge": "Trims", "response": "set for takeoff", "accept": ["set", "check"]},
+        {"challenge": "Speed brakes", "response": "retracted", "accept": ["up", "off", "check"]},
+        {"challenge": "Takeoff speeds", "response": "set", "accept": ["set", "check"]},
+        {"challenge": "Probe heat", "response": "on", "accept": ["on"], "check": {"var": "pitot_heat", "op": "eq", "value": true}, "note": "UNVERIFIED: on for every takeoff on the CJ4 and most jets; the type's AFM says."},
+        {"challenge": {"en": "Clearance", "fr": "Clairance"}, "response": {"en": "confirmed", "fr": "confirmée"}, "accept": ["check", "complete"], "rules": "ifr"},
+        {"challenge": {"en": "Navigation source", "fr": "Source de navigation"}, "response": {"en": "set", "fr": "sélectionnée"}, "accept": ["set", "check"], "rules": "ifr"},
+        {"challenge": {"en": "Transponder", "fr": "Transpondeur"}, "response": {"en": "VFR code set", "fr": "code VFR affiché"}, "accept": ["set", "value"], "rules": "vfr", "check": {"var": "transponder_code", "op": "eq", "value": "$squawk"}},
+        {"challenge": {"en": "Circuit height", "fr": "Hauteur du tour de piste"}, "response": {"en": "set", "fr": "affichée"}, "accept": ["set", "value"], "rules": "vfr", "note": "Set on the altimeter bug; nothing reads the bug."},
+        {"challenge": {"en": "Transponder", "fr": "Transpondeur"}, "response": {"en": "ALT", "fr": "ALT"}, "accept": ["on", "set"], "check": {"var": "transponder_state", "op": "in", "value": [3, 4]}, "note": "UNVERIFIED: TRANSPONDER STATE is defined by this program and not yet measured on a running 2024; without an answer nothing is checked."},
+        {"challenge": {"en": "Strobes", "fr": "Feux à éclats"}, "response": {"en": "on", "fr": "allumés"}, "accept": ["on"], "check": {"var": "strobe_light", "op": "eq", "value": true}},
+        {"challenge": {"en": "Landing light", "fr": "Phare d'atterrissage"}, "response": {"en": "on", "fr": "allumé"}, "accept": ["on"], "check": {"var": "landing_light", "op": "eq", "value": true}, "note": "FAA Airplane Flying Handbook: lights on in the terminal area ('operation lights on')."}
+      ]
+    },
+    "after_takeoff": {
+      "title": {"en": "after takeoff", "fr": "après décollage"},
+      "items": [
+        {"challenge": {"en": "Landing gear", "fr": "Train d'atterrissage"}, "response": {"en": "up", "fr": "rentré"}, "accept": ["up", "check"], "check": {"var": "gear_down", "op": "eq", "value": false}},
+        {"challenge": {"en": "Flaps", "fr": "Volets"}, "response": {"en": "up", "fr": "rentrés"}, "accept": ["up", "check"], "check": {"var": "flaps_index", "op": "eq", "value": 0}},
+        {"challenge": "Yaw damper", "response": "on", "accept": ["on", "check"]},
+        {"challenge": "Pressurisation", "response": "checked", "accept": ["check"]}
+      ]
+    },
+    "cruise": {
+      "title": {"en": "cruise", "fr": "croisière"},
+      "items": [
+        {"challenge": "Altimeters", "response": "standard", "accept": ["set", "check"]},
+        {"challenge": "Fuel", "response": "checked", "accept": ["check", "value"]},
+        {"challenge": "Pressurisation", "response": "checked", "accept": ["check"]}
+      ]
+    },
+    "descent": {
+      "title": {"en": "descent", "fr": "descente"},
+      "items": [
+        {"challenge": "Pressurisation", "response": "set", "accept": ["set", "check"]},
+        {"challenge": "Landing data", "response": "set", "accept": ["set", "check"]},
+        {"challenge": {"en": "Next frequency", "fr": "Fréquence suivante"}, "response": {"en": "set", "fr": "affichée"}, "accept": ["set", "value"], "rules": "vfr", "check": {"var": "com1_standby", "op": "eq", "value": "$frequency"}, "note": "Against the frequency the controller gave; with none given, nothing is checked."},
+        {"challenge": {"en": "Approach briefing", "fr": "Briefing approche"}, "response": {"en": "complete", "fr": "effectué"}, "accept": ["complete", "check"], "rules": "ifr"}
+      ]
+    },
+    "approach": {
+      "title": {"en": "approach", "fr": "approche"},
+      "items": [
+        {"challenge": {"en": "Altimeter", "fr": "Altimètre"}, "response": {"en": "set", "fr": "calé"}, "accept": ["set", "value"], "check": {"var": "kohlsman_hpa", "op": "near", "value": "$qnh", "tolerance": 1.0}, "note": "Against the QNH the controller gave, else the field's."},
+        {"challenge": {"en": "Minimums", "fr": "Minima"}, "response": {"en": "set", "fr": "affichés"}, "accept": ["set", "value"], "rules": "ifr", "note": "Not checked: DECISION HEIGHT is the model's design figure on most aeroplanes, not the bug the pilot sets."},
+        {"challenge": {"en": "Navigation source", "fr": "Source de navigation"}, "response": {"en": "set", "fr": "sélectionnée"}, "accept": ["set", "check"], "rules": "ifr"},
+        {"challenge": {"en": "Approach briefing", "fr": "Briefing approche"}, "response": {"en": "complete", "fr": "effectué"}, "accept": ["complete", "check"], "rules": "ifr"},
+        {"challenge": {"en": "Circuit height", "fr": "Hauteur du tour de piste"}, "response": {"en": "set", "fr": "affichée"}, "accept": ["set", "value"], "rules": "vfr", "note": "Set on the altimeter bug; nothing reads the bug."},
+        {"challenge": {"en": "Circuit joining", "fr": "Intégration"}, "response": {"en": "briefed", "fr": "briefée"}, "accept": ["complete", "check"], "rules": "vfr"}
+      ]
+    },
+    "before_landing": {
+      "title": {"en": "before landing", "fr": "avant atterrissage"},
+      "items": [
+        {"challenge": {"en": "Landing gear", "fr": "Train d'atterrissage"}, "response": {"en": "down, three green", "fr": "sorti, trois vertes"}, "accept": ["down", "green", "check"], "check": {"var": "gear_down", "op": "eq", "value": true}},
+        {"challenge": "Flaps", "response": "as required", "accept": ["set", "value", "check"]},
+        {"challenge": "Speed brakes", "response": "retracted", "accept": ["up", "off", "check"]},
+        {"challenge": {"en": "Landing light", "fr": "Phare d'atterrissage"}, "response": {"en": "on", "fr": "allumé"}, "accept": ["on"], "check": {"var": "landing_light", "op": "eq", "value": true}, "note": "FAA Airplane Flying Handbook: lights on in the terminal area ('operation lights on')."},
+        {"challenge": {"en": "Autopilot", "fr": "Pilote automatique"}, "response": {"en": "off", "fr": "déconnecté"}, "accept": ["off", "check"], "rules": "vfr", "check": {"var": "autopilot", "op": "eq", "value": false}},
+        {"challenge": {"en": "Autopilot", "fr": "Pilote automatique"}, "response": {"en": "as required", "fr": "selon besoin"}, "accept": ["check", "on", "off", "set"], "rules": "ifr"}
+      ]
+    },
+    "after_landing": {
+      "title": {"en": "after landing", "fr": "après atterrissage"},
+      "items": [
+        {"challenge": {"en": "Flaps", "fr": "Volets"}, "response": {"en": "up", "fr": "rentrés"}, "accept": ["up", "check"], "check": {"var": "flaps_index", "op": "eq", "value": 0}},
+        {"challenge": {"en": "Strobes", "fr": "Feux à éclats"}, "response": {"en": "off", "fr": "éteints"}, "accept": ["off"], "check": {"var": "strobe_light", "op": "eq", "value": false}, "note": "Off on the ground so as not to dazzle (AIM 4-3-23)."},
+        {"challenge": "Speed brakes", "response": "retracted", "accept": ["up", "off", "check"]}
+      ]
+    },
+    "shutdown": {
+      "title": {"en": "shutdown", "fr": "arrêt moteur"},
+      "items": [
+        {"challenge": {"en": "Parking brake", "fr": "Frein de parc"}, "response": {"en": "set", "fr": "serré"}, "accept": ["set", "on"], "check": {"var": "parking_brake", "op": "eq", "value": true}},
+        {"challenge": {"en": "Avionics master", "fr": "Interrupteur avionique"}, "response": {"en": "off", "fr": "arrêt"}, "accept": ["off"], "check": {"var": "avionics_master", "op": "eq", "value": false}},
+        {"challenge": "Throttles", "response": "cut-off", "accept": ["off", "check"]},
+        {"challenge": "Battery", "response": "off", "accept": ["off"], "check": {"var": "battery_master", "op": "eq", "value": false}}
+      ]
+    }
+  }
+}

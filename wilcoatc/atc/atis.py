@@ -38,7 +38,7 @@ class AtisReport:
     landing_runways: list[str] = field(default_factory=list)
     departing_runways: list[str] = field(default_factory=list)
     issued_utc: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-    issued_monotonic: float = field(default_factory=time.monotonic)
+    issued_monotonic: float = field(default_factory=lambda: time.monotonic())
 
     @property
     def letter_spoken(self) -> str:
@@ -89,6 +89,11 @@ class AtisGenerator:
         self.approach_for = lambda runway: "ILS"
         # And the runway, from the same place. Unset, the wind decides.
         self.runway_for = None
+        # The VFR part of the departure briefing for a runway: ``(side,
+        # [point, ...])`` -- the published circuit side, "" where none is
+        # published, and the reporting points a controller would name.
+        # Unset, the broadcast has none, as it had before.
+        self.vfr_briefing = None
 
     def _letter_from_clock(self) -> int:
         """Start on a plausible letter rather than always on Alpha."""
@@ -100,7 +105,14 @@ class AtisGenerator:
     def update(self, weather: Weather, force: bool = False) -> AtisReport:
         """Issue a new ATIS if conditions have moved enough to warrant one."""
         if self.current is not None and not force:
-            if not self._materially_changed(self.current.weather, weather):
+            # The runway the controllers are using now, against the one the
+            # broadcast named: with the runway kept until the wind takes it
+            # away (ControllerBrain._wind_runway), the old weather no longer
+            # gives the old runway, so comparing the two weathers missed it.
+            moved = (self.current.landing_runways[:1]
+                     != list(self._runway_choice(weather))[:1])
+            if not moved and not self._materially_changed(self.current.weather,
+                                                          weather):
                 return self.current
         return self.issue(weather)
 
@@ -217,6 +229,7 @@ class AtisGenerator:
             # JO 7110.65 2-9-3: the instrument approach in use, by name.
             parts.append(f"{self._approach_type(runways)} runway "
                          f"{p.rwy(runways[0])} approach in use")
+        parts.extend(self._vfr_part(runways))
 
         # --- wind ---
         parts.append(p.wind(wx))
@@ -255,6 +268,40 @@ class AtisGenerator:
 
         return ". ".join(part.strip().rstrip(".") for part in parts if part.strip()) + "."
 
+    def _vfr_part(self, runways: list[str], french: bool = False) -> list[str]:
+        """The circuit and the reporting points, for the VFR departures.
+
+        The FAA's ATIS names a non-standard pattern ("right traffic") and no
+        reporting points, which are codes nobody says in the US; elsewhere
+        the hand of the circuit and the points are said. UNVERIFIED: the
+        words, and that a UK or French ATIS gives the points. No noise
+        abatement is said: nothing the program reads publishes it.
+        """
+        if not runways or self.vfr_briefing is None:
+            return []
+        try:
+            side, points = self.vfr_briefing(runways[0])
+        except Exception:
+            return []
+        p = self.phrase
+        said: list[str] = []
+        if french:
+            if side:
+                said.append(f"tour de piste {'à droite' if side == 'right' else 'à gauche'} "
+                            f"piste {p.rwy(runways[0])}")
+            if points:
+                said.append("points de report VFR " + ", ".join(points))
+            return said
+        if p.dialect == "faa":
+            if side == "right":
+                said.append(f"right traffic runway {p.rwy(runways[0])}")
+            return said
+        if side:
+            said.append(f"{side}-hand circuit runway {p.rwy(runways[0])}")
+        if points:
+            said.append("VFR reporting points " + ", ".join(points))
+        return said
+
     def _compose_french(self, letter: str, wx: Weather,
                         runways: list[str],
                         departing: list[str] | None = None) -> str:
@@ -287,6 +334,7 @@ class AtisGenerator:
                 spoken = " et ".join(p.rwy(r) for r in runways)
                 parts.append(f"pistes en service {spoken}")
             parts.append(f"approche {self._approach_type(runways)} à prévoir")
+        parts.extend(self._vfr_part(runways, french=True))
 
         parts.append(p.wind(wx))
         parts.append(sfr.visibility(wx.visibility_sm))

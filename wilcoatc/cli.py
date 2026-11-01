@@ -62,7 +62,14 @@ def cmd_setup(args) -> int:
     from .navdata.fetch import fetch_all
 
     console.rule("[bold]Navigation data")
-    fetch_all(force=args.force)
+    if args.vatglasses:
+        from .navdata.fetch import VATGLASSES_LICENCE
+
+        console.print("The en-route sectors are the VatGlasses data, under "
+                      f"{VATGLASSES_LICENCE}: for non-commercial use only. "
+                      "They are downloaded on their own and are not part of "
+                      "WilcoATC.")
+    fetch_all(force=args.force, vatglasses=args.vatglasses)
     # Only build when there is nothing to build on, or when asked outright.
     #
     # Rebuilding starts by deleting the database, and the database is not only
@@ -89,6 +96,20 @@ def cmd_setup(args) -> int:
         console.rule("[bold]Cloned voices")
         download_voices("chatterbox", force=args.force,
                         hq_model=config.voice.hq_model)
+        # The same as the tick box on the setup screen: the shipped clips go
+        # beside any of the pilot's own, and asking for the cloned voices is
+        # choosing them.
+        from .audio.voices import VOICE_DIR
+        from .install import shipped_prompts
+
+        added = shipped_prompts(VOICE_DIR)
+        if added:
+            console.print(f"{len(added)} cloned controllers added "
+                          "(see wilcoatc/audio/clones/ATTRIBUTION.md)")
+        if config.voice.engine != "chatterbox":
+            config.voice.engine = "chatterbox"
+            config.save(args.config)
+            console.print("voice.engine is now chatterbox")
 
     console.rule("[bold]Speech recognition")
     from .audio.stt import Recognizer
@@ -151,44 +172,17 @@ def cmd_devices(args) -> int:
 
     sticks, reason = JoystickPushToTalk.scan()
     if sticks:
-        # Listing a device proves only that SDL knows it exists. Reading a
-        # button needs the event queue moving, which is a separate thing and
-        # was for a while the reason the button did nothing at all: the list
-        # looked right and no press ever arrived.
-        try:
-            live = JoystickPushToTalk._pump(JoystickPushToTalk._import())
-        except Exception:
-            live = False
         table = Table(title="Controllers (for joystick push-to-talk)")
-        table.add_column("Index", justify="right")
+        table.add_column("Id")
         table.add_column("Name")
         table.add_column("Buttons", justify="right")
-        for index, name, buttons in sticks:
-            table.add_row(str(index), name, str(buttons))
+        for c in sticks:
+            table.add_row(c.id, c.name, str(c.buttons))
         console.print(table)
-        if not live:
-            console.print("[yellow]Button presses cannot be read on this "
-                          "computer: SDL will not run its event queue. Use a "
-                          "keyboard key for push-to-talk.[/yellow]")
-    elif reason == JoystickPushToTalk.MISSING:
-        from .paths import FROZEN
-
-        console.print("[dim]Joystick push-to-talk needs pygame-ce.[/dim]")
-        if FROZEN:
-            # Installing it into some other Python does nothing for a packaged
-            # build, which carries its own. Saying "pip install" here would
-            # send somebody round a loop they cannot get out of.
-            console.print("[dim]This is a packaged build, which should ship "
-                          "with it. Please report this.[/dim]")
-        else:
-            console.print("[dim]pip install pygame-ce[/dim]")
-    elif reason and reason != JoystickPushToTalk.NONE:
-        console.print(f"[yellow]Controllers could not be read: {reason}[/yellow]")
     else:
-        console.print("[dim]No game controllers detected. Plug one in and "
-                      "run this again.[/dim]")
+        console.print(f"[dim]{_controllers_why(reason)}[/dim]")
 
-    here = {name for _index, name, _buttons in sticks}
+    here = {c.name for c in sticks}
     known = [name for name in JoystickPushToTalk.remembered()
              if name not in here]
     if known:
@@ -198,6 +192,64 @@ def cmd_devices(args) -> int:
         console.print("[dim]Seen on this computer before, but not connected "
                       "now: " + ", ".join(known) + ".[/dim]")
     return 0
+
+
+def cmd_controllers(args) -> int:
+    """The game controllers, or the report a user attaches to an issue."""
+    import json
+
+    from .audio import controllers as ctl
+
+    if getattr(args, "probe", None):
+        # One SDL configuration, in this fresh process; the report runs one
+        # of these per hint because SDL reads its hints only once.
+        result = ctl.probe(args.probe)
+        text = json.dumps(result)
+        if getattr(args, "out", None):
+            Path(args.out).write_text(text, encoding="utf-8")
+        else:
+            print(text)
+        return 0
+
+    if getattr(args, "report", False):
+        seconds = float(getattr(args, "seconds", 10.0) or 10.0)
+
+        def prompt():
+            console.print(f"[bold]Press every button on your controllers now, "
+                          f"for {seconds:g} seconds.[/bold]")
+
+        path = ctl.write_report(seconds=seconds, on_capture=prompt)
+        console.print(f"Controller report written to {path}")
+        console.print("[dim]Attach this file to your GitHub issue.[/dim]")
+        return 0
+
+    found, reason = ctl.shared().list(rescan=True)
+    table = Table(title="Controllers (for joystick push-to-talk)")
+    for column in ("Id", "Name", "Buttons", "Index"):
+        table.add_column(column)
+    for c in found:
+        table.add_row(c.id, c.name, str(c.buttons), str(c.index))
+    console.print(table)
+    if not found:
+        console.print(f"[dim]{_controllers_why(reason)}[/dim]")
+    return 0
+
+
+def _controllers_why(reason: str) -> str:
+    """Why no controller is listed, without telling anybody to type pip."""
+    from .audio import controllers as ctl
+    from .paths import FROZEN
+
+    if reason == ctl.MISSING:
+        if FROZEN:
+            return ("Joystick support is missing from this installation. "
+                    "Please report it.")
+        return ("This checkout has no pygame-ce, which joystick "
+                "push-to-talk reads controllers through "
+                "(requirements-optional.txt).")
+    if reason and reason != ctl.NONE:
+        return f"Controllers could not be read: {reason}"
+    return "No game controllers detected. Plug one in."
 
 
 def _frequencies_from_sim(ident: str) -> int:
@@ -259,7 +311,9 @@ def cmd_freq(args) -> int:
     db = NavDB()
     airport = db.airport(args.airport)
     if airport is None:
-        console.print(f"[red]No airport matching {args.airport!r}.[/red]")
+        if db.fir(args.airport) is not None:
+            return _fir_frequencies(db, args.airport)
+        console.print(f"[red]No airport or FIR matching {args.airport!r}.[/red]")
         return 1
 
     console.print(Panel(
@@ -326,6 +380,52 @@ def _add_frequency(args) -> int:
     return 0
 
 
+def _fir_frequencies(db: NavDB, name: str) -> int:
+    """``freq <FIR>``: who works a FIR, at which levels, on what, and from
+    which source -- a borrowed or invented frequency says so."""
+    fir = db.fir(name)
+    console.print(Panel(
+        f"[bold]{fir.get('name') or fir['id']}[/bold]\n"
+        f"{fir['id']}  spoken as \"{fir.get('spoken') or fir['id']}\"  "
+        f"{'oceanic' if fir.get('oceanic') else 'domestic'}"
+        + ("" if fir.get("named") else "  (no callsign in VATSpy.dat)"),
+        title=fir["id"],
+    ))
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("Called")
+    table.add_column("Frequency", justify="right")
+    table.add_column("Levels")
+    table.add_column("Kind")
+    table.add_column("Source", style="dim", overflow="fold")
+
+    def level(feet: float, top: bool) -> str:
+        if (top and feet >= 99900.0) or (not top and feet <= 0.0):
+            return ""
+        return f"FL{int(round(feet / 100.0)):03d}"
+
+    for sector in db.enroute.sectors_of(name):
+        if sector.frequencies:
+            shown = " ".join(f"{f:.3f}" for f in sector.frequencies)
+        elif sector.hf_khz:
+            shown = "HF " + " ".join(str(k) for k in sector.hf_khz)
+        else:
+            shown = "-"
+        floor, ceiling = level(sector.floor_ft, False), level(sector.ceiling_ft, True)
+        levels = (f"{floor or 'SFC'}-{ceiling or 'UNL'}"
+                  if floor or ceiling else "all")
+        source = ("invented: report the real one" if sector.invented
+                  else sector.frequency_source
+                  or "no HF row in fir_frequencies.csv")
+        # The document and where it was read; the file's notes after the
+        # address are for whoever keeps it.
+        document, _, address = source.partition("http")
+        if address:
+            source = f"{document.strip()} http{address.split()[0]}"
+        table.add_row(sector.facility, shown, levels, sector.kind, source)
+    console.print(table)
+    return 0
+
+
 def _audit_frequencies(fix: bool = False) -> int:
     """Check the whole frequency table against what a radio can do."""
     import sqlite3
@@ -352,6 +452,24 @@ def _audit_frequencies(fix: bool = False) -> int:
         console.print(f"\n[yellow]{len(report.errors)} of these cannot be "
                       f"tuned at all. Run with --fix to put them back on the "
                       f"grid.[/yellow]")
+    # And how much VFR data there is to work with, file by file.
+    from .navdata.audit import summarise_coverage, vfr_coverage
+
+    console.print("")
+    for line in summarise_coverage(vfr_coverage(NavDB())):
+        console.print(line)
+    # And the approach areas: which fields are handed over by distance.
+    from .navdata.audit import approach_coverage, summarise_approaches
+
+    console.print("")
+    for line in summarise_approaches(approach_coverage(NavDB())):
+        console.print(line)
+    # And the FIRs: which are worked on a frequency borrowed or invented.
+    from .navdata.audit import summarise_firs
+
+    console.print("")
+    for line in summarise_firs(NavDB()):
+        console.print(line)
     return 0
 
 
@@ -398,6 +516,100 @@ def cmd_simbrief(args) -> int:
             config.flight.cruise_altitude_ft = plan.cruise_altitude_ft
         config.save(args.config)
         console.print(f"[green]Saved to {args.config}.[/green]")
+    return 0
+
+
+def cmd_traffic(args) -> int:
+    """The traffic, checked outside a flight. ``--live --dry-run`` runs the
+    live traffic round a field with no simulator and says what would be
+    drawn (integrations/live_dry.py)."""
+    from .navdata.db import NavDB
+
+    if not args.live:
+        console.print("[yellow]--live is the one check there is: the live "
+                      "traffic, against the simulator or (--dry-run) "
+                      "without it.[/yellow]")
+        return 2
+    if not args.dry_run:
+        return _traffic_against_the_simulator(args)
+    if not args.airport:
+        console.print("[yellow]--dry-run needs --airport, the field to look "
+                      "round.[/yellow]")
+        return 2
+    from .integrations.live_dry import default_log_path, dry_run
+
+    config = Config.load(args.config)
+    path = default_log_path()
+    dry_run(config, NavDB(), args.airport, args.minutes * 60.0,
+            out=console.print, log_path=path)
+    console.print(f"written to {path}")
+    return 0
+
+
+def _traffic_against_the_simulator(args) -> int:
+    """The live traffic in the running simulator, checked against the
+    real aeroplanes: every 10 s, each one drawn, how far the simulator has
+    it from where it was asked to draw it, and how far it is behind the
+    real one (30 s of flight by design). The live traffic is switched on
+    for this run only; config.yaml is not written."""
+    import json as _json
+    from datetime import datetime
+
+    from .engine import Engine
+    from .navdata.build import haversine_nm
+    from .paths import data_root
+
+    config = Config.load(args.config)
+    logs.configure(config)
+    config.traffic.live.enabled = True
+    if config.traffic.source == "auto":
+        config.traffic.source = "wilcoatc"
+    engine = Engine(config, NavDB(), _print_event)
+    engine.start(connect_sim=True)
+    path = (data_root() / "logs" / "live_check"
+            / f"{datetime.now().strftime('%Y%m%d-%H%M%S')}.jsonl")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    started = time.monotonic()
+    try:
+        with open(path, "a", encoding="utf-8") as handle:
+            while time.monotonic() - started < args.minutes * 60.0:
+                time.sleep(10.0)
+                rows = []
+                for flight in list(engine.traffic.flights):
+                    if flight.source != "live" or flight.done:
+                        continue
+                    read = engine.simtraffic.read_position(flight.written)
+                    lead = flight.lead_at
+                    rows.append({
+                        "callsign": flight.written, "phase": flight.phase,
+                        "asked": [round(flight.latitude, 5),
+                                  round(flight.longitude, 5),
+                                  round(flight.altitude_ft)],
+                        "drawn": ([round(v, 5) for v in read[:2]]
+                                  + [round(read[2])]) if read else None,
+                        "drawn_off_m": (round(haversine_nm(
+                            read[0], read[1], flight.latitude,
+                            flight.longitude) * 1852.0) if read else None),
+                        "behind_real_nm": (round(haversine_nm(
+                            lead[0], lead[1], flight.latitude,
+                            flight.longitude), 2) if lead else None)})
+                state = engine.live_feed.state if engine.live_feed else None
+                console.print(f"[bold]{len(rows)} live[/bold], feed "
+                              f"{state.status if state else 'off'} "
+                              f"{state.source if state else ''}")
+                for r in rows:
+                    console.print(
+                        f"  {r['callsign']:<9} {r['phase']:<9} drawn "
+                        f"{'not yet' if r['drawn_off_m'] is None else str(r['drawn_off_m']) + ' m off'}"
+                        f", {'?' if r['behind_real_nm'] is None else r['behind_real_nm']} nm behind the real one")
+                handle.write(_json.dumps({"t": round(time.monotonic() - started),
+                                          "aircraft": rows}) + "\n")
+                handle.flush()
+    except KeyboardInterrupt:
+        console.print()
+    finally:
+        engine.stop()
+    console.print(f"written to {path}")
     return 0
 
 
@@ -531,7 +743,8 @@ def cmd_atis(args) -> int:
                   f"runways in use: {', '.join(report.landing_runways) or 'n/a'}[/dim]")
 
     if args.play:
-        _speak_once(report.text, airport, "ATIS", db)
+        _speak_once(report.text, airport, "ATIS", db,
+                    config=Config.load(args.config))
     return 0
 
 
@@ -542,18 +755,44 @@ def cmd_say(args) -> int:
     if airport is None:
         console.print("[red]Specify an airport with --airport.[/red]")
         return 1
-    _speak_once(args.text, airport, args.position, db, save=args.save)
+    _speak_once(args.text, airport, args.position, db, save=args.save,
+                config=Config.load(args.config))
     return 0
 
 
-def _speak_once(text: str, airport, position: str, db: NavDB,
-                save: str | None = None) -> None:
-    from .audio.io import RadioPlayer
+def _configured_synth(config: Config):
+    """The synthesiser a pilot will actually hear: the configured engine and
+    delivery, not the bare defaults.
+
+    ``say`` used to build ``Synthesizer()`` and so auditioned the default
+    cast whatever ``voice.engine`` said -- with the cloned voices installed,
+    the one command for hearing a controller played somebody else.
+    """
+    from .audio.imperfections import from_config as imperfections_for
+    from .audio.prosody import from_config as prosody_for
+    from .audio.tone import from_config as tone_for
     from .audio.tts import Synthesizer
+
+    return Synthesizer(
+        voice_dir=_resolve(config.voice.voice_dir),
+        engine=config.voice.engine,
+        prosody_settings=prosody_for(config.delivery.prosody),
+        imperfection_settings=imperfections_for(
+            config.delivery.imperfections),
+        tone_settings=tone_for(config.delivery.tone),
+        gpu=config.voice.gpu,
+        hq_model=config.voice.hq_model,
+        hq_takes=config.voice.hq_takes,
+    )
+
+
+def _speak_once(text: str, airport, position: str, db: NavDB,
+                save: str | None = None, config: Config | None = None) -> None:
+    from .audio.io import RadioPlayer
 
     station = db.station_for(airport.ident, position)
     facility = station.facility if station else airport.spoken
-    synth = Synthesizer()
+    synth = _configured_synth(config or Config())
     console.print(f"[dim]synthesising as {facility} {position}...[/dim]")
     transmission = synth.speak(text, facility, position, airport.ident)
     console.print(f"[dim]voice: {transmission.voice_key}  "
@@ -615,10 +854,6 @@ def cmd_sound_test(args) -> int:
         station = db.station_for(airport.ident, "TWR")
         from .atc.phraseology import Aircraft, Phraseology, Weather
         from .atc.speech import parse_callsign
-        from .audio.imperfections import from_config as imperfections_for
-        from .audio.prosody import from_config as prosody_for
-        from .audio.tone import from_config as tone_for
-        from .audio.tts import Synthesizer
 
         phrase = Phraseology(airport.dialect)
         aircraft = Aircraft(parse_callsign("DAL1234"))
@@ -630,19 +865,7 @@ def cmd_sound_test(args) -> int:
             abbreviated=False,
         )
         console.print(f"[dim]{text}[/dim]")
-        synth = Synthesizer(
-            voice_dir=_resolve(config.voice.voice_dir),
-            engine=config.voice.engine,
-            # ``say`` is what a pilot auditions a voice with, so it has to be
-            # the delivery they will actually hear rather than the bare engine.
-            prosody_settings=prosody_for(config.delivery.prosody),
-            imperfection_settings=imperfections_for(
-                config.delivery.imperfections),
-            tone_settings=tone_for(config.delivery.tone),
-            gpu=config.voice.gpu,
-            hq_model=config.voice.hq_model,
-            hq_takes=config.voice.hq_takes,
-        )
+        synth = _configured_synth(config)
         facility = station.facility if station else airport.spoken
         transmission = synth.speak(text, facility, "TWR", airport.ident,
                                    radio=config.audio.radio_effects)
@@ -675,29 +898,15 @@ def _cabin_test(config) -> bool:
     """Play one crew line through the crew's own output. True if it played."""
     import time
 
-    from .audio.imperfections import from_config as imperfections_for
     from .audio.io import CabinPlayer
-    from .audio.prosody import from_config as prosody_for
     from .audio.radio_fx import PROFILE_INTERCOM
-    from .audio.tone import from_config as tone_for
-    from .audio.tts import Synthesizer
 
     trouble: list[str] = []
     cabin = CabinPlayer(device=config.audio.output_device,
                         volume=config.immersion.volume,
                         on_trouble=trouble.append)
     try:
-        synth = Synthesizer(
-            voice_dir=_resolve(config.voice.voice_dir),
-            engine=config.voice.engine,
-            prosody_settings=prosody_for(config.delivery.prosody),
-            imperfection_settings=imperfections_for(
-                config.delivery.imperfections),
-            tone_settings=tone_for(config.delivery.tone),
-            gpu=config.voice.gpu,
-            hq_model=config.voice.hq_model,
-            hq_takes=config.voice.hq_takes,
-        )
+        synth = _configured_synth(config)
         spoken = synth.speak(
             "Positive rate, gear up. After takeoff checklist complete.",
             facility="crew", position="FO", ident="crew",
@@ -781,6 +990,90 @@ def cmd_online(args) -> int:
     return 0
 
 
+def _checklist_row(row: dict) -> str:
+    """One of the first officer's checklist rows, as a sentence: what
+    happened, to which item, and the figures behind an objection."""
+    event = str(row.get("event", ""))
+    parts = [event]
+    if row.get("item"):
+        parts.append(str(row["item"]))
+    if event == "objected" and "var" in row:
+        parts.append(f"{row['var']} is {row.get('actual')}, wanted "
+                     f"{row.get('expected')}"
+                     + (" (read again)" if row.get("fresh") else ""))
+    if event == "mismatch":
+        # What a study-level add-on's file is built from: send these.
+        parts.append(f"{row.get('var')} read {row.get('read')}, answered "
+                     f"{', '.join(map(str, row.get('answer') or []))}"
+                     f" -- {row.get('title') or 'no title'}")
+    if event == "complete":
+        n = len(row.get("open") or [])
+        parts.append(f"{n} open" if n else "nothing open")
+    if row.get("answers"):
+        parts.append("heard " + ", ".join(map(str, row["answers"])))
+    if row.get("why"):
+        parts.append(str(row["why"]))
+    return ": ".join(p for p in parts[:2] if p) + "".join(
+        f"; {p}" for p in parts[2:])
+
+
+def _enroute_reason(row: dict) -> str:
+    """One en-route decision row as the ``read as`` column of ``logs radio``."""
+    parts = []
+    if row.get("from_sector") and row.get("sector"):
+        # The sector at the handoff: the one left and the one entered.
+        parts.append(f"{row['from_sector']} -> {row['sector']}")
+    if row.get("reason"):
+        parts.append(str(row["reason"]))
+    if row.get("minutes") is not None:
+        parts.append(f"{row['minutes']} min before the line"
+                     if row.get("event") == "offered"
+                     else f"in {row['minutes']} min")
+    if row.get("frequency"):
+        parts.append(f"{float(row['frequency']):.3f}")
+    if row.get("invented"):
+        parts.append("invented")
+    if row.get("late"):
+        parts.append("late")
+    if row.get("said"):
+        parts.append(f"said {row['said']}")
+    if row.get("heard_ft"):
+        parts.append(f"heard {row['heard_ft']} ft, Mode C {row.get('mode_c_ft')}")
+    if row.get("source") and row.get("source") != "invented":
+        parts.append(str(row["source"]))
+    return ", ".join(parts)
+
+
+def _route_reason(row: dict) -> str:
+    """The route row's own facts, in a line."""
+    if row.get("event") == "leg":
+        bits = [f"{row.get('to_go_nm', '?')} nm to go",
+                f"{row.get('cross_track_nm', 0)} nm off"]
+        if row.get("via"):
+            bits.insert(0, str(row["via"]))
+        return ", ".join(bits)
+    if row.get("event") == "loaded":
+        bits = [f"{row.get('fixes', 0)} fixes"]
+        for key in ("sid", "star", "approach"):
+            if row.get(key):
+                bits.append(f"{key} {row[key]}")
+        if row.get("toc") or row.get("tod"):
+            bits.append(f"TOC {row.get('toc') or '-'} TOD {row.get('tod') or '-'}")
+        bits += list(row.get("notes") or [])
+        return ", ".join(bits)
+    if row.get("event") not in (None, "none"):
+        # The en route's amendments (atc/routing.py): what was given or seen.
+        bits = [str(row["event"])]
+        for key, label in (("fix", "fix"), ("saves_nm", "saves nm"),
+                           ("to_ft", "to ft"), ("side", "side"),
+                           ("degrees", "degrees"), ("rejoin", "rejoin at"),
+                           ("cross_track_nm", "nm off")):
+            if row.get(key) not in (None, ""):
+                bits.append(f"{label} {row[key]}")
+        return ", ".join(bits)
+    return str(row.get("why") or "")
+
+
 def cmd_logs(args) -> int:
     """Read the logs back: the application log, or the radio transcript.
 
@@ -814,8 +1107,79 @@ def cmd_logs(args) -> int:
         for row in rows:
             if args.language and row.get("language") != args.language:
                 continue
-            # The reasoning rows have their own view, ``logs arrival``.
+            # The reasoning rows have their own view, ``logs arrival`` --
+            # except where a taxi came from, which is a question about what
+            # was just said on this frequency: the simulator's taxiways, or
+            # the invented route and why.
+            if row.get("kind") == "decision" and str(
+                    row.get("what", "")).startswith("enroute"):
+                # And the en-route sectors: entered, a boundary ahead, a
+                # handoff offered, skipped or said again, a check-in -- each
+                # with why, because "it never handed me on" has an answer.
+                who = (f"{row['station']} -> {row['to']}"
+                       if row.get("station") and row.get("to")
+                       else str(row.get("to") or row.get("sector")
+                                or row.get("station") or ""))
+                table.add_row(str(row.get("time", ""))[-8:], "sector", who,
+                              str(row.get("event") or row.get("what", "")),
+                              _enroute_reason(row))
+                continue
+            if row.get("kind") == "decision" and row.get("what") in (
+                    "airport", "runway_renamed"):
+                # Where a field's runways came from -- the simulator, kept
+                # from it, or the database -- and what the simulator's
+                # disagree with the database on: why "26" and not "25".
+                if row.get("what") == "airport":
+                    differ = ", ".join(
+                        f"{k} {row[k]}" for k in ("renamed", "sim_only",
+                                                  "db_only",
+                                                  "threshold_moved_m")
+                        if row.get(k))
+                    table.add_row(str(row.get("time", ""))[-8:], "runways",
+                                  str(row.get("airport", "")),
+                                  str(row.get("runways_from", "")),
+                                  differ or " ".join(row.get("ends") or []))
+                else:
+                    table.add_row(str(row.get("time", ""))[-8:], "runways",
+                                  str(row.get("airport", "")),
+                                  f"{row.get('heard')} is {row.get('current')}",
+                                  str(row.get("why", "")))
+                continue
+            if row.get("kind") == "decision" and row.get("what") in (
+                    "live_feed", "live_traffic", "blend"):
+                # The live traffic: the feed's state, each real aeroplane's
+                # first appearance and its source, what our tower did with
+                # it, and the mix of real and invented.
+                what = str(row.get("event") or row.get("what", ""))
+                who = str(row.get("callsign") or row.get("source")
+                          or row.get("airport") or "")
+                detail = (f"{row.get('type', '')} {row.get('origin', '')}"
+                          f"-{row.get('destination', '')} via "
+                          f"{row.get('feed', '') or '?'}"
+                          if what == "appeared"
+                          else str(row.get("why") or row.get("status") or ""))
+                table.add_row(str(row.get("time", ""))[-8:], "live", who,
+                              what, detail)
+                continue
+            if row.get("kind") == "decision" and row.get("what") == "route":
+                # The filed route: loaded (from where, with what notes), and
+                # each new leg flown, so "it thought I was somewhere else"
+                # can be read against where the route said the aeroplane was.
+                table.add_row(str(row.get("time", ""))[-8:], "route",
+                              str(row.get("source") or row.get("event", "")),
+                              str(row.get("route") or row.get("leg")
+                                  or row.get("why") or ""),
+                              _route_reason(row))
+                continue
             if row.get("kind") == "decision":
+                if row.get("what") != "taxi_route":
+                    continue
+                table.add_row(
+                    str(row.get("time", ""))[-8:], "taxi",
+                    str(row.get("airport", "")),
+                    ", ".join(row.get("route") or []),
+                    f"{row.get('source', '')}: {row['why']}" if row.get("why")
+                    else str(row.get("source", "")))
                 continue
             # What the machine made of it. For a transmission the pilot made
             # that is the intent and how sure the parser was; for one the
@@ -902,6 +1266,10 @@ def cmd_logs(args) -> int:
                        f"{row.get('cabin') or 'cast from the aeroplane'}"
                        + (f"; off: {', '.join(off)}" if off else
                           "; everything on"))
+            if row.get("kind") == "checklist":
+                why = _checklist_row(row)
+            if row.get("kind") == "aircraft_class":
+                why = f"{row.get('aircraft_class', '')}: {why}"
             said = row.get("said")
             if said is None:
                 said = row.get("playing") if row.get("kind") in (
@@ -911,7 +1279,7 @@ def cmd_logs(args) -> int:
                 str(row.get("time", ""))[-8:],
                 str(row.get("kind", "")),
                 str(row.get("cue") or row.get("who") or row.get("label")
-                    or row.get("callsign") or ""),
+                    or row.get("checklist") or row.get("callsign") or ""),
                 "" if said is None else ("yes" if said else "no"),
                 why,
             )
@@ -1327,20 +1695,22 @@ def _coerce(value: str):
 
 
 def _apply_overrides(config: Config, args) -> None:
+    # For this run only: a save from the Settings screen writes the file's
+    # own values back for these (Config.override).
     if args.callsign:
-        config.flight.callsign = args.callsign
+        config.override("flight.callsign", args.callsign)
     if args.aircraft:
-        config.flight.aircraft_type = args.aircraft
+        config.override("flight.aircraft_type", args.aircraft)
     if args.departure:
-        config.flight.departure = args.departure.upper()
+        config.override("flight.departure", args.departure.upper())
     if args.destination:
-        config.flight.destination = args.destination.upper()
+        config.override("flight.destination", args.destination.upper())
     if args.ptt:
-        config.ptt.key = args.ptt
+        config.override("ptt.key", args.ptt)
     if args.no_sim:
-        config.sim.enabled = False
+        config.override("sim.enabled", False)
     if args.no_radio_effects:
-        config.audio.radio_effects = False
+        config.override("audio.radio_effects", False)
 
 
 # --------------------------------------------------------------------------
@@ -1380,6 +1750,9 @@ def build_parser() -> argparse.ArgumentParser:
     setup.add_argument("--hq", action="store_true",
                        help="also fetch the voice-cloning model (2 GB; needs "
                             "a card, or patience)")
+    setup.add_argument("--vatglasses", action="store_true",
+                       help="also download the VatGlasses en-route sectors "
+                            "(CC BY-NC-SA 4.0, non-commercial use only)")
     setup.add_argument("--all-voices", action="store_true",
                        help="download the full voice set rather than the core set")
     setup.set_defaults(func=cmd_setup)
@@ -1411,6 +1784,20 @@ def build_parser() -> argparse.ArgumentParser:
 
     devices = sub.add_parser("devices", help="list audio and controller devices")
     devices.set_defaults(func=cmd_devices)
+
+    controllers = sub.add_parser(
+        "controllers", help="list game controllers, or write a report to "
+                            "attach to an issue")
+    controllers.add_argument("--report", action="store_true",
+                             help="write every HID device, what SDL lists "
+                                  "under each setting, and the buttons "
+                                  "pressed, to one file")
+    controllers.add_argument("--seconds", type=float, default=10.0,
+                             help="how long the report records presses")
+    # Internal: one SDL configuration in a fresh process, for the report.
+    controllers.add_argument("--probe", help=argparse.SUPPRESS)
+    controllers.add_argument("--out", help=argparse.SUPPRESS)
+    controllers.set_defaults(func=cmd_controllers)
 
     sound = sub.add_parser("sound-test",
                            help="play a tone and a controller transmission")
@@ -1445,6 +1832,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     gsx = sub.add_parser("gsx", help="what the ground handling is doing")
     gsx.set_defaults(func=cmd_gsx)
+
+    traffic = sub.add_parser("traffic", help="check the traffic outside a flight")
+    traffic.add_argument("--live", action="store_true",
+                         help="the real aeroplanes from the ADS-B feed")
+    traffic.add_argument("--dry-run", action="store_true",
+                         help="no simulator: log what would be drawn")
+    traffic.add_argument("--airport", default="",
+                         help="the field to look round (ICAO)")
+    traffic.add_argument("--minutes", type=float, default=5.0)
+    traffic.set_defaults(func=cmd_traffic)
 
     atis = sub.add_parser("atis", help="generate an airport's ATIS")
     atis.add_argument("airport")

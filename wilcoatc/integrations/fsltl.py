@@ -172,6 +172,20 @@ def find_rules(environ=None, override: str = "") -> Path | None:
     return None
 
 
+def traffic_source(traffic, environ=None) -> str:
+    """Who flies the traffic this session: ``wilcoatc`` or ``fsltl``.
+
+    The pilot's choice when they made one. Left at ``auto`` it is FSLTL when
+    FSLTL is installed, because a pilot who installed it expects to see it,
+    and this program's own otherwise.
+    """
+    chosen = str(getattr(traffic, "source", "auto") or "auto").lower()
+    if chosen in ("wilcoatc", "fsltl"):
+        return chosen
+    found = find_rules(environ, getattr(traffic, "fsltl_rules", "") or "")
+    return "fsltl" if found is not None else "wilcoatc"
+
+
 def load_installed(environ=None, override: str = "") -> FsltlLiveries | None:
     """FSLTL's table, if FSLTL is installed; None if it is not."""
     path = find_rules(environ, override)

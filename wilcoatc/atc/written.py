@@ -52,7 +52,16 @@ _ANNOUNCED_BY: dict[str, int] = {
     "qnh": 4, "altimeter": 4, "qfe": 4,
     "at": 2, "gusting": 2, "rafales": 2,
     "number": 1, "numéro": 1,
+    # A time to expect further clearance, four digits (the IFR plan, Phase
+    # 6: holds). "Clearance at 0945" is read through "at" below.
+    "clearance": 4, "prévue": 4, "prevista": 4, "previsto": 4,
+    "anflugzeit": 4, "avvicinamento": 4, "aproximación": 4,
+    "aproximação": 4,
 }
+
+#: Words that, said in front of "at", make what follows "at" a time rather
+#: than the two-digit figure "at" normally announces (a wind's speed).
+_TIME_BEFORE_AT = frozenset({"clearance"})
 
 #: What a quantity is followed by. A number with one of these after it is a
 #: number however it got there, which is what catches the second half of
@@ -212,7 +221,15 @@ def _announcer(tokens: list[str], before: int) -> int | None:
         index -= 1
     if index < 0:
         return None
-    return _ANNOUNCED_BY.get(tokens[index].lower())
+    word = tokens[index].lower()
+    if word == "at":
+        earlier = index - 1
+        while earlier >= 0 and (tokens[earlier].isspace()
+                                or not _is_word(tokens[earlier])):
+            earlier -= 1
+        if earlier >= 0 and tokens[earlier].lower() in _TIME_BEFORE_AT:
+            return 4
+    return _ANNOUNCED_BY.get(word)
 
 
 def _followed_by_unit(tokens: list[str], end: int) -> bool:

@@ -64,6 +64,60 @@ class AircraftState:
     # is reading a script rather than the aeroplane.
     seatbelt_sign: bool = False
     beacon_light: bool = False
+    # What kind of aeroplane the model is, for the first officer's
+    # checklists (wilcoatc.atc.aircraft_class): ENGINE TYPE (-1 until the
+    # simulator has said), NUMBER OF ENGINES and CATEGORY.
+    engine_type: int = -1
+    engine_count: int = 0
+    category: str = ""
+    # What a checklist answer is checked against (wilcoatc.atc.checklist).
+    # A default here is not evidence: the first officer reads a variable
+    # again on its own before objecting, and says nothing if it has no
+    # answer.
+    landing_light: bool = False
+    taxi_light: bool = False
+    nav_light: bool = False
+    strobe_light: bool = False
+    kohlsman_hpa: float = 0.0
+    # FUEL TANK SELECTOR:1, the simulator's tank enumeration (0 off, 1 all,
+    # 2 left, 3 right, ... 16 both).
+    fuel_selector: int = -1
+    mixture_pct: float = 0.0
+    autopilot: bool = False
+    gps_drives_nav1: bool = False
+    pitot_heat: bool = False
+    fuel_total_gal: float = 0.0
+    spoilers_armed: bool = False
+    avionics_master: bool = False
+    battery_master: bool = False
+    # COM STATUS:1 -- 0 working, 1 not fitted, 2 no electricity, 3 failed --
+    # and the main bus in volts; -1 for either until the simulator has said.
+    com1_status: int = -1
+    main_bus_volts: float = -1.0
+    # TRANSPONDER STATE:1: 0 off, 1 standby, 2 test, 3 on, 4 altitude;
+    # -1 until the simulator has said.
+    transponder_state: int = -1
+    # The aeroplane's own speeds, where the model declares them (zero where
+    # it does not), for the rotate callout.
+    design_takeoff_kt: float = 0.0
+    min_rotation_kt: float = 0.0
+    # What the first officer's callouts watch (wilcoatc.atc.callouts): the
+    # bank, signed degrees, right positive; NAV1's localizer and glideslope
+    # and how far off them the needles are (+/-127 and +/-119, full scale);
+    # the speed set on the autopilot, 0 where there is none.
+    bank_deg: float = 0.0
+    nav1_has_localizer: bool = False
+    nav1_cdi: float = 127.0
+    nav1_has_glideslope: bool = False
+    nav1_gsi: float = 119.0
+    ap_airspeed_kt: float = 0.0
+    # What the first officer notices (wilcoatc.atc.notices): engine 1's
+    # throttle, per cent; the fuel either side, gallons; the total by
+    # weight, pounds.
+    throttle_pct: float = 0.0
+    fuel_left_gal: float = 0.0
+    fuel_right_gal: float = 0.0
+    fuel_total_lb: float = 0.0
 
     # --- ambient conditions the sim is actually rendering ---
     ambient_wind_direction: float = 0.0

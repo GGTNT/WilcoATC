@@ -1,0 +1,28 @@
+{
+  "_comment": "UNVERIFIED: matched on the simulator's title by these fragments, and the variables below left unchecked, because the add-on runs its own systems and which of the simulator's standard variables it also drives is not measured. The gear and flap handles are still checked. Every disagreement the first officer sees is a 'mismatch' line in logs crew with the title: send those, and this file can check more.",
+  "source": "Leonardo MaddogX MD-82: no measurement; UNVERIFIED as above.",
+  "match": [
+    "maddog"
+  ],
+  "no_check": [
+    "landing_light",
+    "taxi_light",
+    "nav_light",
+    "strobe_light",
+    "beacon_light",
+    "transponder_code",
+    "transponder_state",
+    "kohlsman_hpa",
+    "spoilers_armed",
+    "pitot_heat",
+    "parking_brake",
+    "autopilot",
+    "avionics_master",
+    "battery_master",
+    "seatbelt_sign",
+    "fuel_selector",
+    "mixture_pct",
+    "com1_standby",
+    "gps_drives_nav1"
+  ]
+}

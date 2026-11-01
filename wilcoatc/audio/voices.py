@@ -111,6 +111,11 @@ SUPERTONIC_SENTINEL = "onnx/vocoder.onnx"
 # reference clips a controller is cloned from live in ``prompts`` beside them.
 # See :mod:`wilcoatc.audio.backends.chatterbox`.
 CHATTERBOX_DIR = "chatterbox"
+#: The clips the program itself ships for the cloning tier: open-licence
+#: speakers, named the way a pilot's own clips are, with their attribution
+#: beside them. Copied into ``prompts`` when the cloned voices are installed
+#: (:func:`wilcoatc.install.shipped_prompts`); read from nowhere else.
+SHIPPED_CLONES = Path(__file__).resolve().parent / "clones"
 
 
 @dataclass(frozen=True)
@@ -183,59 +188,284 @@ class VoiceSpec:
         return root / self.filename
 
 
-# The catalogue. "core" voices are enough to run every position with distinct
-# voices; the rest widen the pool so a busy area does not repeat itself.
+# The Piper catalogue: the British voices, the French ones, and for every
+# country whose language Piper has and espeak can drive, that language's
+# voices -- which speak English with that country's accent through
+# :mod:`wilcoatc.audio.accent`. Which country takes which is
+# :mod:`wilcoatc.atc.language`; the accent code here is its key.
+#
+# What is not here, and why:
+#
+# * Piper's Japanese, Thai, Hebrew and Lithuanian models, and Mandarin's
+#   chaowen and xiao_ya: they take their own phoneme sets (japanese, thai,
+#   hebrew, lithuanian, pinyin), so an English word cannot be handed to them
+#   as IPA. Those countries are British-voiced.
+# * Mandarin's huayan, which espeak does drive: a tonal model handed English
+#   without tones lost 95% of the words to the recogniser, and 70% with a
+#   tone on every syllable (dry, three clearances). China and Taiwan are
+#   British-voiced until that is solved.
+# * sr_RS-serbski_institut, filed as Serbian: its two speakers are dsb and
+#   hsb, Lower and Upper Sorbian. Serbia is British-voiced.
+# * More than three models of one language: the download is per model, and
+#   the whole set is already five gigabytes.
+#
+# "core" is the first-run download beside Supertonic: the British voices and
+# the French ones, because Supertonic only respells French. Everything else
+# comes with "all accents". The genders marked UNVERIFIED are read off the
+# speaker's name or guessed; Piper's index does not give one.
 CATALOGUE: tuple[VoiceSpec, ...] = (
-    # --- US male ---
-    VoiceSpec("en_US-ryan-medium",      "en_US", "ryan",       "medium", "m", "us", core=True),
-    VoiceSpec("en_US-joe-medium",       "en_US", "joe",        "medium", "m", "us", core=True),
-    VoiceSpec("en_US-hfc_male-medium",  "en_US", "hfc_male",   "medium", "m", "us", core=True),
-    VoiceSpec("en_US-bryce-medium",     "en_US", "bryce",      "medium", "m", "us"),
-    VoiceSpec("en_US-norman-medium",    "en_US", "norman",     "medium", "m", "us"),
-    VoiceSpec("en_US-kusal-medium",     "en_US", "kusal",      "medium", "m", "us"),
-    VoiceSpec("en_US-john-medium",      "en_US", "john",       "medium", "m", "us"),
-    # --- US female ---
-    VoiceSpec("en_US-lessac-medium",    "en_US", "lessac",     "medium", "f", "us", core=True),
-    VoiceSpec("en_US-amy-medium",       "en_US", "amy",        "medium", "f", "us", core=True),
-    VoiceSpec("en_US-hfc_female-medium","en_US", "hfc_female", "medium", "f", "us", core=True),
-    VoiceSpec("en_US-kristin-medium",   "en_US", "kristin",    "medium", "f", "us"),
-    # --- UK male ---
-    VoiceSpec("en_GB-alan-medium",      "en_GB", "alan",       "medium", "m", "gb", core=True),
-    VoiceSpec("en_GB-northern_english_male-medium",
-              "en_GB", "northern_english_male", "medium", "m", "gb"),
-    # --- UK female ---
-    VoiceSpec("en_GB-jenny_dioco-medium", "en_GB", "jenny_dioco", "medium", "f", "gb", core=True),
-    VoiceSpec("en_GB-cori-medium",        "en_GB", "cori",        "medium", "f", "gb"),
-    VoiceSpec("en_GB-alba-medium",        "en_GB", "alba",        "medium", "f", "gb"),
-
-    # --- French. These serve twice over: they speak French, and they speak
-    # English with a French accent, which is what a controller at Orly
-    # actually sounds like when switching for a foreign crew.
-    #
-    # There is a fourth French voice in Piper's set, fr_FR-tom-medium, and it
-    # is deliberately not here. Scored for naturalness it comes out 0.2 below
-    # these in French and 0.2 below them in accented English, at every
-    # synthesis setting tried, and its overall score is 0.4 down -- which is a
-    # lot for a mean-opinion scale. A fourth voice is not worth a third of the
-    # French positions sounding worse than the rest.
-    VoiceSpec("fr_FR-siwis-medium", "fr_FR", "siwis", "medium", "f", "fr", core=True),
-    VoiceSpec("fr_FR-upmc-medium",  "fr_FR", "upmc",  "medium", "f", "fr",
-              core=True, speaker_id=0, speaker_name="jessica"),
-    VoiceSpec("fr_FR-upmc-medium",  "fr_FR", "upmc",  "medium", "m", "fr",
-              core=True, speaker_id=1, speaker_name="pierre"),
-
-    # --- other European accents, for English spoken by a local controller ---
-    VoiceSpec("de_DE-thorsten-medium", "de_DE", "thorsten", "medium", "m", "de"),
-    VoiceSpec("de_DE-kerstin-low",     "de_DE", "kerstin",  "low",    "f", "de"),
-    VoiceSpec("de_DE-ramona-low",      "de_DE", "ramona",   "low",    "f", "de"),
-    VoiceSpec("es_ES-davefx-medium",   "es_ES", "davefx",   "medium", "m", "es"),
-    VoiceSpec("es_ES-sharvard-medium", "es_ES", "sharvard", "medium", "f", "es"),
-    VoiceSpec("it_IT-riccardo-x_low",  "it_IT", "riccardo", "x_low",  "m", "it"),
-    VoiceSpec("it_IT-paola-medium",    "it_IT", "paola",    "medium", "f", "it"),
-    VoiceSpec("nl_NL-ronnie-medium",   "nl_NL", "ronnie",   "medium", "m", "nl"),
-    VoiceSpec("nl_NL-pim-medium",      "nl_NL", "pim",      "medium", "m", "nl"),
-    VoiceSpec("pt_BR-faber-medium",    "pt_BR", "faber",    "medium", "m", "pt"),
+    # --- American English -- the fallback under Supertonic's (us) ---
+    VoiceSpec('en_US-ryan-medium', 'en_US', 'ryan', 'medium', 'm', 'us'),
+    VoiceSpec('en_US-joe-medium', 'en_US', 'joe', 'medium', 'm', 'us'),
+    VoiceSpec('en_US-lessac-medium', 'en_US', 'lessac', 'medium', 'f', 'us'),
+    VoiceSpec('en_US-amy-medium', 'en_US', 'amy', 'medium', 'f', 'us'),
+    # --- British English: the UK, Ireland, Australia, New Zealand, South Africa (gb) ---
+    VoiceSpec('en_GB-alan-medium', 'en_GB', 'alan',
+              'medium', 'm', 'gb', core=True),
+    VoiceSpec('en_GB-northern_english_male-medium', 'en_GB', 'northern_english_male',
+              'medium', 'm', 'gb', core=True),
+    VoiceSpec('en_GB-jenny_dioco-medium', 'en_GB', 'jenny_dioco',
+              'medium', 'f', 'gb', core=True),
+    VoiceSpec('en_GB-cori-medium', 'en_GB', 'cori', 'medium', 'f', 'gb'),
+    VoiceSpec('en_GB-alba-medium', 'en_GB', 'alba', 'medium', 'f', 'gb'),
+    VoiceSpec('en_GB-southern_english_female-low', 'en_GB', 'southern_english_female',
+              'low', 'f', 'gb'),
+    VoiceSpec('en_GB-semaine-medium', 'en_GB', 'semaine',
+              'medium', 'f', 'gb', core=True, speaker_id=0, speaker_name='prudence'),
+    VoiceSpec('en_GB-semaine-medium', 'en_GB', 'semaine',
+              'medium', 'm', 'gb', core=True, speaker_id=1, speaker_name='spike'),
+    VoiceSpec('en_GB-semaine-medium', 'en_GB', 'semaine',
+              'medium', 'm', 'gb', core=True, speaker_id=2, speaker_name='obadiah'),
+    VoiceSpec('en_GB-semaine-medium', 'en_GB', 'semaine',
+              'medium', 'f', 'gb', core=True, speaker_id=3, speaker_name='poppy'),
+    # --- French (fr) ---
+    VoiceSpec('fr_FR-siwis-medium', 'fr_FR', 'siwis',
+              'medium', 'f', 'fr', core=True),
+    VoiceSpec('fr_FR-upmc-medium', 'fr_FR', 'upmc',
+              'medium', 'f', 'fr', core=True, speaker_id=0, speaker_name='jessica'),
+    VoiceSpec('fr_FR-upmc-medium', 'fr_FR', 'upmc',
+              'medium', 'm', 'fr', core=True, speaker_id=1, speaker_name='pierre'),
+    # Scored 0.2 below the others in French and in accented English at every
+    # setting tried, and left out for it while Kokoro's Frenchwoman made a
+    # fourth. Without her, three voices staff five positions and two
+    # controllers at one field are the same person, which is worse.
+    VoiceSpec('fr_FR-tom-medium', 'fr_FR', 'tom', 'medium', 'm', 'fr', core=True),
+    # fr_FR-gilles-low was here (18.5% of its English lost at 0.88, added for
+    # the English pool once upmc's two lost a third of theirs). Taken out on
+    # request, 2026-10-31, "for the moment": not cast, not downloaded. Putting
+    # it back is this line again and its size below, and re-casts France.
+    # --- German (de) ---
+    VoiceSpec('de_DE-thorsten-medium', 'de_DE', 'thorsten',
+              'medium', 'm', 'de'),
+    VoiceSpec('de_DE-kerstin-low', 'de_DE', 'kerstin', 'low', 'f', 'de'),
+    VoiceSpec('de_DE-ramona-low', 'de_DE', 'ramona', 'low', 'f', 'de'),
+    # --- Spanish, Spain (es) ---
+    VoiceSpec('es_ES-davefx-medium', 'es_ES', 'davefx', 'medium', 'm', 'es'),
+    VoiceSpec('es_ES-sharvard-medium', 'es_ES', 'sharvard',
+              'medium', 'm', 'es', speaker_id=0, speaker_name='M'),
+    VoiceSpec('es_ES-sharvard-medium', 'es_ES', 'sharvard',
+              'medium', 'f', 'es', speaker_id=1, speaker_name='F'),
+    # --- Spanish, Latin America (es-419) ---
+    VoiceSpec('es_MX-ald-medium', 'es_MX', 'ald', 'medium', 'm', 'es-419'),
+    VoiceSpec('es_MX-claude-high', 'es_MX', 'claude',
+              'high', 'm', 'es-419'),  # UNVERIFIED: gender
+    VoiceSpec('es_AR-daniela-high', 'es_AR', 'daniela', 'high', 'f', 'es-419'),
+    # --- Italian (it) ---
+    VoiceSpec('it_IT-riccardo-x_low', 'it_IT', 'riccardo', 'x_low', 'm', 'it'),
+    VoiceSpec('it_IT-paola-medium', 'it_IT', 'paola', 'medium', 'f', 'it'),
+    VoiceSpec('it_IT-serena-medium', 'it_IT', 'serena', 'medium', 'f', 'it'),
+    # --- Dutch (nl) ---
+    VoiceSpec('nl_NL-ronnie-medium', 'nl_NL', 'ronnie', 'medium', 'm', 'nl'),
+    VoiceSpec('nl_NL-pim-medium', 'nl_NL', 'pim', 'medium', 'm', 'nl'),
+    # --- Portuguese, Portugal (pt) ---
+    VoiceSpec('pt_PT-tugão-medium', 'pt_PT', 'tugão', 'medium', 'm', 'pt'),
+    # --- Portuguese, Brazil (pt-br) ---
+    VoiceSpec('pt_BR-faber-medium', 'pt_BR', 'faber', 'medium', 'm', 'pt-br'),
+    VoiceSpec('pt_BR-cadu-medium', 'pt_BR', 'cadu', 'medium', 'm', 'pt-br'),
+    VoiceSpec('pt_BR-jeff-medium', 'pt_BR', 'jeff', 'medium', 'm', 'pt-br'),
+    # --- Russian (ru) ---
+    VoiceSpec('ru_RU-irina-medium', 'ru_RU', 'irina', 'medium', 'f', 'ru'),
+    # --- Polish (pl) ---
+    VoiceSpec('pl_PL-gosia-medium', 'pl_PL', 'gosia', 'medium', 'f', 'pl'),
+    # --- Czech (cs) ---
+    VoiceSpec('cs_CZ-jirka-medium', 'cs_CZ', 'jirka', 'medium', 'm', 'cs'),
+    VoiceSpec('cs_CZ-kasandra-medium', 'cs_CZ', 'kasandra',
+              'medium', 'f', 'cs'),
+    # --- Romanian (ro) ---
+    VoiceSpec('ro_RO-mihai-medium', 'ro_RO', 'mihai', 'medium', 'm', 'ro'),
+    # --- Bulgarian (bg) ---
+    VoiceSpec('bg_BG-dimitar-medium', 'bg_BG', 'dimitar', 'medium', 'm', 'bg'),
+    # --- Latvian (lv) ---
+    VoiceSpec('lv_LV-aivars-medium', 'lv_LV', 'aivars', 'medium', 'm', 'lv'),
+    # --- Icelandic (is) ---
+    VoiceSpec('is_IS-salka-medium', 'is_IS', 'salka', 'medium', 'f', 'is'),
+    # --- Hindi (hi) ---
+    VoiceSpec('hi_IN-pratham-medium', 'hi_IN', 'pratham', 'medium', 'm', 'hi'),
+    # --- Urdu (ur) ---
+    VoiceSpec('ur_PK-aegis_female-medium', 'ur_PK', 'aegis_female',
+              'medium', 'f', 'ur'),
+    # --- Indonesian (id) ---
+    VoiceSpec('id_ID-news_tts-medium', 'id_ID', 'news_tts',
+              'medium', 'f', 'id'),  # UNVERIFIED: gender
 )
+
+#: The size of each Piper model, in megabytes, from Piper's own index
+#: (voices.json), so the setup screen can say what a download costs.
+PIPER_SIZES_MB: dict[str, int] = {
+    'en_US-ryan-medium': 63,
+    'en_US-joe-medium': 63,
+    'en_US-lessac-medium': 63,
+    'en_US-amy-medium': 63,
+    'en_GB-alan-medium': 63,
+    'en_GB-northern_english_male-medium': 63,
+    'en_GB-jenny_dioco-medium': 63,
+    'en_GB-cori-medium': 64,
+    'en_GB-alba-medium': 63,
+    'en_GB-southern_english_female-low': 63,
+    'en_GB-semaine-medium': 77,
+    'fr_FR-siwis-medium': 63,
+    'fr_FR-tom-medium': 64,
+    'fr_FR-upmc-medium': 77,
+    'de_DE-thorsten-medium': 63,
+    'de_DE-kerstin-low': 63,
+    'de_DE-ramona-low': 63,
+    'es_ES-davefx-medium': 63,
+    'es_ES-sharvard-medium': 77,
+    'es_MX-ald-medium': 63,
+    'es_MX-claude-high': 63,
+    'es_AR-daniela-high': 114,
+    'it_IT-riccardo-x_low': 28,
+    'it_IT-paola-medium': 64,
+    'it_IT-serena-medium': 64,
+    'nl_NL-ronnie-medium': 63,
+    'nl_NL-pim-medium': 64,
+    'pt_PT-tugão-medium': 63,
+    'pt_BR-faber-medium': 63,
+    'pt_BR-cadu-medium': 63,
+    'pt_BR-jeff-medium': 63,
+    'ru_RU-irina-medium': 63,
+    'pl_PL-gosia-medium': 63,
+    'cs_CZ-jirka-medium': 63,
+    'cs_CZ-kasandra-medium': 64,
+    'ro_RO-mihai-medium': 63,
+    'bg_BG-dimitar-medium': 63,
+    'lv_LV-aivars-medium': 64,
+    'is_IS-salka-medium': 76,
+    'hi_IN-pratham-medium': 64,
+    'ur_PK-aegis_female-medium': 64,
+    'id_ID-news_tts-medium': 63,
+}
+
+
+#: The calibrated accents: per accent, the strongest accent its weakest voice
+#: keeps under a quarter of the words lost, and the loss measured there.
+#: Measured by scripts/accent_calibrate.py -- the engine, the delivery and
+#: imperfection layers and the VHF chain, on 26 controller transmissions,
+#: through the recogniser the program ships. A voice is held to the
+#: strongest accent that passed, tried from 0.88 down; the accent to its
+#: weakest voice's. The losses are the worst kept voice at its own strength.
+#: Strength turns out to matter little: below 0.5 the loss moves by about the
+#: three points one run moves by anyway, and for the languages without a
+#: substitution table of their own (accent._NEAREST) only the reading rate
+#: moves with it. The voice is what decides.
+ACCENT_STRENGTH: dict[str, tuple[float, float]] = {
+    'bg': (0.5, 0.201),
+    'cs': (0.5, 0.176),
+    'de': (0.35, 0.245),
+    'es': (0.35, 0.246),
+    'es-419': (0.88, 0.181),
+    'fr': (0.88, 0.212),
+    'hi': (0.1, 0.249),
+    'id': (0.5, 0.239),
+    'is': (0.5, 0.24),
+    'it': (0.35, 0.247),
+    'lv': (0.1, 0.221),
+    'nl': (0.7, 0.23),
+    'pl': (0.5, 0.219),
+    'pt-br': (0.5, 0.248),
+    'ro': (0.5, 0.169),
+    'ru': (0.5, 0.238),
+    'ur': (0.1, 0.238),
+}
+
+#: Voices of a language controllers speak natively, measured and kept out of
+#: every English pool -- no strength kept their English under 25% -- but
+#: still cast for their own language. Voices that fail and speak no
+#: controller language are not in the catalogue at all; they were, with the
+#: loss at their best (a second run of 26 averaged in where the first was
+#: within 25-30%):
+#   __ar_JO-kareem-medium: 31%
+#   __bn_BD-google-medium#00737: 42%
+#   __bn_BD-google-medium#01232: 39%
+#   __da_DK-talesyntese-medium: 34%
+#   __el_GR-joy-medium: 63%
+#   __el_GR-rapunzelina-medium: 60%
+#   __et_EE-news-medium#Kalev: 27%
+#   __et_EE-news-medium#Mari: 39%
+#   __fa_IR-amir-medium: 41%
+#   __fa_IR-gyro-medium: 41%
+#   __fi_FI-harri-medium: 33%
+#   __hi_IN-priyamvada-medium: 44%
+#   __hu_HU-anna-medium: 36%
+#   __hu_HU-imre-medium: 37%
+#   __hy_AM-gor-medium: 30%
+#   __is_IS-bui-medium: 29%
+#   __ka_GE-natia-medium: 31%
+#   __kk_KZ-iseke-x_low: 75%
+#   __kk_KZ-raya-x_low: 71%
+#   __ko_KR-kss-medium: 91%
+#   __lb_LU-marylux-medium: 44%
+#   __ne_NP-chitwan-medium: 59%
+#   __nl_NL-alex-medium: 29%
+#   __no_NO-talesyntese-medium: 42%
+#   __pl_PL-darkman-medium: 28%
+#   __pl_PL-mc_speech-medium: 38%
+#   __ru_RU-denis-medium: 39%
+#   __ru_RU-dmitri-medium: 39%
+#   __sk_SK-lili-medium: 54%
+#   __sl_SI-artur-medium: 26%
+#   __sq_AL-edon-medium: 28%
+#   __sv_SE-alma-medium: 44%
+#   __sv_SE-nst-medium: 37%
+#   __tr_TR-dfki-medium: 28%
+#   __uk_UA-lada-x_low: 39%
+#   __uk_UA-mykyta-high: 30%
+#   __ur_PK-fasih-medium: 35%
+#   __vi_VN-25hours_single-low: 70%
+#   __vi_VN-vais1000-medium: 68%
+ACCENT_EXCLUDED: dict[str, float] = {
+    'de_DE-ramona-low': 0.371,
+    'es_AR-daniela-high': 0.502,
+    'es_MX-ald-medium': 0.266,
+    'fr_FR-upmc-medium#jessica': 0.36,
+    'fr_FR-upmc-medium#pierre': 0.314,
+    'it_IT-paola-medium': 0.324,
+    'it_IT-riccardo-x_low': 0.323,
+    'pt_BR-faber-medium': 0.303,
+    'pt_BR-jeff-medium': 0.602,
+    'pt_PT-tugão-medium': 0.549,
+}
+
+
+def calibration_name(spec: "VoiceSpec") -> str:
+    """How the calibration names a voice: the model, and the speaker where
+    the model holds several."""
+    return spec.key + (f"#{spec.speaker_name}" if spec.speaker_id is not None else "")
+
+
+def _accent_strength(spec: "VoiceSpec", h: int) -> float:
+    """A controller's accent strength: the hash spreads a country's
+    controllers over eight steps, up to what that accent was calibrated to
+    (``ACCENT_STRENGTH``). Uncalibrated, the old 0.25-0.88."""
+    cap = ACCENT_STRENGTH.get(spec.accent, (0.88, 0.0))[0]
+    return round(cap * (0.25 + ((h >> 40) % 8) * 0.09) / 0.88, 3)
+
+
+def accents_download_gb() -> float:
+    """What the "all accents" download adds to the first run, in gigabytes."""
+    core = {spec.key for spec in CATALOGUE if spec.core}
+    return sum(mb for key, mb in PIPER_SIZES_MB.items() if key not in core) / 1000.0
+
 
 # --------------------------------------------------------------------------
 # the Kokoro catalogue
@@ -370,7 +600,7 @@ SUPERTONIC_SPEAKERS: tuple[tuple[str, str], ...] = (
 #: still cast from Kokoro, which does have both.
 SUPERTONIC_LOCALES: tuple[tuple[str, str], ...] = (
     ("en_US", "us"), ("fr_FR", "fr"), ("de_DE", "de"), ("es_ES", "es"),
-    ("it_IT", "it"), ("pt_BR", "pt"), ("nl_NL", "nl"),
+    ("it_IT", "it"), ("pt_BR", "pt-br"), ("nl_NL", "nl"),
 )
 
 #: Languages Supertonic does not speak, but reads.
@@ -554,6 +784,111 @@ def gender_of(voice_key: str) -> str:
 
 
 # --------------------------------------------------------------------------
+# what the crew pickers call each voice
+# --------------------------------------------------------------------------
+
+#: A first name for each voice, by the language it speaks: (men, women).
+#:
+#: The pickers used to list "F5 · DE · woman", which is the catalogue's name
+#: for a speaker and nothing a pilot can remember or ask for again. A person
+#: of the voice's own country is what the choice actually is. The names are
+#: handed out in catalogue order inside each (language, sex) -- Supertonic's
+#: speakers first, then Piper's -- from the whole catalogue rather than from
+#: what is installed, so downloading the extra accents does not rename the
+#: first officer somebody already picked. English starts American because
+#: Supertonic's English is, and goes British for Piper's. The scripts that
+#: are not Latin stay in their own script: the voice says its name in the
+#: preview, and a Russian model reads "Natalia" as nothing in particular.
+#: A group that outgrows its list falls back to the catalogue's name.
+PERSON_NAMES: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
+    "en": (("Michael", "Tyler", "Brandon", "Kevin", "Jason", "Oliver",
+            "Alistair", "Callum", "Rhys", "Graham", "Nigel", "Hamish",
+            "Duncan", "Rupert"),
+           ("Jennifer", "Ashley", "Megan", "Brittany", "Kayla", "Charlotte",
+            "Fiona", "Siobhan", "Harriet", "Imogen", "Gemma", "Eleanor",
+            "Kirsty", "Philippa")),
+    "de": (("Alexander", "Gottlob", "Matthias", "Florian", "Jürgen",
+            "Tobias", "Stefan", "Wolfgang", "Lukas", "Henrik"),
+           ("Annika", "Katharina", "Sabine", "Lena", "Friederike", "Johanna",
+            "Ute", "Miriam", "Svenja", "Carola")),
+    "fr": (("Julien", "Mathieu", "Thierry", "Antoine", "Olivier", "Laurent",
+            "Nicolas", "Benoît", "Guillaume", "Sébastien"),
+           ("Camille", "Sophie", "Élodie", "Claire", "Aurélie", "Nathalie",
+            "Manon", "Céline", "Isabelle", "Margaux")),
+    "es": (("Javier", "Alejandro", "Diego", "Sergio", "Pablo", "Raúl",
+            "Santiago", "Mateo", "Rodrigo", "Andrés", "Fernando", "Iñaki"),
+           ("Lucía", "Carmen", "Elena", "Marta", "Paula", "Valentina",
+            "Ximena", "Camila", "Isabel", "Nuria")),
+    "it": (("Marco", "Luca", "Giovanni", "Stefano", "Davide", "Alessandro",
+            "Francesco", "Matteo", "Riccardo"),
+           ("Giulia", "Francesca", "Chiara", "Federica", "Martina", "Alessia",
+            "Valentina", "Elisa", "Serena")),
+    "nl": (("Jeroen", "Bram", "Sander", "Thijs", "Maarten", "Joost", "Ruben",
+            "Wouter", "Pieter", "Daan"),
+           ("Sanne", "Anouk", "Femke", "Lotte", "Eva", "Marieke", "Ilse",
+            "Noor", "Roos", "Janneke")),
+    "pt": (("Rafael", "Gustavo", "Thiago", "Lucas", "Felipe", "João", "Tiago",
+            "Rui", "Bruno", "Diogo", "Eduardo", "Marcelo"),
+           ("Beatriz", "Larissa", "Fernanda", "Camila", "Juliana", "Inês",
+            "Mariana", "Carolina", "Ana", "Sofia")),
+    "pl": (("Paweł", "Tomasz", "Krzysztof"),
+           ("Agnieszka", "Katarzyna", "Magdalena")),
+    "cs": (("Jakub", "Tomáš", "Petr"), ("Tereza", "Lucie", "Kateřina")),
+    "ru": (("Дмитрий", "Сергей", "Алексей"), ("Наталья", "Ольга", "Екатерина")),
+    "bg": (("Георги", "Иван", "Николай"), ("Мария", "Елена", "Десислава")),
+    "ro": (("Andrei", "Mihai", "Bogdan"), ("Ioana", "Elena", "Andreea")),
+    "lv": (("Jānis", "Andris", "Mārtiņš"), ("Ilze", "Laura", "Kristīne")),
+    "is": (("Jón", "Gunnar", "Einar"), ("Guðrún", "Sigríður", "Katrín")),
+    "id": (("Budi", "Agus", "Rizky"), ("Sari", "Dewi", "Putri")),
+    "hi": (("राहुल", "अमित", "विक्रम"), ("प्रिया", "अनन्या", "नेहा")),
+    "ur": (("عمران", "بلال", "حمزہ"), ("عائشہ", "فاطمہ", "زینب")),
+}
+
+_PERSON_BY_IDENTITY: dict[str, str] | None = None
+
+
+def _person_table() -> dict[str, str]:
+    global _PERSON_BY_IDENTITY
+    if _PERSON_BY_IDENTITY is None:
+        table: dict[str, str] = {}
+        handed: dict[tuple[str, str], int] = {}
+        for spec in SUPERTONIC_CATALOGUE + CATALOGUE:
+            who = identity(spec)
+            if who in table:
+                continue
+            names = PERSON_NAMES.get(spec.language)
+            group = (spec.language, spec.gender)
+            n = handed.get(group, 0)
+            handed[group] = n + 1
+            if names is None:
+                continue
+            pool = names[0] if spec.gender == "m" else names[1]
+            if n < len(pool):
+                table[who] = pool[n]
+        _PERSON_BY_IDENTITY = table
+    return _PERSON_BY_IDENTITY
+
+
+def person_name(voice: "VoiceSpec | str") -> str:
+    """The first name a crew picker gives one voice, or "" for none.
+
+    Takes a spec or a key; a multi-speaker key alone names its first
+    speaker, which is the one a pinned key renders. A cloned voice is a
+    particular recorded person and has no name here.
+    """
+    table = _person_table()
+    if isinstance(voice, str):
+        key = voice.strip()
+        if key in table:
+            return table[key]
+        for spec in SUPERTONIC_CATALOGUE + CATALOGUE:
+            if spec.key == key:
+                return table.get(identity(spec), "")
+        return ""
+    return table.get(identity(voice), "")
+
+
+# --------------------------------------------------------------------------
 # accent regions
 # --------------------------------------------------------------------------
 
@@ -641,7 +976,25 @@ class VoiceAssignment:
 # Adding one is a table in :mod:`wilcoatc.audio.accent` plus an entry here;
 # until both are done the controller keeps the older rendering, which is worse
 # but is not a guess.
-COLOURED_ACCENTS: frozenset[str] = frozenset({"fr"})
+#
+# None, now. Colouring keeps an English model and moves the sounds a French
+# speaker misses, and it needs a model whose phoneme table holds both
+# languages' -- Kokoro's did, no Piper model's does. Without Kokoro a French
+# controller's English is a French Piper voice reading English, the way every
+# other country's accent is made.
+COLOURED_ACCENTS: frozenset[str] = frozenset()
+
+#: How many clips of one accent it takes for the clones to be the whole cast
+#: there. A field's Delivery, Ground and Tower are consecutive slots of one
+#: shuffle, so fewer than three would put one recorded person on two of them;
+#: below this the clones join the ordinary cast instead.
+CLONES_TO_STAFF_A_FIELD = 3
+
+#: The fewest different people a field's controllers are, speaking English.
+#: Twelve countries had one voice whose English survived the calibration and
+#: three more had two, so Delivery, Ground and Tower were one person shaded;
+#: :meth:`VoiceRegistry._permutation` makes the pool up with British voices.
+PEOPLE_AT_A_FIELD = 3
 
 
 # Controllers do not all talk at the same speed. Ground and Delivery read long
@@ -866,10 +1219,10 @@ class VoiceRegistry:
         # Under the cloning tier the ordinary cast is the ``auto`` one: the
         # clones cover the accents they have clips for and everything else is
         # answered as it would be without them.
-        ordinary = self.engine in ("auto", "chatterbox")
-        kokoro: list[VoiceSpec] = []
-        if (ordinary or self.engine == "kokoro") and self.kokoro_installed():
-            kokoro = list(KOKORO_CATALOGUE)
+        # Kokoro is not cast any more, installed or not, and naming it is
+        # taken as the ordinary cast: its module stays for one release, and
+        # nothing reaches it.
+        ordinary = self.engine in ("auto", "chatterbox", "kokoro")
         supertonic: list[VoiceSpec] = []
         if (ordinary or self.engine == "supertonic") \
                 and self.supertonic_installed():
@@ -877,34 +1230,17 @@ class VoiceRegistry:
 
         if self.engine == "piper":
             found = piper
-        elif self.engine == "kokoro":
-            found = kokoro or piper
         elif self.engine == "supertonic":
             found = supertonic or piper
         else:
-            # Under Supertonic the older order holds: Kokoro, then Piper for
-            # the pairs Kokoro has no speaker for.
-            #
-            # Except in a language Supertonic only respells. There the whole
-            # pool is whatever genuinely speaks it, and that is three voices
-            # in French against Supertonic's ten -- so Piper is kept even
-            # where Kokoro has the pair, because a country whose every
-            # position is one of two people is its own kind of wrong. A Piper
-            # Frenchwoman is a worse voice than a Kokoro one and is still a
-            # Frenchwoman.
-            by_kokoro = {(v.language, v.gender) for v in kokoro}
-            beneath = kokoro + [
-                v for v in piper
-                if (v.language, v.gender) not in by_kokoro
-                or v.language in SUPERTONIC_RESPELLED
-            ]
-            # A language Supertonic reads by respelling is a language
-            # Supertonic does not speak, so it displaces nothing there. See
-            # SUPERTONIC_RESPELLED.
+            # Supertonic, then Piper for what it does not cover: British
+            # English, every foreign accent (made by substituting phonemes,
+            # which Supertonic does not take), and French, which Supertonic
+            # only respells. See SUPERTONIC_RESPELLED.
             covered = {(v.language, v.gender, v.accent) for v in supertonic
                        if v.language not in SUPERTONIC_RESPELLED}
             found = supertonic + [
-                v for v in beneath
+                v for v in piper
                 if (v.language, v.gender, v.accent) not in covered
                 or v.accent not in self._ENGLISH_ACCENTS
             ]
@@ -920,17 +1256,18 @@ class VoiceRegistry:
         self._available = None
         self._cache.clear()
 
-    # When a region's own voices are not installed, fall back to the accent
-    # that is closest rather than to a US voice: a Dutch controller sounds far
-    # more like a British one than like an American one.
+    # Where a country's own voices are not installed, or Piper has none it
+    # can drive, the neutral British pool -- never the neighbour's. The old
+    # table fell back to the nearest accent installed, which put a German
+    # voice in Amsterdam and a Spanish one in Rome; a voice from one country
+    # at another country's field is a bug (tests/test_native_accents.py
+    # walks every country). Anything not named here is (itself, "gb").
     _ACCENT_FALLBACK: dict[str, tuple[str, ...]] = {
-        "fr": ("fr", "gb", "us"),
-        "de": ("de", "nl", "gb", "us"),
-        "nl": ("nl", "de", "gb", "us"),
-        "es": ("es", "it", "gb", "us"),
-        "it": ("it", "es", "gb", "us"),
-        "pt": ("pt", "es", "gb", "us"),
-        "gb": ("gb", "us"),
+        # Flanders: neutral British English. A Dutch voice reading English
+        # was heard as German at Kortrijk at any strength (0.88, then 0.49);
+        # the Dutch voices stay the Netherlands'.
+        "be": ("gb",),
+        "gb": ("gb",),
         "us": ("us", "gb"),
     }
 
@@ -939,7 +1276,8 @@ class VoiceRegistry:
     _ENGLISH_ACCENTS: frozenset[str] = frozenset({"us", "gb"})
 
     def pool(self, accent: str, gender: str | None = None,
-             language: str = "", clones: bool = True) -> list[VoiceSpec]:
+             language: str = "", clones: bool = True,
+             clone_accent: str = "") -> list[VoiceSpec]:
         """Voices plausible for one accent, optionally able to speak a language.
 
         ``language`` constrains the model itself: a French transmission has to
@@ -964,32 +1302,58 @@ class VoiceRegistry:
         recognisably at Frankfurt.
         """
         available = self.available()
+        country = accent
         if language and language != "en":
+            # A controller speaking their own language is cast by the
+            # language, not by the country: Supertonic's speakers have no
+            # country, and its French, German, Spanish, Italian and
+            # Portuguese are the same at Orly as at Dakar. The engine rules
+            # below then decide between Supertonic and Piper, as before.
             available = [v for v in available if v.language == language]
+            accent = ""
+        else:
+            # A voice whose English the calibration could not keep under 25%
+            # speaks its own language and no English (ACCENT_EXCLUDED).
+            available = [v for v in available
+                         if calibration_name(v) not in ACCENT_EXCLUDED]
 
         # A cloned voice is a particular person with a particular accent, and
         # is cast only where that accent is exactly the one asked for. The
         # fallback table below finds the nearest accent when the exact one has
         # no voices; a Heathrow controller is not the nearest thing to a
         # Frankfurt one, however the table reads, so the clones never go
-        # through it. Where there is an exact match they take the whole pool,
-        # the way Supertonic does below: the point of setting the tier up is
-        # to hear it.
+        # through it. Where there are enough of them they take the whole
+        # pool, the way Supertonic does below: the point of setting the tier
+        # up is to hear it. Where there are not, they join the pool instead:
+        # one recorded controller taking it would be Delivery, Ground and
+        # Tower at every field of that accent at once.
+        #
+        # ``clone_accent`` is for a coloured controller, whose pool is the
+        # British one with an accent painted on: the clones that belong there
+        # are the ones from where the accent is, not the British ones.
         cloned = [v for v in available
-                  if v.engine == "chatterbox" and v.accent == accent]
+                  if v.engine == "chatterbox"
+                  and v.accent == (clone_accent or country)]
         available = [v for v in available if v.engine != "chatterbox"]
-        if clones and cloned:
+        if not clones:
+            cloned = []
+        if len(cloned) >= CLONES_TO_STAFF_A_FIELD:
             found = cloned
+        elif not accent:
+            found = available
         else:
-            for candidate in self._ACCENT_FALLBACK.get(accent, (accent, "gb", "us")):
+            found = []
+            for candidate in self._ACCENT_FALLBACK.get(accent, (accent, "gb")):
                 found = [v for v in available if v.accent == candidate]
                 if found:
                     break
-            else:
-                found = available
 
         if not found:
-            found = available or self.available()
+            # Nothing of the country's and nothing British: an English voice
+            # of any kind before a foreign one, and anything at all before
+            # silence.
+            found = ([v for v in available if v.accent in self._ENGLISH_ACCENTS]
+                     or available or self.available())
 
         if (language or "en") == "en" and accent not in self._ENGLISH_ACCENTS:
             # Faking an accent. Supertonic cannot, so it stands down.
@@ -1017,12 +1381,16 @@ class VoiceRegistry:
                      if v.engine == "supertonic"
                      or (v.language, v.gender) not in better] or found
 
+        if 0 < len(cloned) < CLONES_TO_STAFF_A_FIELD:
+            # After the engine rules, which are about engines a clone is not.
+            found = found + cloned
         if gender:
             found = [v for v in found if v.gender == gender] or found
         return found
 
     def _permutation(self, facility: str, accent: str, tier: str = "local",
-                     language: str = "", clones: bool = True) -> list[VoiceSpec]:
+                     language: str = "", clones: bool = True,
+                     clone_accent: str = "") -> list[VoiceSpec]:
         """A stable shuffle of the accent pool, unique to one facility.
 
         Positions are then taken from successive slots, which guarantees that
@@ -1031,9 +1399,24 @@ class VoiceRegistry:
         Tower at the same field regularly came out as the same person, which is
         the single most noticeable way this can sound wrong.
         """
-        pool = self.pool(accent, language=language, clones=clones)
+        pool = self.pool(accent, language=language, clones=clones,
+                         clone_accent=clone_accent)
         seed = _stable_hash(f"{self.seed}|perm|{tier}|{facility}")
         rng = _Shuffler(seed)
+        people = {identity(v) for v in pool}
+        if ((language or "en") == "en" and accent not in self._ENGLISH_ACCENTS
+                and 0 < len(people) < PEOPLE_AT_A_FIELD):
+            # Too few of the country's own voices kept their English through
+            # the calibration, so the rest of the field is neutral British --
+            # never a neighbour's -- picked per facility, so the same two
+            # Britons are not at every Russian field. Shuffled in with the
+            # country's own, which the local and radar tiers' three
+            # consecutive slots then always reach.
+            british = [v for v in self.pool("gb", language="en", clones=False)
+                       if identity(v) not in people]
+            british = _Shuffler(_stable_hash(
+                f"{self.seed}|fill|{tier}|{facility}")).shuffled(british)
+            pool = pool + british[:PEOPLE_AT_A_FIELD - len(people)]
         return rng.shuffled(pool)
 
     def pin(self, assignment: VoiceAssignment,
@@ -1129,10 +1512,12 @@ class VoiceRegistry:
         # A coloured controller is an English voice with the accent painted
         # on, and the pool it draws from is the British one. A clone in that
         # pool is a real British person, which is exactly who must not answer
-        # at Orly -- so the clones stand down wherever the accent is being
-        # produced rather than spoken.
+        # at Orly -- so the British clones stand down wherever the accent is
+        # being produced rather than spoken, and a clip of somebody from there
+        # stands in: a French controller's English, recorded, is the accent
+        # the colouring is an imitation of.
         order = self._permutation(facility, accent, tier, language,
-                                  clones=not colour_of)
+                                  clone_accent=colour_of)
         if gender:
             # Asked for a man or a woman: keep the permutation, drop everyone
             # who is not one. The order is preserved, so the same slot still
@@ -1145,6 +1530,9 @@ class VoiceRegistry:
                      if v.key not in avoid and identity(v) not in avoid] or order
         slot = _POSITION_SLOT.get(position, 7)
         spec = order[slot % len(order)]
+        if spec.engine == "chatterbox":
+            # The accent is in the recording; there is nothing to paint on.
+            colour_of = ""
 
         # Shading: +-6% rate and +-1.5 semitones, quantised so that two
         # controllers rarely land on near-identical settings.
@@ -1181,7 +1569,7 @@ class VoiceRegistry:
             strength = round(0.45 + ((h >> 40) % 8) * 0.03, 3)
             rate *= 1.03 + strength * 0.03
         elif language != spec.language:
-            strength = round(0.25 + ((h >> 40) % 8) * 0.09, 3)
+            strength = _accent_strength(spec, h)
             rate *= 1.04 + strength * 0.05
 
         assignment = VoiceAssignment(
@@ -1347,8 +1735,8 @@ def download_chatterbox(root: Path = VOICE_DIR, variant: str = "standard",
         from huggingface_hub import hf_hub_download
     except ImportError as exc:                       # pragma: no cover
         raise RuntimeError(
-            "The cloned voices need the 'chatterbox-tts' package. "
-            "Install the optional requirements and try again."
+            "This build cannot clone voices. The cloned controllers come "
+            "with WilcoATC-HQ, the larger download."
         ) from exc
 
     staging = base.parent / f".{base.name}.part"
@@ -1379,16 +1767,18 @@ def download_voices(
 ) -> list[Path]:
     """Fetch voice models. ``which`` is ``core``, ``all``, or a comma-separated list.
 
-    ``core`` now means Kokoro plus the Piper voices that fill its gaps -- the
-    German ones, and the French male. That is the smallest install that can
-    work every position, in every language, in the better voice wherever there
-    is one.
+    ``core`` is Supertonic -- every controller speaking their own language,
+    and the US and Canada -- plus the Piper voices it cannot be: the British
+    ones and the French ones, which Supertonic only respells. That is the
+    smallest install that works every position in every language.
 
-    Supertonic is **not** in ``core``. It is a second 400 MB download on top of
-    Kokoro's 350, it replaces voices that already work rather than adding a
-    language that does not, and doubling the first-run download is not a thing
-    to do to a pilot on the strength of a bench. It comes with ``all``, or on
-    its own as ``supertonic``.
+    ``all`` adds every other country's accent, Piper's voices of each
+    language reading English (:func:`accents_download_gb` gigabytes, the
+    setup screen's "all accents"). Without them a controller abroad speaks
+    neutral British English: a missing download is never a neighbour's voice.
+
+    Kokoro is not fetched by either. Its module stays in the tree for one
+    release and nothing casts it.
 
     Chatterbox is in neither. Two gigabytes and a tier that costs more per
     second than the card is likely to have spare, it comes only by name, as
@@ -1402,20 +1792,12 @@ def download_voices(
     if which in ("chatterbox", "hq"):
         return download_chatterbox(root, variant=hq_model, force=force,
                                    on_progress=on_progress)
-    if which in ("core", "all", "kokoro"):
-        fetched = download_kokoro(root, force=force, on_progress=on_progress)
-        if which == "kokoro":
-            return fetched
-    if which == "all":
-        fetched += download_supertonic(root, force=force,
-                                       on_progress=on_progress)
+    if which in ("core", "all"):
+        fetched = list(download_supertonic(root, force=force,
+                                           on_progress=on_progress))
 
     if which == "core":
-        # The Piper voices Kokoro cannot stand in for. Everything else in the
-        # old core set is now cast from the Kokoro catalogue instead.
-        covered = {(v.language, v.gender) for v in KOKORO_CATALOGUE}
-        wanted = [v for v in CATALOGUE
-                  if v.core and (v.language, v.gender) not in covered]
+        wanted = [v for v in CATALOGUE if v.core]
     elif which == "all":
         wanted = list(CATALOGUE)
     else:
@@ -1427,8 +1809,8 @@ def download_voices(
         ]
         if not wanted:
             raise SystemExit(
-                f"No voices matched {which!r}. Try a language (fr, de, es, it, nl), "
-                "an accent (us, gb), a voice name, or --all."
+                f"No voices matched {which!r}. Try a language (fr, de, ru, zh), "
+                "an accent (us, gb, pt-br), a voice name, or --all."
             )
 
     out: list[Path] = list(fetched)
