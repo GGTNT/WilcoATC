@@ -1,4 +1,6 @@
 {
+  "setup.missing_voices": "缺少的語音套件：{packages}",
+  "setup.download_voices": "下載缺少的語音",
   "nav.comms": "通話",
   "nav.airspace": "空域",
   "nav.frequencies": "頻率",

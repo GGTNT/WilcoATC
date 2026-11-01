@@ -2221,6 +2221,11 @@ always safe: a download that stopped halfway keeps what arrived, a finished
 piece isn't fetched twice, and the nav database isn't rebuilt for the sake of
 rebuilding it.
 
+An older or partial voice installation is checked against the core packages,
+not just whether any voice exists. **Components** names the missing packages
+and offers **Download missing voices** to repair only the voices. The voice
+pickers update when it finishes, without restarting the application.
+
 Check it worked:
 
 ```bash

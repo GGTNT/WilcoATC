@@ -87,7 +87,7 @@ def _navdata(config: Config) -> Check:
 
 
 def _voices(config: Config) -> Check:
-    from .audio.voices import VoiceRegistry
+    from .audio.voices import VoiceRegistry, core_voice_packages
 
     registry = VoiceRegistry(resolve(config.voice.voice_dir),
                              engine=config.voice.engine,
@@ -96,6 +96,15 @@ def _voices(config: Config) -> Check:
     if not available:
         return Check("voices", "Controller voices", "error",
                      "none installed", fix="voices")
+    missing = [package["name"] + (f" ({package['language']})"
+                                  if package.get("language") else "")
+               for package in core_voice_packages(
+                   registry.root, config.voice.engine)
+               if not package["installed"]]
+    if missing:
+        return Check("voices", "Controller voices", "warn",
+                     "Missing voice packages: " + ", ".join(missing),
+                     fix="voices")
     if registry.hq_missing():
         # The pilot asked for the cloned voices and will not hear them. The
         # cast still works, which is why this is a warning and not an error.

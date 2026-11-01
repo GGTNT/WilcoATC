@@ -1,4 +1,6 @@
 {
+  "setup.missing_voices": "بسته‌های صوتی ناقص: {packages}",
+  "setup.download_voices": "دریافت صداهای مفقود",
   "nav.comms": "بی‌سیم",
   "nav.airspace": "فضای هوایی",
   "nav.frequencies": "فرکانس‌ها",

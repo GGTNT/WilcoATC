@@ -1,4 +1,6 @@
 {
+  "setup.missing_voices": "Trūkstošās balss pakotnes: {packages}",
+  "setup.download_voices": "Lejupielādēt trūkstošās balsis",
   "nav.comms": "Radio",
   "nav.airspace": "Gaisa telpa",
   "nav.frequencies": "Frekvences",

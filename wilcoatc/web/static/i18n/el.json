@@ -1,4 +1,6 @@
 {
+  "setup.missing_voices": "Πακέτα φωνής που λείπουν: {packages}",
+  "setup.download_voices": "Λήψη φωνών που λείπουν",
   "nav.comms": "Ασύρματος",
   "nav.airspace": "Εναέριος χώρος",
   "nav.frequencies": "Συχνότητες",

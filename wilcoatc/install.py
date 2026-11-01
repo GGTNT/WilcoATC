@@ -136,6 +136,8 @@ class Installer:
             finished = self._state.finished_at
             hq = self._state.hq
         installed = self.installed()
+        from .audio.voices import core_voice_packages
+
         return {
             "running": running,
             "cancelled": cancelled,
@@ -144,6 +146,8 @@ class Installer:
             "missing": [k for k, here in installed.items() if not here],
             "steps": steps,
             "sizes_mb": SIZES_MB,
+            "voice_packages": core_voice_packages(
+                resolve(self.config.voice.voice_dir), self.config.voice.engine),
             "hq": hq,
             # Whether this build can clone at all -- the HQ build carries
             # torch and Chatterbox, the ordinary one does not -- and whether
@@ -298,17 +302,20 @@ class Installer:
 
     def _voices(self, force: bool = False, all_voices: bool = False,
                 hq: bool = False, **_: Any) -> None:
-        from .audio.voices import download_voices
+        from .audio.voices import CATALOGUE, download_voices
 
-        from .audio.voices import VoiceRegistry
+        from .audio.voices import VoiceRegistry, core_voice_packages
 
         root = resolve(self.config.voice.voice_dir)
         # The cloning model is two gigabytes on top and only asked for by
         # name, so when it is asked for it shares the bar with the ordinary
         # voices rather than having a step of its own the panel would have to
         # know about.
+        which = "all" if all_voices else "core"
+        if self.config.voice.engine == "piper" and not all_voices and not hq:
+            which = ",".join(spec.key for spec in CATALOGUE if spec.core)
         download_voices(
-            "all" if all_voices else "core", root=root, force=force,
+            which, root=root, force=force,
             on_progress=self._progress("voices", 0.0, 0.5 if hq else 1.0),
         )
         if hq:
@@ -321,6 +328,9 @@ class Installer:
         # The last filename to go past is not a result. What the pilot wants
         # to read when the bar fills is how many controllers they now have.
         registry = VoiceRegistry(root, engine=self.config.voice.engine)
+        if any(not package["installed"] for package in core_voice_packages(
+                root, self.config.voice.engine)):
+            raise RuntimeError("The voice download is incomplete. Please try again.")
         available = registry.available()
         accents = len({spec.accent for spec in available
                        if spec.engine == "piper" and spec.accent not in ("gb", "us")})
@@ -468,11 +478,11 @@ def shipped_prompts(root) -> list:
 
 
 def _voices_present(config: Config) -> bool:
-    from .audio.voices import VoiceRegistry
+    from .audio.voices import core_voice_packages
 
     try:
-        return bool(VoiceRegistry(resolve(config.voice.voice_dir),
-                                  engine=config.voice.engine).available())
+        return all(package["installed"] for package in core_voice_packages(
+            resolve(config.voice.voice_dir), config.voice.engine))
     except Exception:                                # pragma: no cover
         return False
 

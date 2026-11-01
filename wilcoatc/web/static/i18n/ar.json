@@ -1,4 +1,6 @@
 {
+  "setup.missing_voices": "حزم الأصوات المفقودة: {packages}",
+  "setup.download_voices": "تنزيل الأصوات المفقودة",
   "nav.comms": "الاتصالات",
   "nav.airspace": "المجال الجوي",
   "nav.frequencies": "الترددات",

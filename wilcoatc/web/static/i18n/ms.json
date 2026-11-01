@@ -1,4 +1,6 @@
 {
+  "setup.missing_voices": "Pakej suara yang tiada: {packages}",
+  "setup.download_voices": "Muat turun suara yang tiada",
   "nav.comms": "Radio",
   "nav.airspace": "Ruang udara",
   "nav.frequencies": "Frekuensi",

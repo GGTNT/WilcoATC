@@ -1,4 +1,6 @@
 {
+  "setup.missing_voices": "חבילות קול חסרות: {packages}",
+  "setup.download_voices": "הורדת הקולות החסרים",
   "nav.comms": "קשר",
   "nav.airspace": "מרחב אווירי",
   "nav.frequencies": "תדרים",

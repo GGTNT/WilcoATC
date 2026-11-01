@@ -1,4 +1,6 @@
 {
+  "setup.missing_voices": "Ontbrekende stempakketten: {packages}",
+  "setup.download_voices": "Ontbrekende stemmen downloaden",
   "nav.comms": "Radio",
   "nav.airspace": "Luchtruim",
   "nav.frequencies": "Frequenties",

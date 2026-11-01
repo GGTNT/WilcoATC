@@ -1,4 +1,6 @@
 {
+  "setup.missing_voices": "अनुपलब्ध आवाज़ पैकेज: {packages}",
+  "setup.download_voices": "अनुपलब्ध आवाज़ें डाउनलोड करें",
   "nav.comms": "रेडियो",
   "nav.airspace": "वायुक्षेत्र",
   "nav.frequencies": "आवृत्तियाँ",

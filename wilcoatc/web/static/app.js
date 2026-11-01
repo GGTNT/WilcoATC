@@ -333,6 +333,8 @@ function connect() {
       app.setup = payload.setup;
       paintSetup();
       paintComponents();
+      if (!app.setup.running && app.setup.steps.some(
+        (step) => step.key === "voices" && step.state === "done")) loadSettings();
       if (app.onboard && app.onboard.step === OB_DOWNLOADS) paintObDownloads();
     } else if (payload.kind === "update") {
       app.update = payload.update;
@@ -3008,11 +3010,33 @@ async function pickPerf(model, where) {
   }
 }
 
+function missingVoicePackagesText(state) {
+  const names = ((state && state.voice_packages) || [])
+    .filter((pack) => !pack.installed)
+    .map((pack) => pack.language
+      ? `${voiceCountry(pack)} (${pack.name})` : pack.name);
+  return names.length
+    ? t("setup.missing_voices", "Missing voice packages: {packages}")
+      .replace("{packages}", names.join(" · "))
+    : "";
+}
+
 function paintComponents() {
   const box = $("parts");
   const state = app.setup;
   if (!state) return;
   paintComponentsAlert();
+  const missingVoices = state.missing.includes("voices");
+  const voiceNote = $("missing-voice-packages");
+  if (voiceNote) {
+    voiceNote.textContent = missingVoicePackagesText(state);
+    voiceNote.hidden = !missingVoices || !voiceNote.textContent;
+  }
+  const downloadVoices = $("download-voices");
+  if (downloadVoices) {
+    downloadVoices.hidden = !missingVoices;
+    downloadVoices.disabled = Boolean(state.running);
+  }
   paintPerf("set-perf", Boolean(state.hq_available), "settings");
   if (!box) return;
 
@@ -3064,13 +3088,13 @@ function paintComponentsAlert() {
   }
   const names = missing.map((key) => {
     const named = SETUP_NAMES[key];
-    return named ? t(named[0], named[1]) : key;
+    return key === "voices" && missingVoicePackagesText(state)
+      || (named ? t(named[0], named[1]) : key);
   });
   const megabytes = missing.reduce(
     (total, key) => total + ((state.sizes_mb || {})[key] || 0), 0);
-  text($("components-alert-title"), missing.includes("voices")
-    ? t("alert.no_voices", "The controllers have no voice yet")
-    : t("alert.missing_title", "Something has not downloaded"));
+  text($("components-alert-title"),
+       t("alert.missing_title", "Something has not downloaded"));
   text($("components-alert-text"),
        `${names.join(" · ")} — ${megabytes} MB`);
   bar.hidden = false;
@@ -3086,7 +3110,10 @@ function paintSetup() {
   // steps were asked for. Before one, the list is whatever is not installed,
   // or everything when the pilot opened this with nothing missing.
   const planned = state.missing.length ? state.missing : Object.keys(SETUP_NAMES);
-  const steps = state.steps.length ? state.steps
+  // A completed earlier run must not hide a package lost since then.
+  const stale = !state.running && state.missing.some((key) =>
+    !state.steps.some((step) => step.key === key && step.state === "failed"));
+  const steps = state.steps.length && !stale ? state.steps
     : planned.map((key) => ({ key, state: "pending", progress: 0, detail: "" }));
 
   box.textContent = "";
@@ -3120,7 +3147,8 @@ function paintSetup() {
 
     const detail = document.createElement("div");
     detail.className = "detail";
-    detail.textContent = step.error || step.detail || "";
+    detail.textContent = step.error || step.detail
+      || (step.key === "voices" ? missingVoicePackagesText(state) : "");
 
     row.append(top, bar, detail);
     box.append(row);
@@ -3155,7 +3183,7 @@ function paintSetup() {
   hide($("setup-vatglasses") && $("setup-vatglasses").closest("label"),
        extras.vatglasses);
 
-  const finished = !state.running && state.steps.length > 0;
+  const finished = !state.running && state.steps.length > 0 && !stale;
   hide($("setup-start"), state.running || (finished && failed.length === 0));
   hide($("setup-cancel"), !state.running);
   hide($("setup-later"), state.running || finished);
@@ -3243,7 +3271,18 @@ function doctorText() {
     .join("\n");
 }
 
+async function downloadMissingVoices() {
+  openSetup();
+  const result = await post("/api/setup", { steps: ["voices"] });
+  if (result && result.setup) {
+    app.setup = result.setup;
+    paintSetup();
+    paintComponents();
+  }
+}
+
 function wireComponents() {
+  on($("download-voices"), "click", downloadMissingVoices);
   on($("setup-open"), "click", () => { loadSetup(); openSetup(); });
   on($("components-alert-fix"), "click", () => { loadSetup(); openSetup(); });
   on($("setup-later"), "click", () => $("setup-dialog").close());

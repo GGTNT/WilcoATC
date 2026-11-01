@@ -1,4 +1,6 @@
 {
+  "setup.missing_voices": "Các gói giọng nói còn thiếu: {packages}",
+  "setup.download_voices": "Tải các giọng nói còn thiếu",
   "nav.comms": "Vô tuyến",
   "nav.airspace": "Vùng trời",
   "nav.frequencies": "Tần số",

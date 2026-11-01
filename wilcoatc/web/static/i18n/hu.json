@@ -1,4 +1,6 @@
 {
+  "setup.missing_voices": "Hiányzó hangcsomagok: {packages}",
+  "setup.download_voices": "Hiányzó hangok letöltése",
   "nav.comms": "Rádió",
   "nav.airspace": "Légtér",
   "nav.frequencies": "Frekvenciák",

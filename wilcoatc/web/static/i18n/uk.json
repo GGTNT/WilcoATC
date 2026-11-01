@@ -1,4 +1,6 @@
 {
+  "setup.missing_voices": "Відсутні голосові пакети: {packages}",
+  "setup.download_voices": "Завантажити відсутні голоси",
   "nav.comms": "Зв'язок",
   "nav.airspace": "Повітряний простір",
   "nav.frequencies": "Частоти",
