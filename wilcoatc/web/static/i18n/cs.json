@@ -1,4 +1,6 @@
 {
+  "setup.missing_voices": "Chybějící hlasové balíčky: {packages}",
+  "setup.download_voices": "Stáhnout chybějící hlasy",
   "nav.comms": "Rádio",
   "nav.airspace": "Vzdušný prostor",
   "nav.frequencies": "Frekvence",

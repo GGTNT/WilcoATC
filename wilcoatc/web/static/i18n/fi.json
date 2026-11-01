@@ -1,4 +1,6 @@
 {
+  "setup.missing_voices": "Puuttuvat äänipaketit: {packages}",
+  "setup.download_voices": "Lataa puuttuvat äänet",
   "nav.comms": "Radio",
   "nav.airspace": "Ilmatila",
   "nav.frequencies": "Taajuudet",

@@ -1,4 +1,6 @@
 {
+  "setup.missing_voices": "Manjkajoči glasovni paketi: {packages}",
+  "setup.download_voices": "Prenesi manjkajoče glasove",
   "nav.comms": "Radio",
   "nav.airspace": "Zračni prostor",
   "nav.frequencies": "Frekvence",

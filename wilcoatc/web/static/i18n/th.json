@@ -1,4 +1,6 @@
 {
+  "setup.missing_voices": "แพ็กเกจเสียงที่ขาดหายไป: {packages}",
+  "setup.download_voices": "ดาวน์โหลดเสียงที่ขาดหายไป",
   "nav.comms": "วิทยุ",
   "nav.airspace": "ห้วงอากาศ",
   "nav.frequencies": "ความถี่",

@@ -1,4 +1,6 @@
 {
+  "setup.missing_voices": "Missing voice packages: {packages}",
+  "setup.download_voices": "Download missing voices",
   "nav.comms": "Comms",
   "nav.airspace": "Airspace",
   "nav.frequencies": "Frequencies",

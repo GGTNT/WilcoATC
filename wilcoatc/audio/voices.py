@@ -102,10 +102,56 @@ KOKORO_VOICES = "voices-v1.0.bin"
 SUPERTONIC_DIR = "supertonic3"
 SUPERTONIC_REPO = "Supertone/supertonic-3"
 SUPERTONIC_MODEL = "supertonic-3"
-#: The file whose presence means the download finished. Any of the four would
-#: do: the package downloads to a temporary folder and moves it into place, so
-#: a partial install is not a state this can be in.
+#: The main graph, also used as a representative path for a voice. Readiness
+#: checks every asset: an older or interrupted copy may leave just this file.
 SUPERTONIC_SENTINEL = "onnx/vocoder.onnx"
+SUPERTONIC_FILES = (
+    "onnx/duration_predictor.onnx", "onnx/text_encoder.onnx",
+    "onnx/vector_estimator.onnx", SUPERTONIC_SENTINEL,
+    "onnx/tts.json", "onnx/unicode_indexer.json",
+    *(f"voice_styles/{sex}{number}.json"
+      for sex in "MF" for number in range(1, 6)),
+)
+
+
+def _nonempty(path: Path) -> bool:
+    try:
+        return path.is_file() and path.stat().st_size > 0
+    except OSError:
+        return False
+
+
+def supertonic_files_present(root: Path = VOICE_DIR) -> bool:
+    """A complete model, including all ten speakers, without loading it."""
+    return all(_nonempty(root / SUPERTONIC_DIR / name)
+               for name in SUPERTONIC_FILES)
+
+
+def core_voice_packages(root: Path = VOICE_DIR,
+                        engine: str = "auto") -> list[dict]:
+    """The packages the core downloader installs, checked file by file.
+
+    A single foreign Piper voice used to mark the entire installation as
+    complete, even after Kokoro was retired and no English model remained.
+    Optional accent and cloning downloads are deliberately outside this set.
+    An explicitly Piper-only setup does not require Supertonic.
+    """
+    root = Path(root)
+    packages = []
+    if (engine or "auto").strip().lower() != "piper":
+        packages.append({"key": "supertonic", "name": "Supertonic 3",
+                         "installed": supertonic_files_present(root)})
+    groups: dict[tuple[str, str], list[VoiceSpec]] = {}
+    for spec in CATALOGUE:
+        if spec.core:
+            groups.setdefault((spec.language, spec.accent), []).append(spec)
+    for (language, accent), specs in groups.items():
+        paths = {root / (spec.filename + suffix)
+                 for spec in specs for suffix in ("", ".json")}
+        packages.append({"key": f"piper-{accent}", "name": "Piper",
+                         "language": language, "accent": accent,
+                         "installed": all(_nonempty(path) for path in paths)})
+    return packages
 
 # Chatterbox: the weights live one folder per model under this, and the
 # reference clips a controller is cloned from live in ``prompts`` beside them.
@@ -1138,10 +1184,7 @@ class VoiceRegistry:
         The same two halves, and for the same reason, as
         :meth:`kokoro_installed`.
         """
-        base = self.root / SUPERTONIC_DIR
-        if not (base / SUPERTONIC_SENTINEL).exists():
-            return False
-        if not (base / "voice_styles").exists():
+        if not supertonic_files_present(self.root):
             return False
         from importlib.util import find_spec
 
@@ -1215,7 +1258,9 @@ class VoiceRegistry:
             clones = list(chatterbox_catalogue(
                 self.root, VARIANTS[variant_of(self.hq_model)]["languages"]))
 
-        piper = [v for v in CATALOGUE if v.path(self.root).exists()]
+        piper = [v for v in CATALOGUE
+                 if _nonempty(v.path(self.root))
+                 and _nonempty(self.root / (v.filename + ".json"))]
         # Under the cloning tier the ordinary cast is the ``auto`` one: the
         # clones cover the accents they have clips for and everything else is
         # answered as it would be without them.
@@ -1656,7 +1701,7 @@ def download_supertonic(root: Path = VOICE_DIR, force: bool = False,
     import shutil
 
     base = root / SUPERTONIC_DIR
-    if (base / SUPERTONIC_SENTINEL).exists() and not force:
+    if supertonic_files_present(root) and not force:
         return [base / SUPERTONIC_SENTINEL]
 
     try:

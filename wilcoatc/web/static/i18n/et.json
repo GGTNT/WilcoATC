@@ -1,4 +1,6 @@
 {
+  "setup.missing_voices": "Puuduvad häälepaketid: {packages}",
+  "setup.download_voices": "Laadi puuduvad hääled alla",
   "nav.comms": "Raadio",
   "nav.airspace": "Õhuruum",
   "nav.frequencies": "Sagedused",

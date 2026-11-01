@@ -1,4 +1,6 @@
 {
+  "setup.missing_voices": "Fehlende Sprachpakete: {packages}",
+  "setup.download_voices": "Fehlende Stimmen herunterladen",
   "nav.comms": "Funk",
   "nav.airspace": "Luftraum",
   "nav.frequencies": "Frequenzen",

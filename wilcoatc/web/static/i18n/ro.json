@@ -1,4 +1,6 @@
 {
+  "setup.missing_voices": "Pachete vocale lipsă: {packages}",
+  "setup.download_voices": "Descarcă vocile lipsă",
   "nav.comms": "Radio",
   "nav.airspace": "Spațiu aerian",
   "nav.frequencies": "Frecvențe",

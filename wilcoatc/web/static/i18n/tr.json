@@ -1,4 +1,6 @@
 {
+  "setup.missing_voices": "Eksik ses paketleri: {packages}",
+  "setup.download_voices": "Eksik sesleri indir",
   "nav.comms": "Telsiz",
   "nav.airspace": "Hava sahası",
   "nav.frequencies": "Frekanslar",

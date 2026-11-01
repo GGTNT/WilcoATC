@@ -1,4 +1,6 @@
 {
+  "setup.missing_voices": "Pacotes de voz em falta: {packages}",
+  "setup.download_voices": "Transferir as vozes em falta",
   "nav.comms": "Rádio",
   "nav.airspace": "Espaço aéreo",
   "nav.frequencies": "Frequências",

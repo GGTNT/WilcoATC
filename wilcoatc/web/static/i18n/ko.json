@@ -1,4 +1,6 @@
 {
+  "setup.missing_voices": "누락된 음성 패키지: {packages}",
+  "setup.download_voices": "누락된 음성 다운로드",
   "nav.comms": "무선",
   "nav.airspace": "공역",
   "nav.frequencies": "주파수",

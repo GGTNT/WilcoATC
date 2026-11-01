@@ -1,4 +1,6 @@
 {
+  "setup.missing_voices": "不足している音声パッケージ: {packages}",
+  "setup.download_voices": "不足している音声をダウンロード",
   "nav.comms": "通信",
   "nav.airspace": "空域",
   "nav.frequencies": "周波数",

@@ -1,4 +1,6 @@
 {
+  "setup.missing_voices": "Manglende stemmepakker: {packages}",
+  "setup.download_voices": "Download manglende stemmer",
   "nav.comms": "Radio",
   "nav.airspace": "Luftrum",
   "nav.frequencies": "Frekvenser",

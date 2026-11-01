@@ -1,4 +1,6 @@
 {
+  "setup.missing_voices": "Trūkstami balso paketai: {packages}",
+  "setup.download_voices": "Atsisiųsti trūkstamus balsus",
   "nav.comms": "Radijas",
   "nav.airspace": "Oro erdvė",
   "nav.frequencies": "Dažniai",
